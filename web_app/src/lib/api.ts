@@ -1,3 +1,5 @@
+import { AxiosError } from "axios"
+import axios from "axios"
 import {
   Filename,
   GenInfo,
@@ -8,7 +10,12 @@ import {
 } from "@/lib/types"
 import { Settings } from "@/lib/states"
 import { convertToBase64, srcToFile } from "@/lib/utils"
-import axios from "axios"
+import {
+  HD_STRATEGY,
+  HD_STRATEGY_CROP_MARGIN,
+  HD_STRATEGY_CROP_TRIGGER_SIZE,
+  HD_STRATEGY_RESIZE_LIMIT,
+} from "@/lib/const"
 
 export const API_ENDPOINT = import.meta.env.DEV
   ? import.meta.env.VITE_BACKEND + "/api/v1"
@@ -18,12 +25,28 @@ const api = axios.create({
   baseURL: API_ENDPOINT,
 })
 
-const throwErrors = async (res: any): Promise<never> => {
-  const errMsg = await res.json()
-  throw new Error(
-    `${errMsg.errors}\nPlease take a screenshot of the detailed error message in your terminal`
-  )
-}
+api.interceptors.response.use(
+  (res) => res,
+  async (error: AxiosError) => {
+    let detail = ""
+    try {
+      const data = error.response?.data
+      if (data instanceof Blob) {
+        detail = (JSON.parse(await data.text()) as { errors?: string }).errors ?? ""
+      } else if (data && typeof data === "object") {
+        const body = data as { errors?: string; detail?: string }
+        detail = body.errors ?? body.detail ?? ""
+      } else if (typeof data === "string") {
+        detail = data
+      }
+    } catch {
+      // ignore parsing errors, fall back to the axios error message
+    }
+    throw new Error(
+      `${detail || error.message}\nPlease take a screenshot of the detailed error message in your terminal`
+    )
+  }
+)
 
 export default async function inpaint(
   imageFile: File,
@@ -39,12 +62,9 @@ export default async function inpaint(
     ? await convertToBase64(paintByExampleImage)
     : null
 
-  const res = await fetch(`${API_ENDPOINT}/inpaint`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
+  const res = await api.post(
+    "/inpaint",
+    {
       image: imageBase64,
       mask: maskBase64,
       ldm_steps: settings.ldmSteps,
@@ -52,10 +72,10 @@ export default async function inpaint(
       zits_wireframe: settings.zitsWireframe,
       cv2_flag: settings.cv2Flag,
       cv2_radius: settings.cv2Radius,
-      hd_strategy: "Crop",
-      hd_strategy_crop_triger_size: 640,
-      hd_strategy_crop_margin: 128,
-      hd_trategy_resize_imit: 2048,
+      hd_strategy: HD_STRATEGY,
+      hd_strategy_crop_trigger_size: HD_STRATEGY_CROP_TRIGGER_SIZE,
+      hd_strategy_crop_margin: HD_STRATEGY_CROP_MARGIN,
+      hd_strategy_resize_limit: HD_STRATEGY_RESIZE_LIMIT,
       prompt: settings.prompt,
       negative_prompt: settings.negativePrompt,
       use_croper: settings.showCropper,
@@ -90,16 +110,13 @@ export default async function inpaint(
       powerpaint_task: settings.showExtender
         ? PowerPaintTask.outpainting
         : settings.powerpaintTask,
-    }),
-  })
-  if (res.ok) {
-    const blob = await res.blob()
-    return {
-      blob: URL.createObjectURL(blob),
-      seed: res.headers.get("X-Seed"),
-    }
+    },
+    { responseType: "blob" }
+  )
+  return {
+    blob: URL.createObjectURL(res.data),
+    seed: res.headers["x-seed"] as string | undefined,
   }
-  throw await throwErrors(res)
 }
 
 export async function getServerConfig(): Promise<ServerConfig> {
@@ -133,58 +150,36 @@ export async function runPlugin(
 ) {
   const imageBase64 = await convertToBase64(imageFile)
   const p = genMask ? "run_plugin_gen_mask" : "run_plugin_gen_image"
-  const res = await fetch(`${API_ENDPOINT}/${p}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
+  const res = await api.post(
+    `/${p}`,
+    {
       name,
       image: imageBase64,
       scale: upscale,
       clicks,
-    }),
+    },
+    { responseType: "blob" }
+  )
+  return { blob: URL.createObjectURL(res.data) }
+}
+
+async function getMedia(tab: string, filename: string): Promise<Blob> {
+  const res = await api.get("/media_file", {
+    params: { tab, filename },
+    responseType: "blob",
   })
-  if (res.ok) {
-    const blob = await res.blob()
-    return { blob: URL.createObjectURL(blob) }
-  }
-  throw await throwErrors(res)
+  return res.data
 }
 
 export async function getMediaFile(tab: string, filename: string) {
-  const res = await fetch(
-    `${API_ENDPOINT}/media_file?tab=${tab}&filename=${encodeURIComponent(
-      filename
-    )}`,
-    {
-      method: "GET",
-    }
-  )
-  if (res.ok) {
-    const blob = await res.blob()
-    const file = new File([blob], filename, {
-      type: res.headers.get("Content-Type") ?? "image/png",
-    })
-    return file
-  }
-  throw await throwErrors(res)
+  const blob = await getMedia(tab, filename)
+  return new File([blob], filename, {
+    type: blob.type || "image/png",
+  })
 }
 
 export async function getMediaBlob(tab: string, filename: string) {
-  const res = await fetch(
-    `${API_ENDPOINT}/media_file?tab=${tab}&filename=${encodeURIComponent(
-      filename
-    )}`,
-    {
-      method: "GET",
-    }
-  )
-  if (res.ok) {
-    const blob = await res.blob()
-    return blob
-  }
-  throw await throwErrors(res)
+  return getMedia(tab, filename)
 }
 
 export async function getMedias(tab: string): Promise<Filename[]> {
@@ -200,15 +195,8 @@ export async function downloadToOutput(
   const file = await srcToFile(image.src, filename, mimeType)
   const fd = new FormData()
   fd.append("file", file)
-
   try {
-    const res = await fetch(`${API_ENDPOINT}/save_image`, {
-      method: "POST",
-      body: fd,
-    })
-    if (!res.ok) {
-      throw await throwErrors(res)
-    }
+    await api.post("/save_image", fd)
   } catch (error) {
     throw new Error(`Something went wrong: ${error}`)
   }
@@ -221,31 +209,20 @@ export async function getGenInfo(file: File): Promise<GenInfo> {
   return res.data
 }
 
-export async function getSamplers(): Promise<string[]> {
-  const res = await api.post("/samplers")
-  return res.data
-}
-
 export async function postAdjustMask(
   mask: File | Blob,
   operate: "expand" | "shrink" | "reverse",
   kernel_size: number
 ) {
   const maskBase64 = await convertToBase64(mask)
-  const res = await fetch(`${API_ENDPOINT}/adjust_mask`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
+  const res = await api.post(
+    "/adjust_mask",
+    {
       mask: maskBase64,
       operate: operate,
       kernel_size: kernel_size,
-    }),
-  })
-  if (res.ok) {
-    const blob = await res.blob()
-    return blob
-  }
-  throw await throwErrors(res)
+    },
+    { responseType: "blob" }
+  )
+  return res.data
 }

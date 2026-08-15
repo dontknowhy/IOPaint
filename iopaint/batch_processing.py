@@ -18,7 +18,6 @@ from rich.progress import (
 )
 
 from iopaint.helper import pil_to_bytes
-from iopaint.model.utils import torch_gc
 from iopaint.model_manager import ModelManager
 from iopaint.schema import InpaintRequest
 
@@ -121,7 +120,6 @@ def batch_inpaint(
                 fw.write(img_bytes)
 
             progress.update(task, advance=1)
-            torch_gc()
             # pid = psutil.Process().pid
             # memory_info = psutil.Process(pid).memory_info()
             # memory_in_mb = memory_info.rss / (1024 * 1024)

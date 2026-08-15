@@ -1,7 +1,7 @@
 import { type ClassValue, clsx } from "clsx"
 import { SyntheticEvent } from "react"
 import { twMerge } from "tailwind-merge"
-import { LineGroup } from "./types"
+import { LineGroup, Point } from "./types"
 import { BRUSH_COLOR } from "./const"
 
 export function cn(...inputs: ClassValue[]) {
@@ -28,16 +28,6 @@ export function keepGUIAlive() {
   const intervalRequest = 3 * 1000
   keepAliveServer()
   setInterval(keepAliveServer, intervalRequest)
-}
-
-export function dataURItoBlob(dataURI: string) {
-  const mime = dataURI.split(",")[0].split(":")[1].split(";")[0]
-  const binary = atob(dataURI.split(",")[1])
-  const array = []
-  for (let i = 0; i < binary.length; i += 1) {
-    array.push(binary.charCodeAt(i))
-  }
-  return new Blob([new Uint8Array(array)], { type: mime })
 }
 
 export function loadImage(image: HTMLImageElement, src: string) {
@@ -78,24 +68,18 @@ export function canvasToImage(
   })
 }
 
-export function fileToImage(file: File): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      const image = new Image()
-      image.onload = () => {
-        resolve(image)
-      }
-      image.onerror = () => {
-        reject("无法加载图像。")
-      }
-      image.src = reader.result as string
-    }
-    reader.onerror = () => {
-      reject("无法读取文件。")
-    }
-    reader.readAsDataURL(file)
-  })
+export function getErrorMessage(e: unknown): string {
+  if (e instanceof Error) {
+    return e.message
+  }
+  if (typeof e === "string") {
+    return e
+  }
+  try {
+    return JSON.stringify(e)
+  } catch {
+    return String(e)
+  }
 }
 
 export function srcToFile(src: string, fileName: string, mimeType: string) {
@@ -116,15 +100,18 @@ export async function askWritePermission() {
       name: "clipboard-write" as PermissionName,
     })
     return state === "granted"
-  } catch (error) {
+  } catch {
     // Browser compatibility / Security error (ONLY HTTPS) ...
     return false
   }
 }
 
-function canvasToBlob(canvas: HTMLCanvasElement, mime: string): Promise<any> {
+export function canvasToBlob(
+  canvas: HTMLCanvasElement,
+  mime = "image/png"
+): Promise<Blob> {
   return new Promise((resolve, reject) =>
-    canvas.toBlob(async (d) => {
+    canvas.toBlob((d) => {
       if (d) {
         resolve(d)
       } else {
@@ -134,7 +121,7 @@ function canvasToBlob(canvas: HTMLCanvasElement, mime: string): Promise<any> {
   )
 }
 
-const setToClipboard = async (blob: any) => {
+const setToClipboard = async (blob: Blob) => {
   const data = [new ClipboardItem({ [blob.type]: blob })]
   await navigator.clipboard.write(data)
 }
@@ -154,7 +141,7 @@ export async function copyCanvasImage(canvas: HTMLCanvasElement) {
   try {
     await setToClipboard(blob)
   } catch {
-    console.log("Copy image failed!")
+    console.error("Copy image failed!")
   }
 }
 
@@ -181,17 +168,32 @@ export function downloadImage(uri: string, name: string) {
 
 export function mouseXY(ev: SyntheticEvent) {
     const mouseEvent = ev.nativeEvent as MouseEvent
-    // Handle mask drawing coordinate on mobile/tablet devices
+    // Handle mask drawing coordinate on mobile/tablet devices.
+    // On touchend `touches` is empty, so fall back to `changedTouches`.
     if ('touches' in ev) {
-        const rect = (ev.target as HTMLCanvasElement).getBoundingClientRect();
-        const touches = ev.touches as (Touch & { target: HTMLCanvasElement })[]
-        const touch = touches[0]
-        return {
-            x: (touch.clientX - rect.x) / rect.width * touch.target.offsetWidth,
-            y: (touch.clientY - rect.y) / rect.height * touch.target.offsetHeight,
+        const touchEvent = ev as unknown as TouchEvent
+        const touch =
+            touchEvent.touches[0] || touchEvent.changedTouches[0]
+        if (touch) {
+            const target = ev.target as HTMLCanvasElement
+            const rect = target.getBoundingClientRect()
+            return {
+                x: (touch.clientX - rect.x) / rect.width * target.offsetWidth,
+                y: (touch.clientY - rect.y) / rect.height * target.offsetHeight,
+            }
         }
     }
     return {x: mouseEvent.offsetX, y: mouseEvent.offsetY}
+}
+
+// 把某个具体的 Touch 坐标换算成画布（图片）坐标。
+// 多指场景下需要根据特定手指（identifier）来绘制，不能用 touches[0]。
+export function touchPointXY(touch: Touch, target: HTMLElement): Point {
+  const rect = target.getBoundingClientRect()
+  return {
+    x: ((touch.clientX - rect.x) / rect.width) * target.offsetWidth,
+    y: ((touch.clientY - rect.y) / rect.height) * target.offsetHeight,
+  }
 }
 
 export function drawLines(

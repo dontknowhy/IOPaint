@@ -125,4 +125,5 @@ const ImageUploadButton = (props: UploadButtonProps) => {
   )
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export { Button, IconButton, ImageUploadButton, buttonVariants }

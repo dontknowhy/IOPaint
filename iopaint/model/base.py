@@ -129,10 +129,11 @@ class InpaintModel:
                     (origin_size[1], origin_size[0]),
                     interpolation=cv2.INTER_CUBIC,
                 )
-                original_pixel_indices = mask < 127
-                inpaint_result[original_pixel_indices] = image[:, :, ::-1][
-                    original_pixel_indices
-                ]
+                np.copyto(
+                    inpaint_result,
+                    image[:, :, ::-1],
+                    where=(mask < 127)[..., np.newaxis],
+                )
 
         if inpaint_result is None:
             inpaint_result = self._pad_forward(image, mask, config)
@@ -193,19 +194,13 @@ class InpaintModel:
 
     def _calculate_cdf(self, histogram):
         cdf = histogram.cumsum()
-        normalized_cdf = cdf / float(cdf.max())
+        normalized_cdf = cdf / float(cdf[-1])
         return normalized_cdf
 
     def _calculate_lookup(self, source_cdf, reference_cdf):
-        lookup_table = np.zeros(256)
-        lookup_val = 0
-        for source_index, source_val in enumerate(source_cdf):
-            for reference_index, reference_val in enumerate(reference_cdf):
-                if reference_val >= source_val:
-                    lookup_val = reference_index
-                    break
-            lookup_table[source_index] = lookup_val
-        return lookup_table
+        # For each source index, find the first reference index whose CDF is
+        # greater than or equal to the source CDF value.
+        return np.clip(np.searchsorted(reference_cdf, source_cdf), 0, 255)
 
     def _match_histograms(self, source, reference, mask):
         transformed_channels = []
@@ -274,6 +269,7 @@ class DiffusionInpaintModel(InpaintModel):
     def __init__(self, device, **kwargs):
         self.model_info = kwargs["model_info"]
         self.model_id_or_path = self.model_info.path
+        self._scheduler_cache = {}
         super().__init__(device, **kwargs)
 
     @torch.no_grad()
@@ -385,7 +381,11 @@ class DiffusionInpaintModel(InpaintModel):
         if config.sd_lcm_lora and self.model_info.support_lcm_lora:
             sd_sampler = SDSampler.lcm
             logger.info(f"LCM Lora enabled, use {sd_sampler} sampler")
-        scheduler = get_scheduler(sd_sampler, scheduler_config)
+        cache_key = (sd_sampler, config.sd_lcm_lora)
+        scheduler = self._scheduler_cache.get(cache_key)
+        if scheduler is None:
+            scheduler = get_scheduler(sd_sampler, scheduler_config)
+            self._scheduler_cache[cache_key] = scheduler
         self.model.scheduler = scheduler
 
     def forward_pre_process(self, image, mask, config):

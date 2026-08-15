@@ -3,8 +3,7 @@ import * as React from "react"
 import { cn } from "@/lib/utils"
 import { useStore } from "@/lib/states"
 
-export interface InputProps
-  extends React.InputHTMLAttributes<HTMLInputElement> {}
+export type InputProps = React.InputHTMLAttributes<HTMLInputElement>
 
 const Input = React.forwardRef<HTMLInputElement, InputProps>(
   ({ className, type, ...props }, ref) => {
@@ -54,6 +53,7 @@ const NumberInput = React.forwardRef<HTMLInputElement, NumberInputProps>(
       if (value !== numberValue.toString() + ".") {
         setValue(numberValue.toString())
       }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [numberValue])
 
     const onInput = (evt: React.FormEvent<HTMLInputElement>) => {

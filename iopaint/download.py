@@ -4,6 +4,7 @@ import os
 from functools import lru_cache
 from typing import List, Optional
 
+import torch
 from iopaint.schema import ModelType, ModelInfo
 from loguru import logger
 from pathlib import Path
@@ -16,7 +17,6 @@ from iopaint.const import (
     DIFFUSERS_SDXL_INPAINT_CLASS_NAME,
     ANYTEXT_NAME,
 )
-from iopaint.model.original_sd_configs import get_config_files
 
 
 def cli_download_model(model: str):
@@ -45,64 +45,93 @@ def folder_name_to_show_name(name: str) -> str:
     return name.replace("models--", "").replace("--", "/")
 
 
+_UNET_FIRST_CONV_KEYS = (
+    "model.diffusion_model.input_blocks.0.0.weight",
+    "unet.conv_in.weight",
+)
+_SDXL_MARKER_PREFIX = "conditioner."
+
+
+def _inspect_single_file(model_abs_path: str) -> Optional[tuple]:
+    """Inspect a single-file checkpoint without loading its weights.
+
+    Returns (unet_first_conv_in_channels, is_sdxl_layout) or None on failure.
+    For .safetensors only the header is read; for .ckpt the pickle must be
+    loaded once and both values are derived from the same load.
+    """
+    if model_abs_path.endswith(".safetensors"):
+        try:
+            from safetensors import safe_open
+
+            with safe_open(model_abs_path, framework="pt") as f:
+                keys = f.keys()
+                in_channels = None
+                for key in _UNET_FIRST_CONV_KEYS:
+                    if key in keys:
+                        in_channels = f.get_slice(key).get_shape()[1]
+                        break
+                is_sdxl = any(k.startswith(_SDXL_MARKER_PREFIX) for k in keys)
+                return in_channels, is_sdxl
+        except Exception as e:
+            logger.error(f"Failed to inspect {model_abs_path}: {e}")
+            return None
+
+    # .ckpt fallback: pickle must be fully loaded to inspect the keys
+    try:
+        checkpoint = torch.load(model_abs_path, map_location="cpu", weights_only=True)
+    except Exception as e:
+        logger.error(f"Failed to load {model_abs_path}: {e}")
+        return None
+    in_channels = None
+    for key in _UNET_FIRST_CONV_KEYS:
+        if key in checkpoint:
+            in_channels = checkpoint[key].shape[1]
+            break
+    is_sdxl = any(k.startswith(_SDXL_MARKER_PREFIX) for k in checkpoint.keys())
+    return in_channels, is_sdxl
+
+
 @lru_cache(maxsize=512)
 def get_sd_model_type(model_abs_path: str) -> Optional[ModelType]:
     if "inpaint" in Path(model_abs_path).name.lower():
-        model_type = ModelType.DIFFUSERS_SD_INPAINT
-    else:
-        # load once to check num_in_channels
-        from diffusers import StableDiffusionInpaintPipeline
+        return ModelType.DIFFUSERS_SD_INPAINT
 
-        try:
-            StableDiffusionInpaintPipeline.from_single_file(
-                model_abs_path,
-                load_safety_checker=False,
-                num_in_channels=9,
-                original_config_file=get_config_files()["v1"],
-            )
-            model_type = ModelType.DIFFUSERS_SD_INPAINT
-        except ValueError as e:
-            if "[320, 4, 3, 3]" in str(e):
-                model_type = ModelType.DIFFUSERS_SD
-            else:
-                logger.info(f"Ignore non sdxl file: {model_abs_path}")
-                return
-        except Exception as e:
-            logger.error(f"Failed to load {model_abs_path}: {e}")
-            return
-    return model_type
+    inspected = _inspect_single_file(model_abs_path)
+    if inspected is None:
+        logger.info(f"Ignore non sdxl file: {model_abs_path}")
+        return
+    in_channels, is_sdxl = inspected
+    if is_sdxl:
+        logger.info(f"Ignore non sdxl file: {model_abs_path}")
+        return
+    if in_channels == 9:
+        return ModelType.DIFFUSERS_SD_INPAINT
+    if in_channels == 4:
+        return ModelType.DIFFUSERS_SD
+    logger.info(f"Ignore non sdxl file: {model_abs_path}")
+    return
 
 
 @lru_cache()
 def get_sdxl_model_type(model_abs_path: str) -> Optional[ModelType]:
     if "inpaint" in model_abs_path:
-        model_type = ModelType.DIFFUSERS_SDXL_INPAINT
-    else:
-        # load once to check num_in_channels
-        from diffusers import StableDiffusionXLInpaintPipeline
+        return ModelType.DIFFUSERS_SDXL_INPAINT
 
-        try:
-            model = StableDiffusionXLInpaintPipeline.from_single_file(
-                model_abs_path,
-                load_safety_checker=False,
-                num_in_channels=9,
-                original_config_file=get_config_files()["xl"],
-            )
-            if model.unet.config.in_channels == 9:
-                # https://github.com/huggingface/diffusers/issues/6610
-                model_type = ModelType.DIFFUSERS_SDXL_INPAINT
-            else:
-                model_type = ModelType.DIFFUSERS_SDXL
-        except ValueError as e:
-            if "[320, 4, 3, 3]" in str(e):
-                model_type = ModelType.DIFFUSERS_SDXL
-            else:
-                logger.info(f"Ignore non sdxl file: {model_abs_path}")
-                return
-        except Exception as e:
-            logger.error(f"Failed to load {model_abs_path}: {e}")
-            return
-    return model_type
+    inspected = _inspect_single_file(model_abs_path)
+    if inspected is None:
+        logger.info(f"Ignore non sdxl file: {model_abs_path}")
+        return
+    in_channels, is_sdxl = inspected
+    if not is_sdxl:
+        logger.info(f"Ignore non sdxl file: {model_abs_path}")
+        return
+    if in_channels == 9:
+        # https://github.com/huggingface/diffusers/issues/6610
+        return ModelType.DIFFUSERS_SDXL_INPAINT
+    if in_channels == 4:
+        return ModelType.DIFFUSERS_SDXL
+    logger.info(f"Ignore non sdxl file: {model_abs_path}")
+    return
 
 
 def scan_single_file_diffusion_models(cache_dir) -> List[ModelInfo]:
@@ -164,9 +193,6 @@ def scan_single_file_diffusion_models(cache_dir) -> List[ModelInfo]:
             continue
 
         sdxl_model_type_cache[it.name] = model_type
-        if stable_diffusion_xl_dir.exists():
-            with open(sdxl_cache_file, "w", encoding="utf-8") as fw:
-                json.dump(sdxl_model_type_cache, fw, indent=2, ensure_ascii=False)
 
         res.append(
             ModelInfo(
@@ -176,6 +202,9 @@ def scan_single_file_diffusion_models(cache_dir) -> List[ModelInfo]:
                 is_single_file_diffusers=True,
             )
         )
+    if stable_diffusion_xl_dir.exists():
+        with open(sdxl_cache_file, "w", encoding="utf-8") as fw:
+            json.dump(sdxl_model_type_cache, fw, indent=2, ensure_ascii=False)
     return res
 
 

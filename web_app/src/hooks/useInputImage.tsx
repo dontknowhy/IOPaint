@@ -29,7 +29,7 @@ export default function useInputImage() {
         }
       })
       .catch((err) => {
-        console.log(err)
+        console.error(err)
       })
   }, [setInputImage])
 

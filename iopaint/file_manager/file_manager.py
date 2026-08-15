@@ -1,7 +1,7 @@
 import os
 from io import BytesIO
 from pathlib import Path
-from typing import List
+from typing import List, Dict
 
 from PIL import Image, ImageOps, PngImagePlugin
 from fastapi import FastAPI, HTTPException
@@ -24,6 +24,8 @@ class FileManager:
 
         self.image_dir_filenames = []
         self.output_dir_filenames = []
+        # Cache of MediasResponse keyed by directory; re-reads only changed files.
+        self._media_cache: Dict[str, Dict[str, MediasResponse]] = {}
         if not self.thumbnail_directory.exists():
             self.thumbnail_directory.mkdir(parents=True)
 
@@ -79,24 +81,39 @@ class FileManager:
     def thumbnail_directory(self) -> Path:
         return self.output_dir / "thumbnails"
 
-    @staticmethod
-    def _media_names(directory: Path) -> List[MediasResponse]:
+    def _media_names(self, directory: Path) -> List[MediasResponse]:
         if directory is None:
             return []
         names = sorted([it.name for it in glob_img(directory)])
+        cache_key = str(directory.absolute())
+        cached = self._media_cache.get(cache_key, {})
+        new_cache = {}
         res = []
+        changed = False
         for name in names:
-            path = os.path.join(directory, name)
-            img = Image.open(path)
-            res.append(
-                MediasResponse(
+            path = directory / name
+            st = os.stat(path)
+            entry = cached.get(name)
+            if (
+                entry is not None
+                and entry.mtime == st.st_mtime
+                and entry.ctime == st.st_ctime
+            ):
+                new_cache[name] = entry
+            else:
+                img = Image.open(path)
+                entry = MediasResponse(
                     name=name,
                     height=img.height,
                     width=img.width,
-                    ctime=os.path.getctime(path),
-                    mtime=os.path.getmtime(path),
+                    ctime=st.st_ctime,
+                    mtime=st.st_mtime,
                 )
-            )
+                changed = True
+            new_cache[name] = entry
+            res.append(entry)
+        if changed or len(cached) != len(new_cache):
+            self._media_cache[cache_key] = new_cache
         return res
 
     def get_thumbnail(

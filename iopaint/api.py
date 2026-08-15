@@ -1,6 +1,5 @@
 import asyncio
 import os
-import threading
 import time
 import traceback
 from pathlib import Path
@@ -133,15 +132,41 @@ def api_middleware(app: FastAPI):
 
 
 global_sio: AsyncServer = None
+# The event loop the ASGI app (and therefore the socketio server) runs on.
+# Captured at startup; used to emit socketio events thread-safely from worker threads.
+main_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def capture_main_loop():
+    global main_loop
+    main_loop = asyncio.get_running_loop()
+
+
+def _log_emit_error(future):
+    exc = future.exception()
+    if exc is not None:
+        logger.warning(f"Failed to emit socketio event: {exc}")
+
+
+def emit_from_thread(sio, event: str, data=None):
+    """Emit a socketio event from a non-async (worker) thread.
+
+    socketio.AsyncServer.emit must run on the ASGI main event loop, so we
+    schedule the coroutine there instead of creating a new event loop.
+    """
+    if main_loop is None:
+        return
+    try:
+        future = asyncio.run_coroutine_threadsafe(sio.emit(event, data), main_loop)
+    except Exception as e:
+        logger.warning(f"Failed to emit {event}: {e}")
+        return
+    future.add_done_callback(_log_emit_error)
 
 
 def diffuser_callback(pipe, step: int, timestep: int, callback_kwargs: Dict = {}):
     # self: DiffusionPipeline, step: int, timestep: int, callback_kwargs: Dict
-    # logger.info(f"diffusion callback: step={step}, timestep={timestep}")
-
-    # We use asyncio loos for task processing. Perhaps in the future, we can add a processing queue similar to InvokeAI,
-    # but for now let's just start a separate event loop. It shouldn't make a difference for single person use
-    asyncio.run(global_sio.emit("diffusion_progress", {"step": step}))
+    emit_from_thread(global_sio, "diffusion_progress", {"step": step})
     return {}
 
 
@@ -150,8 +175,8 @@ class Api:
         self.app = app
         self.config = config
         self.router = APIRouter()
-        self.queue_lock = threading.Lock()
         api_middleware(self.app)
+        self.app.add_event_handler("startup", capture_main_loop)
 
         self.file_manager = self._build_file_manager()
         self.plugins = self._build_plugins()
@@ -171,13 +196,20 @@ class Api:
         self.add_api_route("/api/v1/samplers", self.api_samplers, methods=["GET"])
         self.add_api_route("/api/v1/adjust_mask", self.api_adjust_mask, methods=["POST"])
         self.add_api_route("/api/v1/save_image", self.api_save_image, methods=["POST"])
-        self.app.mount("/", StaticFiles(directory=WEB_APP_DIR, html=True), name="assets")
         # fmt: on
 
         global global_sio
         self.sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
-        self.combined_asgi_app = socketio.ASGIApp(self.sio, self.app)
+        # socketio_path 必须带 "/ws" 前缀：Starlette 的 Mount 会把完整路径
+        # （/ws/socket.io/...）原样传给子应用，否则 engineio 匹配不到 "/socket.io"，
+        # 请求会落到 FastAPI 上返回 404，前端就只能反复轮询。
+        self.combined_asgi_app = socketio.ASGIApp(
+            self.sio, self.app, socketio_path="/ws/socket.io"
+        )
+        # Mount socketio before the static file server: the "/" static mount would
+        # otherwise shadow the "/ws" socket.io endpoint.
         self.app.mount("/ws", self.combined_asgi_app)
+        self.app.mount("/", StaticFiles(directory=WEB_APP_DIR, html=True), name="assets")
         global_sio = self.sio
 
     def add_api_route(self, path: str, endpoint, **kwargs):
@@ -235,7 +267,7 @@ class Api:
 
         return ServerConfigResponse(
             plugins=plugins,
-            modelInfos=self.model_manager.scan_models(),
+            modelInfos=self.model_manager.get_available_models(),
             removeBGModel=self.config.remove_bg_model,
             removeBGModels=RemoveBGModel.values(),
             realesrganModel=self.config.realesrgan_model,
@@ -268,10 +300,10 @@ class Api:
             negative_prompt = parts[1].split("\n")[0].strip()
         return GenInfoResponse(prompt=prompt, negative_prompt=negative_prompt)
 
-    def api_inpaint(self, req: InpaintRequest):
+    async def api_inpaint(self, req: InpaintRequest):
         image, alpha_channel, infos, ext = decode_base64_to_image(req.image)
         mask, _, _, _ = decode_base64_to_image(req.mask, gray=True)
-        logger.info(f"image ext: {ext}")
+        logger.debug(f"image ext: {ext}")
 
         mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)[1]
         if image.shape[:2] != mask.shape[:2]:
@@ -281,11 +313,15 @@ class Api:
             )
 
         start = time.time()
-        rgb_np_img = self.model_manager(image, mask, req)
+        loop = asyncio.get_running_loop()
+        rgb_np_img = await loop.run_in_executor(
+            None, self.model_manager, image, mask, req
+        )
         logger.info(f"process time: {(time.time() - start) * 1000:.2f}ms")
-        torch_gc()
+        if self.config.empty_cache_after_inpaint:
+            torch_gc()
 
-        rgb_np_img = cv2.cvtColor(rgb_np_img.astype(np.uint8), cv2.COLOR_BGR2RGB)
+        rgb_np_img = cv2.cvtColor(rgb_np_img, cv2.COLOR_BGR2RGB)
         rgb_res = concat_alpha_channel(rgb_np_img, alpha_channel)
 
         res_img_bytes = pil_to_bytes(
@@ -295,7 +331,7 @@ class Api:
             infos=infos,
         )
 
-        asyncio.run(self.sio.emit("diffusion_finish"))
+        await self.sio.emit("diffusion_finish")
 
         return Response(
             content=res_img_bytes,
@@ -303,7 +339,7 @@ class Api:
             headers={"X-Seed": str(req.sd_seed)},
         )
 
-    def api_run_plugin_gen_image(self, req: RunPluginRequest):
+    async def api_run_plugin_gen_image(self, req: RunPluginRequest):
         ext = "png"
         if req.name not in self.plugins:
             raise HTTPException(status_code=422, detail="Plugin not found")
@@ -312,8 +348,12 @@ class Api:
                 status_code=422, detail="Plugin does not support output image"
             )
         rgb_np_img, alpha_channel, infos, _ = decode_base64_to_image(req.image)
-        bgr_or_rgba_np_img = self.plugins[req.name].gen_image(rgb_np_img, req)
-        torch_gc()
+        loop = asyncio.get_running_loop()
+        bgr_or_rgba_np_img = await loop.run_in_executor(
+            None, self.plugins[req.name].gen_image, rgb_np_img, req
+        )
+        if self.config.empty_cache_after_inpaint:
+            torch_gc()
 
         if bgr_or_rgba_np_img.shape[2] == 4:
             rgba_np_img = bgr_or_rgba_np_img
@@ -331,7 +371,7 @@ class Api:
             media_type=f"image/{ext}",
         )
 
-    def api_run_plugin_gen_mask(self, req: RunPluginRequest):
+    async def api_run_plugin_gen_mask(self, req: RunPluginRequest):
         if req.name not in self.plugins:
             raise HTTPException(status_code=422, detail="Plugin not found")
         if not self.plugins[req.name].support_gen_mask:
@@ -339,8 +379,12 @@ class Api:
                 status_code=422, detail="Plugin does not support output image"
             )
         rgb_np_img, _, _, _ = decode_base64_to_image(req.image)
-        bgr_or_gray_mask = self.plugins[req.name].gen_mask(rgb_np_img, req)
-        torch_gc()
+        loop = asyncio.get_running_loop()
+        bgr_or_gray_mask = await loop.run_in_executor(
+            None, self.plugins[req.name].gen_mask, rgb_np_img, req
+        )
+        if self.config.empty_cache_after_inpaint:
+            torch_gc()
         res_mask = gen_frontend_mask(bgr_or_gray_mask)
         return Response(
             content=numpy_to_bytes(res_mask, "png"),

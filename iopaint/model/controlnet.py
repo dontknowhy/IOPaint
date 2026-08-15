@@ -165,7 +165,11 @@ class ControlNet(DiffusionInpaintModel):
         return: BGR IMAGE
         """
         scheduler_config = self.model.scheduler.config
-        scheduler = get_scheduler(config.sd_sampler, scheduler_config)
+        cache_key = (config.sd_sampler, False)
+        scheduler = self._scheduler_cache.get(cache_key)
+        if scheduler is None:
+            scheduler = get_scheduler(config.sd_sampler, scheduler_config)
+            self._scheduler_cache[cache_key] = scheduler
         self.model.scheduler = scheduler
 
         img_h, img_w = image.shape[:2]

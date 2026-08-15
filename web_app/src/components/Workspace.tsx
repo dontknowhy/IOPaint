@@ -20,7 +20,7 @@ const Workspace = () => {
       updateSettings({ model })
     }
     fetchCurrentModel()
-  }, [])
+  }, [updateSettings])
 
   return (
     <>

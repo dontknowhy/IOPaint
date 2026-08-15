@@ -127,6 +127,12 @@ def start(
         None, help=OUTPUT_DIR_HELP, dir_okay=True, file_okay=False
     ),
     quality: int = Option(100, help=QUALITY_HELP),
+    empty_cache_after_inpaint: bool = Option(
+        False,
+        help="Call torch.cuda.empty_cache() after each inpainting. "
+        "Disabled by default for faster repeated inference, "
+        "enable it if you run into CUDA out of memory errors.",
+    ),
     enable_interactive_seg: bool = Option(False, help=INTERACTIVE_SEG_HELP),
     interactive_seg_model: InteractiveSegModel = Option(
         InteractiveSegModel.sam2_1_tiny, help=INTERACTIVE_SEG_MODEL_HELP
@@ -210,6 +216,7 @@ def start(
         mask_dir=mask_dir,
         output_dir=output_dir,
         quality=quality,
+        empty_cache_after_inpaint=empty_cache_after_inpaint,
         enable_interactive_seg=enable_interactive_seg,
         interactive_seg_model=interactive_seg_model,
         interactive_seg_device=interactive_seg_device,

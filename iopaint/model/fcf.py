@@ -1691,10 +1691,11 @@ class FcF(InpaintModel):
                 interpolation=cv2.INTER_CUBIC,
             )
 
-            original_pixel_indices = crop_mask < 127
-            inpaint_result[original_pixel_indices] = crop_image[:, :, ::-1][
-                original_pixel_indices
-            ]
+            np.copyto(
+                inpaint_result,
+                crop_image[:, :, ::-1],
+                where=(crop_mask < 127)[..., np.newaxis],
+            )
 
             crop_result.append((inpaint_result, crop_box))
 
@@ -1713,7 +1714,8 @@ class FcF(InpaintModel):
         """
 
         image = norm_img(image)  # [0, 1]
-        image = image * 2 - 1  # [0, 1] -> [-1, 1]
+        image *= 2
+        image -= 1  # [0, 1] -> [-1, 1]
         mask = (mask > 120) * 255
         mask = norm_img(mask)
 

@@ -23,3 +23,8 @@ export const DEFAULT_NEGATIVE_PROMPT =
   "out of frame, lowres, error, cropped, worst quality, low quality, jpeg artifacts, ugly, duplicate, morbid, mutilated, out of frame, mutation, deformed, blurry, dehydrated, bad anatomy, bad proportions, extra limbs, disfigured, gross proportions, malformed limbs, watermark, signature"
 
 export const SHORTCUT_KEY_CHANGE_BRUSH_SIZE = "Alt"
+
+export const HD_STRATEGY = "Crop"
+export const HD_STRATEGY_CROP_TRIGGER_SIZE = 640
+export const HD_STRATEGY_CROP_MARGIN = 128
+export const HD_STRATEGY_RESIZE_LIMIT = 2048

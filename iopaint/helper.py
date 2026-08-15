@@ -1,5 +1,4 @@
 import base64
-import imghdr
 import io
 import os
 import sys
@@ -140,17 +139,29 @@ def numpy_to_bytes(image_numpy: np.ndarray, ext: str) -> bytes:
     return image_bytes
 
 
+# save() kwargs that are safe to pass through from input image metadata.
+# `parameters` is handled separately (embedded as a pnginfo text chunk).
+_PIL_SAVE_WHITELIST = ("exif", "icc_profile", "dpi", "comment")
+
+
 def pil_to_bytes(pil_img, ext: str, quality: int = 95, infos={}) -> bytes:
     with io.BytesIO() as output:
-        kwargs = {k: v for k, v in infos.items() if v is not None}
         if ext == "jpg":
             ext = "jpeg"
-        if "png" == ext.lower() and "parameters" in kwargs:
-            pnginfo_data = PngImagePlugin.PngInfo()
-            pnginfo_data.add_text("parameters", kwargs["parameters"])
-            kwargs["pnginfo"] = pnginfo_data
 
-        pil_img.save(output, format=ext, quality=quality, **kwargs)
+        save_kwargs = {}
+        parameters = infos.get("parameters")
+        if parameters is not None and ext.lower() == "png":
+            pnginfo_data = PngImagePlugin.PngInfo()
+            pnginfo_data.add_text("parameters", parameters)
+            save_kwargs["pnginfo"] = pnginfo_data
+
+        for key in _PIL_SAVE_WHITELIST:
+            value = infos.get(key)
+            if value is not None:
+                save_kwargs[key] = value
+
+        pil_img.save(output, format=ext, quality=quality, **save_kwargs)
         image_bytes = output.getvalue()
     return image_bytes
 
@@ -193,7 +204,7 @@ def norm_img(np_img):
 
 
 def resize_max_size(
-    np_img, size_limit: int, interpolation=cv2.INTER_CUBIC
+    np_img, size_limit: int, interpolation=cv2.INTER_AREA
 ) -> np.ndarray:
     # Resize image's longer size to size_limit if longer size larger than size_limit
     h, w = np_img.shape[:2]
@@ -235,6 +246,9 @@ def pad_img_to_modulo(
         max_size = max(out_height, out_width)
         out_height = max_size
         out_width = max_size
+
+    if out_height == height and out_width == width:
+        return img
 
     return np.pad(
         img,
@@ -297,13 +311,6 @@ def is_mac():
     return sys.platform == "darwin"
 
 
-def get_image_ext(img_bytes):
-    w = imghdr.what("", img_bytes)
-    if w is None:
-        w = "jpeg"
-    return w
-
-
 def decode_base64_to_image(
     encoding: str, gray=False
 ) -> Tuple[np.array, Optional[np.array], Dict, str]:
@@ -312,8 +319,10 @@ def decode_base64_to_image(
     ):
         encoding = encoding.split(";")[1].split(",")[1]
     image_bytes = base64.b64decode(encoding)
-    ext = get_image_ext(image_bytes)
     image = Image.open(io.BytesIO(image_bytes))
+    # image.format must be read before exif_transpose, which returns a new
+    # image without the format attribute set.
+    ext = (image.format or "jpeg").lower()
 
     alpha_channel = None
     try:

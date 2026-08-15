@@ -18,13 +18,14 @@ import {
 import { Switch } from "./ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs"
 import { useEffect, useState } from "react"
-import { cn } from "@/lib/utils"
+import { cn, getErrorMessage } from "@/lib/utils"
 import { useQuery } from "@tanstack/react-query"
 import { getServerConfig, switchModel, switchPluginModel } from "@/lib/api"
 import { ModelInfo, PluginName } from "@/lib/types"
 import { useStore } from "@/lib/states"
 import { ScrollArea } from "./ui/scroll-area"
 import { useToast } from "./ui/use-toast"
+import Spinner from "@/components/ui/spinner"
 import {
   AlertDialog,
   AlertDialogContent,
@@ -54,7 +55,6 @@ const formSchema = z.object({
   outputDirectory: z.string(),
   enableDownloadMask: z.boolean(),
   enableManualInpainting: z.boolean(),
-  enableUploadMask: z.boolean(),
   enableAutoExtractPrompt: z.boolean(),
   removeBGModel: z.string(),
   realesrganModel: z.string(),
@@ -109,7 +109,6 @@ export function SettingsDialog() {
     defaultValues: {
       enableDownloadMask: settings.enableDownloadMask,
       enableManualInpainting: settings.enableManualInpainting,
-      enableUploadMask: settings.enableUploadMask,
       enableAutoExtractPrompt: settings.enableAutoExtractPrompt,
       inputDirectory: fileManagerState.inputDirectory,
       outputDirectory: fileManagerState.outputDirectory,
@@ -126,14 +125,13 @@ export function SettingsDialog() {
       form.setValue("realesrganModel", serverConfig.realesrganModel)
       form.setValue("interactiveSegModel", serverConfig.interactiveSegModel)
     }
-  }, [form, serverConfig])
+  }, [form, serverConfig, setServerConfig])
 
   async function onSubmit(values: z.infer<typeof formSchema>) {
     // Do something with the form values. ✅ This will be type-safe and validated.
     updateSettings({
       enableDownloadMask: values.enableDownloadMask,
       enableManualInpainting: values.enableManualInpainting,
-      enableUploadMask: values.enableUploadMask,
       enableAutoExtractPrompt: values.enableAutoExtractPrompt,
     })
 
@@ -191,11 +189,12 @@ export function SettingsDialog() {
           toast({
             title: `Switch to ${newModel.name} success`,
           })
-          setAppModel(model)
-        } catch (error: any) {
+          setModel(newModel)
+          setAppModel(newModel)
+        } catch (error) {
           toast({
             variant: "destructive",
-            title: `Switch to ${model.name} failed: ${error}`,
+            title: `Switch to ${model.name} failed: ${getErrorMessage(error)}`,
           })
           setModel(settings.model)
         }
@@ -203,51 +202,36 @@ export function SettingsDialog() {
 
       if (shouldSwitchRemoveBGModel) {
         try {
-          const res = await switchPluginModel(
-            PluginName.RemoveBG,
-            values.removeBGModel
-          )
-          if (res.status !== 200) {
-            throw new Error(res.statusText)
-          }
-        } catch (error: any) {
+          await switchPluginModel(PluginName.RemoveBG, values.removeBGModel)
+        } catch (error) {
           toast({
             variant: "destructive",
-            title: `Switch RemoveBG model to ${values.removeBGModel} failed: ${error}`,
+            title: `Switch RemoveBG model to ${values.removeBGModel} failed: ${getErrorMessage(error)}`,
           })
         }
       }
 
       if (shouldSwitchRealesrganModel) {
         try {
-          const res = await switchPluginModel(
-            PluginName.RealESRGAN,
-            values.realesrganModel
-          )
-          if (res.status !== 200) {
-            throw new Error(res.statusText)
-          }
-        } catch (error: any) {
+          await switchPluginModel(PluginName.RealESRGAN, values.realesrganModel)
+        } catch (error) {
           toast({
             variant: "destructive",
-            title: `Switch RealESRGAN model to ${values.realesrganModel} failed: ${error}`,
+            title: `Switch RealESRGAN model to ${values.realesrganModel} failed: ${getErrorMessage(error)}`,
           })
         }
       }
 
       if (shouldSwitchInteractiveModel) {
         try {
-          const res = await switchPluginModel(
+          await switchPluginModel(
             PluginName.InteractiveSeg,
             values.interactiveSegModel
           )
-          if (res.status !== 200) {
-            throw new Error(res.statusText)
-          }
-        } catch (error: any) {
+        } catch (error) {
           toast({
             variant: "destructive",
-            title: `Switch ${PluginName.InteractiveSeg} model to ${values.interactiveSegModel} failed: ${error}`,
+            title: `Switch ${PluginName.InteractiveSeg} model to ${values.interactiveSegModel} failed: ${getErrorMessage(error)}`,
           })
         }
       }
@@ -327,7 +311,7 @@ export function SettingsDialog() {
 
   function renderModelSettings() {
     let defaultTab = MODEL_TYPE_INPAINT
-    for (let info of modelInfos) {
+    for (const info of modelInfos) {
       if (model.name === info.name) {
         defaultTab = info.model_type
         if (defaultTab === MODEL_TYPE_DIFFUSERS_SDXL) {
@@ -466,28 +450,6 @@ export function SettingsDialog() {
             </FormItem>
           )}
         />
-
-        {/* <FormField
-          control={form.control}
-          name="enableUploadMask"
-          render={({ field }) => (
-            <FormItem className="flex tems-center justify-between">
-              <div className="space-y-0.5">
-                <FormLabel>Enable upload mask</FormLabel>
-                <FormDescription>
-                  Enable upload custom mask to perform inpainting.
-                </FormDescription>
-              </div>
-              <FormControl>
-                <Switch
-                  checked={field.value}
-                  onCheckedChange={field.onChange}
-                />
-              </FormControl>
-            </FormItem>
-          )}
-        />
-        <Separator /> */}
       </div>
     )
   }
@@ -673,22 +635,7 @@ export function SettingsDialog() {
             {/* <AlertDialogDescription> */}
             <div className="flex flex-col justify-center items-center gap-4">
               <div role="status">
-                <svg
-                  aria-hidden="true"
-                  className="w-8 h-8 text-gray-200 animate-spin dark:text-gray-600 fill-primary"
-                  viewBox="0 0 100 101"
-                  fill="none"
-                  xmlns="http://www.w3.org/2000/svg"
-                >
-                  <path
-                    d="M100 50.5908C100 78.2051 77.6142 100.591 50 100.591C22.3858 100.591 0 78.2051 0 50.5908C0 22.9766 22.3858 0.59082 50 0.59082C77.6142 0.59082 100 22.9766 100 50.5908ZM9.08144 50.5908C9.08144 73.1895 27.4013 91.5094 50 91.5094C72.5987 91.5094 90.9186 73.1895 90.9186 50.5908C90.9186 27.9921 72.5987 9.67226 50 9.67226C27.4013 9.67226 9.08144 27.9921 9.08144 50.5908Z"
-                    fill="currentColor"
-                  />
-                  <path
-                    d="M93.9676 39.0409C96.393 38.4038 97.8624 35.9116 97.0079 33.5539C95.2932 28.8227 92.871 24.3692 89.8167 20.348C85.8452 15.1192 80.8826 10.7238 75.2124 7.41289C69.5422 4.10194 63.2754 1.94025 56.7698 1.05124C51.7666 0.367541 46.6976 0.446843 41.7345 1.27873C39.2613 1.69328 37.813 4.19778 38.4501 6.62326C39.0873 9.04874 41.5694 10.4717 44.0505 10.1071C47.8511 9.54855 51.7191 9.52689 55.5402 10.0491C60.8642 10.7766 65.9928 12.5457 70.6331 15.2552C75.2735 17.9648 79.3347 21.5619 82.5849 25.841C84.9175 28.9121 86.7997 32.2913 88.1811 35.8758C89.083 38.2158 91.5421 39.6781 93.9676 39.0409Z"
-                    fill="currentFill"
-                  />
-                </svg>
+                <Spinner className="w-8 h-8 text-gray-200 dark:text-gray-600" />
                 <span className="sr-only">Loading...</span>
               </div>
 

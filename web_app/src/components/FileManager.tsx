@@ -8,6 +8,7 @@ import {
 } from "react"
 import _ from "lodash"
 import PhotoAlbum from "react-photo-album"
+import "react-photo-album/styles.css"
 import { BarsArrowDownIcon, BarsArrowUpIcon } from "@heroicons/react/24/outline"
 import {
   MagnifyingGlassIcon,
@@ -19,6 +20,7 @@ import { useDebounce } from "@uidotdev/usehooks"
 import Fuse from "fuse.js"
 import { useToast } from "@/components/ui/use-toast"
 import { API_ENDPOINT, getMedias } from "@/lib/api"
+import { getErrorMessage } from "@/lib/utils"
 import { IconButton } from "./ui/button"
 import { Input } from "./ui/input"
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog"
@@ -138,16 +140,16 @@ export default function FileManager(props: Props) {
       try {
         const filenames = await getMedias(tab)
         setFilenames(filenames)
-      } catch (e: any) {
+      } catch (e) {
         toast({
           variant: "destructive",
           title: "Uh oh! Something went wrong.",
-          description: e.message ? e.message : e.toString(),
+          description: getErrorMessage(e),
         })
       }
     }
     fetchData()
-  }, [tab])
+  }, [tab, toast])
 
   useEffect(() => {
     if (!open) {
@@ -181,16 +183,16 @@ export default function FileManager(props: Props) {
           return { src, height, width, name: filename.name }
         })
         setPhotos(newPhotos)
-      } catch (e: any) {
+      } catch (e) {
         toast({
           variant: "destructive",
           title: "Uh oh! Something went wrong.",
-          description: e.message ? e.message : e.toString(),
+          description: getErrorMessage(e),
         })
       }
     }
     fetchData()
-  }, [filenames, debouncedSearchText, fileManagerState, photoWidth, open])
+  }, [filenames, debouncedSearchText, fileManagerState, photoWidth, open, tab, toast])
 
   const onScroll = (event: SyntheticEvent) => {
     setScrollTop(event.currentTarget.scrollTop)

@@ -12,7 +12,6 @@ import {
   LineGroup,
   ModelInfo,
   PluginParams,
-  Point,
   PowerPaintTask,
   ServerConfig,
   Size,
@@ -29,9 +28,10 @@ import {
 } from "./const"
 import {
   blobToImage,
+  canvasToBlob,
   canvasToImage,
-  dataURItoBlob,
   generateMask,
+  getErrorMessage,
   loadImage,
   srcToFile,
 } from "./utils"
@@ -58,7 +58,6 @@ export type Settings = {
   model: ModelInfo
   enableDownloadMask: boolean
   enableManualInpainting: boolean
-  enableUploadMask: boolean
   enableAutoExtractPrompt: boolean
   showCropper: boolean
   showExtender: boolean
@@ -141,7 +140,6 @@ type EditorState = {
 type AppState = {
   file: File | null
   paintByExampleFile: File | null
-  customMask: File | null
   imageHeight: number
   imageWidth: number
   isInpainting: boolean
@@ -166,7 +164,6 @@ type AppState = {
 type AppAction = {
   updateAppState: (newState: Partial<AppState>) => void
   setFile: (file: File) => Promise<void>
-  setCustomFile: (file: File) => void
   setIsInpainting: (newValue: boolean) => void
   getIsProcessing: () => boolean
   setBaseBrushSize: (newValue: number) => void
@@ -177,15 +174,8 @@ type AppAction = {
 
   isSD: () => boolean
 
-  setCropperX: (newValue: number) => void
-  setCropperY: (newValue: number) => void
-  setCropperWidth: (newValue: number) => void
-  setCropperHeight: (newValue: number) => void
-
-  setExtenderX: (newValue: number) => void
-  setExtenderY: (newValue: number) => void
-  setExtenderWidth: (newValue: number) => void
-  setExtenderHeight: (newValue: number) => void
+  setCropperState: (newState: Partial<CropperState>) => void
+  setExtenderState: (newState: Partial<CropperState>) => void
 
   setIsCropperExtenderResizing: (newValue: boolean) => void
   updateExtenderDirection: (newValue: ExtenderDirection) => void
@@ -223,8 +213,7 @@ type AppAction = {
   getCurrentTargetFile: () => Promise<File>
   updateEditorState: (newState: Partial<EditorState>) => void
   runMannually: () => boolean
-  handleCanvasMouseDown: (point: Point) => void
-  handleCanvasMouseMove: (point: Point) => void
+  commitStroke: (stroke: Line) => void
   cleanCurLineGroup: () => void
   resetRedoState: () => void
   undo: () => void
@@ -239,7 +228,6 @@ type AppAction = {
 const defaultValues: AppState = {
   file: null,
   paintByExampleFile: null,
-  customMask: null,
   imageHeight: 0,
   imageWidth: 0,
   isInpainting: false,
@@ -332,7 +320,6 @@ const defaultValues: AppState = {
     extenderDirection: ExtenderDirection.xy,
     enableDownloadMask: false,
     enableManualInpainting: false,
-    enableUploadMask: false,
     enableAutoExtractPrompt: true,
     ldmSteps: 30,
     ldmSampler: LDMSampler.ddim,
@@ -471,11 +458,7 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           maskImages = extraMasks
         }
 
-        if (
-          maskLineGroup.length === 0 &&
-          maskImages === null &&
-          !settings.showExtender
-        ) {
+        if (maskLineGroup.length === 0 && !settings.showExtender) {
           toast({
             variant: "destructive",
             description: "Please draw mask on picture",
@@ -524,12 +507,13 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         }
 
         try {
+          const maskBlob = await canvasToBlob(maskCanvas, "image/png")
           const res = await inpaint(
             targetFile,
             settings,
             cropperState,
             extenderState,
-            dataURItoBlob(maskCanvas.toDataURL()),
+            maskBlob,
             paintByExampleFile
           )
 
@@ -549,10 +533,10 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
             extraMasks: [],
             prevExtraMasks: maskImages,
           })
-        } catch (e: any) {
+        } catch (e) {
           toast({
             variant: "destructive",
-            description: e.message ? e.message : e.toString(),
+            description: getErrorMessage(e),
           })
         }
 
@@ -606,10 +590,10 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           toast({
             description: `Run ${pluginName} successfully in ${time / 1000}s`,
           })
-        } catch (e: any) {
+        } catch (e) {
           toast({
             variant: "destructive",
-            description: e.message ? e.message : e.toString(),
+            description: getErrorMessage(e),
           })
         }
         set((state) => {
@@ -628,24 +612,9 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         get().updateEditorState({ curLineGroup: [] })
       },
 
-      handleCanvasMouseDown: (point: Point) => {
-        let lineGroup: LineGroup = []
-        const state = get()
-        if (state.runMannually()) {
-          lineGroup = [...state.editorState.curLineGroup]
-        }
-        lineGroup.push({ size: state.getBrushSize(), pts: [point] })
+      commitStroke: (stroke: Line) => {
         set((state) => {
-          state.editorState.curLineGroup = lineGroup
-        })
-      },
-
-      handleCanvasMouseMove: (point: Point) => {
-        set((state) => {
-          const curLineGroup = state.editorState.curLineGroup
-          if (curLineGroup.length) {
-            curLineGroup[curLineGroup.length - 1].pts.push(point)
-          }
+          state.editorState.curLineGroup.push(castDraft(stroke))
         })
       },
 
@@ -933,10 +902,10 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
                 state.settings.negativePrompt = res.negative_prompt
               })
             }
-          } catch (e: any) {
+          } catch (e) {
             toast({
               variant: "destructive",
-              description: e.message ? e.message : e.toString(),
+              description: getErrorMessage(e),
             })
           }
         }
@@ -949,11 +918,6 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           state.cropperState = defaultValues.cropperState
         })
       },
-
-      setCustomFile: (file: File) =>
-        set((state) => {
-          state.customMask = file
-        }),
 
       setBaseBrushSize: (newValue: number) =>
         set((state) => {
@@ -989,44 +953,14 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         get().resetExtender(width, height)
       },
 
-      setCropperX: (newValue: number) =>
+      setCropperState: (newState: Partial<CropperState>) =>
         set((state) => {
-          state.cropperState.x = newValue
+          state.cropperState = { ...state.cropperState, ...newState }
         }),
 
-      setCropperY: (newValue: number) =>
+      setExtenderState: (newState: Partial<CropperState>) =>
         set((state) => {
-          state.cropperState.y = newValue
-        }),
-
-      setCropperWidth: (newValue: number) =>
-        set((state) => {
-          state.cropperState.width = newValue
-        }),
-
-      setCropperHeight: (newValue: number) =>
-        set((state) => {
-          state.cropperState.height = newValue
-        }),
-
-      setExtenderX: (newValue: number) =>
-        set((state) => {
-          state.extenderState.x = newValue
-        }),
-
-      setExtenderY: (newValue: number) =>
-        set((state) => {
-          state.extenderState.y = newValue
-        }),
-
-      setExtenderWidth: (newValue: number) =>
-        set((state) => {
-          state.extenderState.width = newValue
-        }),
-
-      setExtenderHeight: (newValue: number) =>
-        set((state) => {
-          state.extenderState.height = newValue
+          state.extenderState = { ...state.extenderState, ...newState }
         }),
 
       setIsCropperExtenderResizing: (newValue: boolean) =>
@@ -1035,9 +969,6 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         }),
 
       updateExtenderDirection: (newValue: ExtenderDirection) => {
-        console.log(
-          `updateExtenderDirection: ${JSON.stringify(get().extenderState)}`
-        )
         set((state) => {
           state.settings.extenderDirection = newValue
           state.extenderState.x = 0
@@ -1118,7 +1049,7 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           extraMasks,
           BRUSH_COLOR
         )
-        const maskBlob = dataURItoBlob(maskCanvas.toDataURL())
+        const maskBlob = await canvasToBlob(maskCanvas, "image/png")
         const newMaskBlob = await postAdjustMask(
           maskBlob,
           operate,
@@ -1146,12 +1077,31 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
     {
       name: "ZUSTAND_STATE", // name of the item in the storage (must be unique)
       version: 2,
-      partialize: (state) =>
-        Object.fromEntries(
-          Object.entries(state).filter(([key]) =>
-            ["fileManagerState", "settings"].includes(key)
-          )
+      partialize: (state) => ({
+        fileManagerState: state.fileManagerState,
+        settings: Object.fromEntries(
+          Object.entries(state.settings).filter(([key]) => key !== "model")
         ),
+      }),
+      merge: (persisted, current) => {
+        const persistedState = persisted as {
+          fileManagerState?: Partial<FileManagerState>
+          settings?: Partial<Settings>
+        }
+        return {
+          ...current,
+          fileManagerState: {
+            ...current.fileManagerState,
+            ...persistedState.fileManagerState,
+          },
+          settings: {
+            ...current.settings,
+            ...persistedState.settings,
+            // model 是运行时由服务端返回，不应持久化
+            model: current.settings.model,
+          },
+        }
+      },
     }
   ),
   shallow

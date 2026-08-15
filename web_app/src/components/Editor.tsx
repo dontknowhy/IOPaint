@@ -1,5 +1,11 @@
-import { SyntheticEvent, useCallback, useEffect, useRef, useState } from "react"
-import { CursorArrowRaysIcon } from "@heroicons/react/24/outline"
+import {
+  SyntheticEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react"
 import { useToast } from "@/components/ui/use-toast"
 import {
   ReactZoomPanPinchContentRef,
@@ -16,21 +22,23 @@ import {
   downloadImage,
   drawLines,
   generateMask,
+  getErrorMessage,
   isMidClick,
   isRightClick,
   mouseXY,
-  srcToFile,
+  touchPointXY,
 } from "@/lib/utils"
 import { Eraser, Eye, Redo, Undo, Expand, Download } from "lucide-react"
 import { useImage } from "@/hooks/useImage"
 import { Slider } from "./ui/slider"
-import { PluginName } from "@/lib/types"
+import { Line, PluginName, Point } from "@/lib/types"
 import { useStore } from "@/lib/states"
 import Cropper from "./Cropper"
 import { InteractiveSegPoints } from "./InteractiveSeg"
 import useHotKey from "@/hooks/useHotkey"
 import Extender from "./Extender"
 import {
+  BRUSH_COLOR,
   MAX_BRUSH_SIZE,
   MIN_BRUSH_SIZE,
   SHORTCUT_KEY_CHANGE_BRUSH_SIZE,
@@ -38,9 +46,36 @@ import {
 
 const TOOLBAR_HEIGHT = 200
 const COMPARE_SLIDER_DURATION_MS = 300
+// 双指中判定“哪根手指在动”的移动阈值（px）
+const TOUCH_MOVE_THRESHOLD = 10
+// 判定“哪根手指按住了没动”的阈值（px），避免把捏合开始阶段误判成锚定绘制
+const TOUCH_ANCHOR_THRESHOLD = 6
 
 interface EditorProps {
   file: File
+}
+
+// 原生 touch 监听器需要的最新状态/函数快照
+type TouchLatestState = {
+  context?: CanvasRenderingContext2D
+  isProcessing: boolean
+  isPanning: boolean
+  isInpainting: boolean
+  isDraging: boolean
+  isOriginalLoaded: boolean
+  brushSize: number
+  runMannually: boolean
+  originalSrc: string
+  isInteractiveSeg: boolean
+  clicks: number[][]
+  startStroke: (pt: Point) => void
+  pushStrokePoint: (pt: Point) => void
+  commitCurrentStroke: () => void
+  cancelCurrentStroke: () => void
+  runInteractiveSeg: (clicks: number[][]) => void
+  runInpainting: () => Promise<void>
+  updateInteractiveSegState: (state: { clicks: number[][] }) => void
+  setIsDraging: (value: boolean) => void
 }
 
 export default function Editor(props: EditorProps) {
@@ -57,10 +92,10 @@ export default function Editor(props: EditorProps) {
     enableAutoSaving,
     setImageSize,
     setBaseBrushSize,
+    getCurrentTargetFile,
     interactiveSegState,
     updateInteractiveSegState,
-    handleCanvasMouseDown,
-    handleCanvasMouseMove,
+    commitStroke,
     undo,
     redo,
     undoDisabled,
@@ -82,10 +117,10 @@ export default function Editor(props: EditorProps) {
     state.serverConfig.enableAutoSaving,
     state.setImageSize,
     state.setBaseBrushSize,
+    state.getCurrentTargetFile,
     state.interactiveSegState,
     state.updateInteractiveSegState,
-    state.handleCanvasMouseDown,
-    state.handleCanvasMouseMove,
+    state.commitStroke,
     state.undo,
     state.redo,
     state.undoDisabled(),
@@ -111,10 +146,30 @@ export default function Editor(props: EditorProps) {
   const [original, isOriginalLoaded] = useImage(file)
   const [context, setContext] = useState<CanvasRenderingContext2D>()
   const [imageContext, setImageContext] = useState<CanvasRenderingContext2D>()
-  const [{ x, y }, setCoords] = useState({ x: -1, y: -1 })
   const [showBrush, setShowBrush] = useState(false)
   const [showRefBrush, setShowRefBrush] = useState(false)
   const [isPanning, setIsPanning] = useState<boolean>(false)
+
+  const containerRef = useRef<HTMLDivElement>(null)
+  const strokeRef = useRef<Line | null>(null)
+  const brushCursorRef = useRef<HTMLDivElement>(null)
+  const cursorPosRef = useRef<Point>({ x: -1, y: -1 })
+  const cursorFrameRef = useRef<number>(0)
+  // ---- 触屏状态机（原生监听器，绕开 React passive 限制）----
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  // 每根手指上次的屏幕坐标（identifier -> {x,y}）
+  const touchPositionsRef = useRef<Map<number, { x: number; y: number }>>(
+    new Map()
+  )
+  // 当前触摸意图：pending=多指刚落下待判断；single=单指绘制；
+  // draw=一指定住一指定画（保留触控板/触屏的锚定绘制）；gesture=双指缩放/平移
+  const touchModeRef = useRef<"pending" | "single" | "draw" | "gesture" | null>(
+    null
+  )
+  // 正在驱动笔画的指头 identifier
+  const drawingTouchIdRef = useRef<number | null>(null)
+  // 供原生 touch 监听器读取的最新状态与函数
+  const latestRef = useRef<TouchLatestState | null>(null)
 
   const [scale, setScale] = useState<number>(1)
   const [panned, setPanned] = useState<boolean>(false)
@@ -132,7 +187,7 @@ export default function Editor(props: EditorProps) {
     useState<boolean>(false)
 
   const hadDrawSomething = useCallback(() => {
-    return curLineGroup.length !== 0
+    return strokeRef.current !== null || curLineGroup.length !== 0
   }, [curLineGroup])
 
   useEffect(() => {
@@ -164,7 +219,12 @@ export default function Editor(props: EditorProps) {
     imageWidth,
   ])
 
-  useEffect(() => {
+  // 已提交内容（已提交的笔迹/掩膜/分割临时掩膜）画在这个“底层”画布上，
+  // 绘制进行中的笔画时只需把它原样拷贝到显示画布上，再一次性画当前笔画，
+  // 避免每帧重复重绘所有已提交内容，也避免重复 stroke() 同一条累计路径。
+  const maskBaseCanvasRef = useRef<HTMLCanvasElement | null>(null)
+
+  const redrawMaskCanvas = useCallback(() => {
     if (
       !context ||
       !isOriginalLoaded ||
@@ -173,21 +233,30 @@ export default function Editor(props: EditorProps) {
     ) {
       return
     }
-    context.canvas.width = imageWidth
-    context.canvas.height = imageHeight
-    context.clearRect(0, 0, context.canvas.width, context.canvas.height)
+    let base = maskBaseCanvasRef.current
+    if (!base) {
+      base = document.createElement("canvas")
+      base.width = imageWidth
+      base.height = imageHeight
+      maskBaseCanvasRef.current = base
+    }
+    const baseCtx = base.getContext("2d")
+    if (!baseCtx) {
+      return
+    }
+    baseCtx.clearRect(0, 0, base.width, base.height)
     temporaryMasks.forEach((maskImage) => {
-      context.drawImage(maskImage, 0, 0, imageWidth, imageHeight)
+      baseCtx.drawImage(maskImage, 0, 0, imageWidth, imageHeight)
     })
     extraMasks.forEach((maskImage) => {
-      context.drawImage(maskImage, 0, 0, imageWidth, imageHeight)
+      baseCtx.drawImage(maskImage, 0, 0, imageWidth, imageHeight)
     })
 
     if (
       interactiveSegState.isInteractiveSeg &&
       interactiveSegState.tmpInteractiveSegMask
     ) {
-      context.drawImage(
+      baseCtx.drawImage(
         interactiveSegState.tmpInteractiveSegMask,
         0,
         0,
@@ -195,7 +264,12 @@ export default function Editor(props: EditorProps) {
         imageHeight
       )
     }
-    drawLines(context, curLineGroup)
+    drawLines(baseCtx, curLineGroup)
+
+    context.canvas.width = imageWidth
+    context.canvas.height = imageHeight
+    context.clearRect(0, 0, context.canvas.width, context.canvas.height)
+    context.drawImage(base, 0, 0, imageWidth, imageHeight)
   }, [
     temporaryMasks,
     extraMasks,
@@ -207,14 +281,9 @@ export default function Editor(props: EditorProps) {
     imageWidth,
   ])
 
-  const getCurrentRender = useCallback(async () => {
-    let targetFile = file
-    if (renders.length > 0) {
-      const lastRender = renders[renders.length - 1]
-      targetFile = await srcToFile(lastRender.currentSrc, file.name, file.type)
-    }
-    return targetFile
-  }, [file, renders])
+  useEffect(() => {
+    redrawMaskCanvas()
+  }, [redrawMaskCanvas])
 
   const hadRunInpainting = () => {
     return renders.length !== 0
@@ -258,12 +327,7 @@ export default function Editor(props: EditorProps) {
     setMinScale(s)
     setScale(s)
 
-    console.log(
-      `[on file load] image size: ${width}x${height}, scale: ${s}, initialCentered: ${initialCentered}`
-    )
-
     if (context?.canvas) {
-      console.log("[on file load] set canvas size")
       if (width != context.canvas.width) {
         context.canvas.width = width
       }
@@ -275,7 +339,6 @@ export default function Editor(props: EditorProps) {
     if (!initialCentered) {
       // 防止每次擦除以后图片 zoom 还原
       viewportRef.current?.centerView(s, 1)
-      console.log("[on file load] centerView")
       setInitialCentered(true)
     }
   }, [
@@ -287,10 +350,11 @@ export default function Editor(props: EditorProps) {
     windowSize,
     initialCentered,
     getCurrentWidthHeight,
+    context?.canvas,
+    setImageSize,
   ])
 
   useEffect(() => {
-    console.log("[useEffect] centerView")
     // render 改变尺寸以后，undo/redo 重新 center
     viewportRef?.current?.centerView(minScale, 1)
   }, [imageHeight, imageWidth, viewportRef, minScale])
@@ -318,20 +382,18 @@ export default function Editor(props: EditorProps) {
     windowSize,
     imageHeight,
     imageWidth,
-    windowSize.height,
     minScale,
   ])
 
   useEffect(() => {
-    window.addEventListener("resize", () => {
+    const onWindowResize = () => {
       resetZoom()
-    })
-    return () => {
-      window.removeEventListener("resize", () => {
-        resetZoom()
-      })
     }
-  }, [windowSize, resetZoom])
+    window.addEventListener("resize", onWindowResize)
+    return () => {
+      window.removeEventListener("resize", onWindowResize)
+    }
+  }, [resetZoom])
 
   const handleEscPressed = () => {
     if (isProcessing) {
@@ -352,10 +414,91 @@ export default function Editor(props: EditorProps) {
     // drawOnCurrentRender,
   ])
 
+  const updateCursorPos = (x: number, y: number) => {
+    cursorPosRef.current = { x, y }
+    if (cursorFrameRef.current !== 0) {
+      return
+    }
+    cursorFrameRef.current = requestAnimationFrame(() => {
+      cursorFrameRef.current = 0
+      const { x: posX, y: posY } = cursorPosRef.current
+      const transform = `translate(${posX}px, ${posY}px) translate(-50%, -50%)`
+      if (brushCursorRef.current) {
+        brushCursorRef.current.style.transform = transform
+      }
+    })
+  }
+
+  useEffect(() => {
+    return () => {
+      if (cursorFrameRef.current !== 0) {
+        cancelAnimationFrame(cursorFrameRef.current)
+      }
+    }
+  }, [])
+
   const onMouseMove = (ev: SyntheticEvent) => {
     const mouseEvent = ev.nativeEvent as MouseEvent
-    setCoords({ x: mouseEvent.pageX, y: mouseEvent.pageY })
+    updateCursorPos(mouseEvent.pageX, mouseEvent.pageY)
   }
+
+  const startStroke = (pt: Point) => {
+    if (!context?.canvas) {
+      return
+    }
+    strokeRef.current = { size: brushSize, pts: [pt] }
+  }
+
+  // 追加一个绘制点：把“已提交内容(底层画布) + 当前笔画(一次性重画)”合成到显示画布。
+  // 整个路径只 stroke() 一次，笔刷透明度不会因为反复描边而自我叠加成实心，
+  // 也不会随着笔画变长而不断重复重绘旧段落（避免掉帧）。
+  const pushStrokePoint = useCallback(
+    (pt: Point) => {
+      const stroke = strokeRef.current
+      const ctx = context
+      if (!stroke || !ctx) {
+        return
+      }
+      stroke.pts.push(pt)
+      const base = maskBaseCanvasRef.current
+      if (!base) {
+        return
+      }
+      const canvas = ctx.canvas
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+      ctx.drawImage(base, 0, 0, imageWidth, imageHeight)
+      ctx.strokeStyle = BRUSH_COLOR
+      ctx.lineCap = "round"
+      ctx.lineJoin = "round"
+      ctx.lineWidth = stroke.size ?? brushSize
+      ctx.beginPath()
+      ctx.moveTo(stroke.pts[0].x, stroke.pts[0].y)
+      for (let i = 1; i < stroke.pts.length; i++) {
+        ctx.lineTo(stroke.pts[i].x, stroke.pts[i].y)
+      }
+      ctx.stroke()
+    },
+    [context, imageWidth, imageHeight, brushSize]
+  )
+
+  const commitCurrentStroke = () => {
+    const stroke = strokeRef.current
+    if (!stroke) {
+      return
+    }
+    strokeRef.current = null
+    commitStroke(stroke)
+  }
+
+  // 取消进行中的笔画：丢弃 strokeRef 并重绘掩膜画布，移除已画上去的临时笔迹
+  const cancelCurrentStroke = useCallback(() => {
+    if (!strokeRef.current) {
+      return
+    }
+    strokeRef.current = null
+    setIsDraging(false)
+    redrawMaskCanvas()
+  }, [redrawMaskCanvas])
 
   const onMouseDrag = (ev: SyntheticEvent) => {
     if (isProcessing) {
@@ -371,16 +514,15 @@ export default function Editor(props: EditorProps) {
     if (!isDraging) {
       return
     }
-    if (curLineGroup.length === 0) {
+    if (!strokeRef.current) {
       return
     }
-
-    handleCanvasMouseMove(mouseXY(ev))
+    pushStrokePoint(mouseXY(ev))
   }
 
   const runInteractiveSeg = async (newClicks: number[][]) => {
     updateAppState({ isPluginRunning: true })
-    const targetFile = await getCurrentRender()
+    const targetFile = await getCurrentTargetFile()
     try {
       const res = await runPlugin(
         true,
@@ -395,10 +537,10 @@ export default function Editor(props: EditorProps) {
         updateInteractiveSegState({ tmpInteractiveSegMask: img })
       }
       img.src = blob
-    } catch (e: any) {
+    } catch (e) {
       toast({
         variant: "destructive",
-        description: e.message ? e.message : e.toString(),
+        description: getErrorMessage(e),
       })
     }
     updateAppState({ isPluginRunning: false })
@@ -431,6 +573,8 @@ export default function Editor(props: EditorProps) {
     if (!isDraging) {
       return
     }
+
+    commitCurrentStroke()
 
     if (runMannually) {
       setIsDraging(false)
@@ -481,8 +625,30 @@ export default function Editor(props: EditorProps) {
     }
 
     setIsDraging(true)
-    handleCanvasMouseDown(mouseXY(ev))
+    startStroke(mouseXY(ev))
   }
+
+  // ---- 触屏手势（原生监听器，见下方 useEffect）----
+  // 状态机：
+  //  - single：单指绘制（或平移模式下交给库平移）
+  //  - pending：多指刚落下，等待第一次 touchmove 判断意图
+  //  - draw：一指定住、另一指拖动 → 用“在动的那根手指”继续绘制（保留触控板/触屏锚定绘制）
+  //  - gesture：两根手指都在动 → 交给 react-zoom-pan-pinch 做缩放/平移
+  // 普通滚轮（触控板双指滑动 / 鼠标滚轮）平移画布；Ctrl+滚轮（触控板捏合）由库缩放
+  const panBy = useCallback((deltaX: number, deltaY: number) => {
+    const viewport = viewportRef.current
+    if (!viewport) {
+      return
+    }
+    const { positionX, positionY, scale } = viewport.instance.transformState
+    const x = positionX - deltaX
+    const y = positionY - deltaY
+    if (x === positionX && y === positionY) {
+      return
+    }
+    viewport.instance.setTransformState(scale, x, y)
+    setPanned(true)
+  }, [])
 
   const handleUndo = (keyboardEvent: KeyboardEvent | SyntheticEvent) => {
     keyboardEvent.preventDefault()
@@ -538,11 +704,11 @@ export default function Editor(props: EditorProps) {
         toast({
           description: "Save image success",
         })
-      } catch (e: any) {
+      } catch (e) {
         toast({
           variant: "destructive",
           title: "Uh oh! Something went wrong.",
-          description: e.message ? e.message : e.toString(),
+          description: getErrorMessage(e),
         })
       }
       return
@@ -574,6 +740,7 @@ export default function Editor(props: EditorProps) {
     imageHeight,
     imageWidth,
     lineGroups,
+    toast,
   ])
 
   useHotKey("meta+s,ctrl+s", download)
@@ -591,14 +758,17 @@ export default function Editor(props: EditorProps) {
     if (isPanning) {
       return "grab"
     }
+    if (showBrush && interactiveSegState.isInteractiveSeg) {
+      return "crosshair"
+    }
     if (showBrush) {
       return "none"
     }
     return undefined
-  }, [showBrush, isPanning, isProcessing])
+  }, [showBrush, isPanning, isProcessing, interactiveSegState.isInteractiveSeg])
 
   useHotKey(
-    "[",
+    "BracketLeft",
     () => {
       decreaseBaseBrushSize()
     },
@@ -606,7 +776,7 @@ export default function Editor(props: EditorProps) {
   )
 
   useHotKey(
-    "]",
+    "BracketRight",
     () => {
       increaseBaseBrushSize()
     },
@@ -718,7 +888,7 @@ export default function Editor(props: EditorProps) {
     }
   }
 
-  const renderBrush = (style: any) => {
+  const renderBrush = (style: CSSProperties) => {
     return (
       <div
         className="absolute rounded-[50%] border-[1px] border-[solid] border-[#ffcc00] pointer-events-none bg-[#ffcc00bb]"
@@ -738,21 +908,6 @@ export default function Editor(props: EditorProps) {
     }
   }
 
-  const renderInteractiveSegCursor = () => {
-    return (
-      <div
-        className="absolute h-[20px] w-[20px] pointer-events-none rounded-[50%] bg-[rgba(21,_215,_121,_0.936)] [box-shadow:0_0_0_0_rgba(21,_215,_121,_0.936)] animate-pulse"
-        style={{
-          left: `${x}px`,
-          top: `${y}px`,
-          transform: "translate(-50%, -50%)",
-        }}
-      >
-        <CursorArrowRaysIcon />
-      </div>
-    )
-  }
-
   const renderCanvas = () => {
     return (
       <TransformWrapper
@@ -762,7 +917,9 @@ export default function Editor(props: EditorProps) {
           }
         }}
         panning={{ disabled: !isPanning, velocityDisabled: true }}
-        wheel={{ step: 0.05, wheelDisabled: isChangingBrushSizeByWheel }}
+        // wheelDisabled 始终为 true：普通滚轮交给外部监听器平移，
+        // 只有 Ctrl+滚轮 / 触控板捏合（ctrlKey=true）才由库缩放
+        wheel={{ step: 2, wheelDisabled: true }}
         centerZoomedOut
         alignmentAnimation={{ disabled: true }}
         centerOnInit
@@ -770,7 +927,13 @@ export default function Editor(props: EditorProps) {
         doubleClick={{ disabled: true }}
         initialScale={minScale}
         minScale={minScale * 0.3}
+        maxScale={50}
         onPanning={() => {
+          if (!panned) {
+            setPanned(true)
+          }
+        }}
+        onPinching={() => {
           if (!panned) {
             setPanned(true)
           }
@@ -824,12 +987,10 @@ export default function Editor(props: EditorProps) {
               onMouseDown={onMouseDown}
               onMouseUp={onCanvasMouseUp}
               onMouseMove={onMouseDrag}
-              onTouchStart={onMouseDown}
-              onTouchEnd={onCanvasMouseUp}
-              onTouchMove={onMouseDrag}
               ref={(r) => {
+                canvasRef.current = r
                 if (r && !context) {
-                  const ctx = r.getContext("2d")
+                  const ctx = r.getContext("2d", { desynchronized: true })
                   if (ctx) {
                     setContext(ctx)
                   }
@@ -892,38 +1053,388 @@ export default function Editor(props: EditorProps) {
     )
   }
 
-  const handleScroll = (event: React.WheelEvent<HTMLDivElement>) => {
-    // deltaY 是垂直滚动增量，正值表示向下滚动，负值表示向上滚动
-    // deltaX 是水平滚动增量，正值表示向右滚动，负值表示向左滚动
-    if (!isChangingBrushSizeByWheel) {
+  // 原生 touch 监听器通过 latestRef 读取最新状态/函数
+  latestRef.current = {
+    context,
+    isProcessing,
+    isPanning,
+    isInpainting,
+    isDraging,
+    isOriginalLoaded,
+    brushSize,
+    runMannually,
+    originalSrc: original?.src ?? "",
+    isInteractiveSeg: interactiveSegState.isInteractiveSeg,
+    clicks: interactiveSegState.clicks,
+    startStroke,
+    pushStrokePoint,
+    commitCurrentStroke,
+    cancelCurrentStroke,
+    runInteractiveSeg,
+    runInpainting,
+    updateInteractiveSegState,
+    setIsDraging,
+  }
+
+  // 触屏手势（原生非 passive 监听器，绕开 React passive 限制）：
+  // 支持“一指定住、另一指拖动绘制”（触控板面积不够 / 触屏锚定），
+  // 同时保留双指捏合缩放与双指平移。
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) {
       return
     }
 
-    const { deltaY } = event
-    // console.log(`水平滚动增量: ${deltaX}, 垂直滚动增量: ${deltaY}`)
-    if (deltaY > 0) {
-      increaseBaseBrushSize()
-    } else if (deltaY < 0) {
-      decreaseBaseBrushSize()
+    const onTouchStart = (event: TouchEvent) => {
+      event.preventDefault()
+      const latest = latestRef.current
+      if (!latest || latest.isProcessing) {
+        return
+      }
+      const { touches } = event
+      if (touches.length > 1) {
+        // 多指落下：先取消可能已开始的单指笔画（避免误画一个点），
+        // 记录所有手指位置，等第一次 touchmove 判断意图（锚定绘制会在此后重新起笔）
+        latest.cancelCurrentStroke()
+        touchModeRef.current = "pending"
+        touchPositionsRef.current.clear()
+        for (const t of touches) {
+          touchPositionsRef.current.set(t.identifier, {
+            x: t.clientX,
+            y: t.clientY,
+          })
+        }
+        return
+      }
+      // 单指
+      const t = touches[0]
+      touchModeRef.current = "single"
+      touchPositionsRef.current.clear()
+      touchPositionsRef.current.set(t.identifier, {
+        x: t.clientX,
+        y: t.clientY,
+      })
+      drawingTouchIdRef.current = t.identifier
+      if (latest.isInteractiveSeg) {
+        return
+      }
+      if (latest.isPanning) {
+        return
+      }
+      if (!latest.isOriginalLoaded) {
+        return
+      }
+      if (!latest.context?.canvas) {
+        return
+      }
+      latest.setIsDraging(true)
+      latest.startStroke(touchPointXY(t, canvas))
     }
-  }
+
+    const onTouchMove = (event: TouchEvent) => {
+      event.preventDefault()
+      const latest = latestRef.current
+      if (!latest || latest.isProcessing) {
+        return
+      }
+      const { touches } = event
+      const mode = touchModeRef.current
+      if (mode === "single") {
+        const t = touches[0]
+        touchPositionsRef.current.set(t.identifier, {
+          x: t.clientX,
+          y: t.clientY,
+        })
+        if (latest.isPanning || latest.isInteractiveSeg) {
+          return
+        }
+        if (!latest.isDraging) {
+          return
+        }
+        latest.pushStrokePoint(touchPointXY(t, canvas))
+        return
+      }
+      if (mode === "pending") {
+        // 位移始终相对“多指落下的那一刻”计算（不更新基准点），
+        // 以便慢速拖动也能累积到阈值，同时避免误判捏合。
+        let movingTouch: Touch | null = null
+        let movingCount = 0
+        let stillCount = 0
+        for (const t of touches) {
+          const prev = touchPositionsRef.current.get(t.identifier)
+          if (prev === undefined) {
+            continue
+          }
+          const dist = Math.hypot(t.clientX - prev.x, t.clientY - prev.y)
+          if (dist > TOUCH_MOVE_THRESHOLD) {
+            movingCount += 1
+            movingTouch = t
+          } else if (dist <= TOUCH_ANCHOR_THRESHOLD) {
+            stillCount += 1
+          }
+        }
+        const canDraw = !latest.isPanning && !latest.isInteractiveSeg
+        if (canDraw && movingCount === 1 && movingTouch && stillCount >= 1) {
+          // 一根手指按住不动、另一根拖动 → 视为绘制（保留锚定绘制特性）
+          touchModeRef.current = "draw"
+          drawingTouchIdRef.current = movingTouch.identifier
+          for (const t of touches) {
+            touchPositionsRef.current.set(t.identifier, {
+              x: t.clientX,
+              y: t.clientY,
+            })
+          }
+          // 丢弃以按住指头为起点的那段笔画，从当前移动指头重新开始
+          latest.cancelCurrentStroke()
+          latest.setIsDraging(true)
+          latest.startStroke(touchPointXY(movingTouch, canvas))
+          // 阻止库把这次多指当作 pinch
+          event.stopPropagation()
+          return
+        }
+        if (movingCount >= 2) {
+          // 明显是两根手指一起动 → 手势，交给库处理缩放/平移
+          for (const t of touches) {
+            touchPositionsRef.current.set(t.identifier, {
+              x: t.clientX,
+              y: t.clientY,
+            })
+          }
+          touchModeRef.current = "gesture"
+          latest.cancelCurrentStroke()
+          return
+        }
+        // 位移还不够明显，继续留在 pending，等下一次 touchmove 再判断
+        return
+      }
+      if (mode === "draw") {
+        for (const t of touches) {
+          touchPositionsRef.current.set(t.identifier, {
+            x: t.clientX,
+            y: t.clientY,
+          })
+        }
+        const drawingId = drawingTouchIdRef.current
+        const t = Array.from(touches).find(
+          (touch) => touch.identifier === drawingId
+        )
+        if (t && latest.isDraging) {
+          latest.pushStrokePoint(touchPointXY(t, canvas))
+        }
+        event.stopPropagation()
+        return
+      }
+      if (mode === "gesture") {
+        for (const t of touches) {
+          touchPositionsRef.current.set(t.identifier, {
+            x: t.clientX,
+            y: t.clientY,
+          })
+        }
+        return
+      }
+    }
+
+    const onTouchEnd = (event: TouchEvent) => {
+      const latest = latestRef.current
+      if (!latest) {
+        return
+      }
+      const { touches, changedTouches } = event
+      const changed = changedTouches[0]
+      const mode = touchModeRef.current
+      if (mode === "single") {
+        touchPositionsRef.current.delete(changed.identifier)
+        if (touches.length === 0) {
+          touchModeRef.current = null
+          drawingTouchIdRef.current = null
+          if (latest.isInteractiveSeg) {
+            const xy = touchPointXY(changed, canvas)
+            const newClicks = [...latest.clicks]
+            newClicks.push([xy.x, xy.y, 1, newClicks.length])
+            latest.runInteractiveSeg(newClicks)
+            latest.updateInteractiveSegState({ clicks: newClicks })
+            return
+          }
+          if (latest.isPanning || latest.isInpainting) {
+            return
+          }
+          if (!latest.isDraging || !strokeRef.current) {
+            return
+          }
+          if (!latest.originalSrc || !latest.context?.canvas) {
+            return
+          }
+          latest.setIsDraging(false)
+          latest.commitCurrentStroke()
+          if (!latest.runMannually) {
+            latest.runInpainting()
+          }
+          return
+        }
+        // 还有手指按着，继续按单指处理
+        const remaining = Array.from(touches)[0]
+        drawingTouchIdRef.current = remaining.identifier
+        touchPositionsRef.current.set(remaining.identifier, {
+          x: remaining.clientX,
+          y: remaining.clientY,
+        })
+        return
+      }
+      if (mode === "pending") {
+        touchPositionsRef.current.delete(changed.identifier)
+        if (touches.length === 0) {
+          touchModeRef.current = null
+        } else if (touches.length === 1) {
+          touchModeRef.current = "single"
+          const remaining = Array.from(touches)[0]
+          drawingTouchIdRef.current = remaining.identifier
+          touchPositionsRef.current.clear()
+          touchPositionsRef.current.set(remaining.identifier, {
+            x: remaining.clientX,
+            y: remaining.clientY,
+          })
+        }
+        return
+      }
+      if (mode === "draw") {
+        touchPositionsRef.current.delete(changed.identifier)
+        if (changed.identifier === drawingTouchIdRef.current) {
+          // 绘制手指抬起 → 提交笔画
+          touchModeRef.current = null
+          drawingTouchIdRef.current = null
+          if (
+            !latest.isPanning &&
+            !latest.isInpainting &&
+            latest.isDraging &&
+            strokeRef.current
+          ) {
+            latest.setIsDraging(false)
+            latest.commitCurrentStroke()
+            if (!latest.runMannually) {
+              latest.runInpainting()
+            }
+          }
+        } else {
+          // 按住的手指抬起，绘制手指还在 → 用剩下那根手指继续
+          const remaining = Array.from(touches).find(
+            (t) => t.identifier !== changed.identifier
+          )
+          if (remaining) {
+            drawingTouchIdRef.current = remaining.identifier
+            touchPositionsRef.current.set(remaining.identifier, {
+              x: remaining.clientX,
+              y: remaining.clientY,
+            })
+          }
+        }
+        return
+      }
+      if (mode === "gesture") {
+        for (const t of changedTouches) {
+          touchPositionsRef.current.delete(t.identifier)
+        }
+        if (touches.length === 0) {
+          touchModeRef.current = null
+        }
+      }
+    }
+
+    const onTouchCancel = () => {
+      touchPositionsRef.current.clear()
+      touchModeRef.current = null
+      drawingTouchIdRef.current = null
+      latestRef.current?.cancelCurrentStroke()
+    }
+
+    canvas.addEventListener("touchstart", onTouchStart, { passive: false })
+    canvas.addEventListener("touchmove", onTouchMove, { passive: false })
+    canvas.addEventListener("touchend", onTouchEnd)
+    canvas.addEventListener("touchcancel", onTouchCancel)
+    return () => {
+      canvas.removeEventListener("touchstart", onTouchStart)
+      canvas.removeEventListener("touchmove", onTouchMove)
+      canvas.removeEventListener("touchend", onTouchEnd)
+      canvas.removeEventListener("touchcancel", onTouchCancel)
+    }
+  }, [])
+
+  // 滚轮处理：普通滚轮（无 Ctrl）→ 平移；Ctrl+滚轮/触控板捏合 → 由库缩放；
+  // Alt+滚轮（SHORTCUT_KEY_CHANGE_BRUSH_SIZE 按下）→ 调整画笔大小。
+  // 用原生非 passive 监听器，保证 preventDefault 生效（React 的 onWheel 是 passive 的）。
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) {
+      return
+    }
+    const onWheel = (event: WheelEvent) => {
+      if (isChangingBrushSizeByWheel) {
+        const { deltaY } = event
+        if (deltaY > 0) {
+          increaseBaseBrushSize()
+        } else if (deltaY < 0) {
+          decreaseBaseBrushSize()
+        }
+        event.preventDefault()
+        return
+      }
+      if (event.ctrlKey) {
+        // 库的 wheel 监听器已经在 wrapper 上 stopPropagation，
+        // 这里只会命中图片区域以外的空白处，阻止浏览器页面级缩放
+        event.preventDefault()
+        return
+      }
+      panBy(event.deltaX, event.deltaY)
+      event.preventDefault()
+    }
+    // React 在 root 上绑定的 touchstart/touchmove 是 passive 的，无法 preventDefault。
+    // 这里用原生非 passive 监听器阻止浏览器默认行为与兼容 mouse 事件，
+    // 避免触屏操作同时触发 onMouseDown/onMouseDrag 造成双重绘制。
+    const onNativeTouchStart = (event: TouchEvent) => event.preventDefault()
+    const onNativeTouchMove = (event: TouchEvent) => event.preventDefault()
+
+    container.addEventListener("wheel", onWheel, { passive: false })
+    container.addEventListener("touchstart", onNativeTouchStart, {
+      passive: false,
+    })
+    container.addEventListener("touchmove", onNativeTouchMove, {
+      passive: false,
+    })
+    return () => {
+      container.removeEventListener("wheel", onWheel)
+      container.removeEventListener("touchstart", onNativeTouchStart)
+      container.removeEventListener("touchmove", onNativeTouchMove)
+    }
+  }, [isChangingBrushSizeByWheel, panBy, increaseBaseBrushSize, decreaseBaseBrushSize])
 
   return (
     <div
+      ref={containerRef}
       className="flex w-screen h-screen justify-center items-center"
+      style={{ touchAction: "none" }}
       aria-hidden="true"
       onMouseMove={onMouseMove}
       onMouseUp={onPointerUp}
-      onWheel={handleScroll}
     >
       {renderCanvas()}
-      {showBrush &&
-        !isInpainting &&
-        !isPanning &&
-        (interactiveSegState.isInteractiveSeg
-          ? renderInteractiveSegCursor()
-          : renderBrush(getBrushStyle(x, y)))}
-
+      <div
+        ref={brushCursorRef}
+        className="absolute rounded-[50%] border-[1px] border-[solid] border-[#ffcc00] pointer-events-none bg-[#ffcc00bb]"
+        style={{
+          left: 0,
+          top: 0,
+          width: `${brushSize * getCurScale()}px`,
+          height: `${brushSize * getCurScale()}px`,
+          opacity:
+            showBrush &&
+            !isInpainting &&
+            !isPanning &&
+            !interactiveSegState.isInteractiveSeg
+              ? 1
+              : 0,
+          transform: "translate(-50%, -50%)",
+        }}
+      />
       {showRefBrush && renderBrush(getBrushStyle(windowCenterX, windowCenterY))}
 
       <div className="fixed flex bottom-5 border px-4 py-2 rounded-[3rem] gap-8 items-center justify-center backdrop-filter backdrop-blur-md bg-background/70">

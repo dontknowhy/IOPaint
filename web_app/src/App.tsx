@@ -8,6 +8,7 @@ import Workspace from "@/components/Workspace"
 import FileSelect from "@/components/FileSelect"
 import { Toaster } from "./components/ui/toaster"
 import { useStore } from "./lib/states"
+import { toast } from "./components/ui/use-toast"
 import { useWindowSize } from "react-use"
 
 const SUPPORTED_FILE_TYPE = [
@@ -37,7 +38,7 @@ function Home() {
 
   useEffect(() => {
     updateAppState({ windowSize })
-  }, [windowSize])
+  }, [windowSize, updateAppState])
 
   useEffect(() => {
     const fetchServerConfig = async () => {
@@ -49,87 +50,89 @@ function Home() {
       }
     }
     fetchServerConfig()
-  }, [])
+  }, [setServerConfig])
 
   const dragCounter = useRef(0)
 
-  const handleDrag = useCallback((event: any) => {
+  const handleDrag = useCallback((event: DragEvent) => {
     event.preventDefault()
     event.stopPropagation()
   }, [])
 
-  const handleDragIn = useCallback((event: any) => {
+  const handleDragIn = useCallback((event: DragEvent) => {
     event.preventDefault()
     event.stopPropagation()
     dragCounter.current += 1
   }, [])
 
-  const handleDragOut = useCallback((event: any) => {
+  const handleDragOut = useCallback((event: DragEvent) => {
     event.preventDefault()
     event.stopPropagation()
     dragCounter.current -= 1
-    if (dragCounter.current > 0) return
+    if (dragCounter.current < 0) {
+      dragCounter.current = 0
+    }
   }, [])
 
-  const handleDrop = useCallback((event: any) => {
-    event.preventDefault()
-    event.stopPropagation()
-    if (event.dataTransfer.files && event.dataTransfer.files.length > 0) {
-      if (event.dataTransfer.files.length > 1) {
-        // setToastState({
-        //   open: true,
-        //   desc: "Please drag and drop only one file",
-        //   state: "error",
-        //   duration: 3000,
-        // })
-      } else {
-        const dragFile = event.dataTransfer.files[0]
-        const fileType = dragFile.type
-        if (SUPPORTED_FILE_TYPE.includes(fileType)) {
-          setFile(dragFile)
-        } else {
-          // setToastState({
-          //   open: true,
-          //   desc: "Please drag and drop an image file",
-          //   state: "error",
-          //   duration: 3000,
-          // })
-        }
+  const handleDrop = useCallback(
+    (event: DragEvent) => {
+      event.preventDefault()
+      event.stopPropagation()
+      dragCounter.current = 0
+      const dataTransfer = event.dataTransfer
+      if (!dataTransfer) {
+        return
       }
-      event.dataTransfer.clearData()
-    }
-  }, [])
+      if (dataTransfer.files && dataTransfer.files.length > 0) {
+        if (dataTransfer.files.length > 1) {
+          toast({
+            variant: "destructive",
+            description: "Please drag and drop only one file",
+          })
+        } else {
+          const dragFile = dataTransfer.files[0]
+          if (SUPPORTED_FILE_TYPE.includes(dragFile.type)) {
+            setFile(dragFile)
+          } else {
+            toast({
+              variant: "destructive",
+              description: "Please drag and drop an image file",
+            })
+          }
+        }
+        dataTransfer.clearData()
+      }
+    },
+    [setFile]
+  )
 
-  const onPaste = useCallback((event: any) => {
-    // TODO: when sd side panel open, ctrl+v not work
-    // https://htmldom.dev/paste-an-image-from-the-clipboard/
-    if (!event.clipboardData) {
-      return
-    }
-    const clipboardItems = event.clipboardData.items
-    const items: DataTransferItem[] = [].slice
-      .call(clipboardItems)
-      .filter((item: DataTransferItem) => {
+  const onPaste = useCallback(
+    (event: ClipboardEvent) => {
+      if (!event.clipboardData) {
+        return
+      }
+      const clipboardItems = event.clipboardData.items
+      const items = Array.from(clipboardItems).filter((item) => {
         // Filter the image items only
         return item.type.indexOf("image") !== -1
       })
 
-    if (items.length === 0) {
-      return
-    }
+      if (items.length === 0) {
+        return
+      }
 
-    event.preventDefault()
-    event.stopPropagation()
+      event.preventDefault()
+      event.stopPropagation()
 
-    // TODO: add confirm dialog
-
-    const item = items[0]
-    // Get the blob of image
-    const blob = item.getAsFile()
-    if (blob) {
-      setFile(blob)
-    }
-  }, [])
+      const item = items[0]
+      // Get the blob of image
+      const blob = item.getAsFile()
+      if (blob) {
+        setFile(blob)
+      }
+    },
+    [setFile]
+  )
 
   useEffect(() => {
     window.addEventListener("dragenter", handleDragIn)
@@ -144,7 +147,7 @@ function Home() {
       window.removeEventListener("drop", handleDrop)
       window.removeEventListener("paste", onPaste)
     }
-  })
+  }, [handleDragIn, handleDragOut, handleDrag, handleDrop, onPaste])
 
   return (
     <main className="flex min-h-screen flex-col items-center justify-between w-full bg-[radial-gradient(circle_at_1px_1px,_#8e8e8e8e_1px,_transparent_0)] [background-size:20px_20px] bg-repeat">

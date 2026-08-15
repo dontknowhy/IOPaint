@@ -69,7 +69,7 @@ class SDXL(DiffusionInpaintModel):
             self.model.enable_sequential_cpu_offload(gpu_id=0)
         else:
             self.model = self.model.to(device)
-            if kwargs["sd_cpu_textencoder"]:
+            if kwargs.get("sd_cpu_textencoder", False):
                 logger.info("Run Stable Diffusion TextEncoder on CPU")
                 self.model.text_encoder = CPUTextEncoderWrapper(
                     self.model.text_encoder, torch_dtype

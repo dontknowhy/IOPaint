@@ -47,6 +47,7 @@ default_configs = dict(
     mask_dir=None,
     output_dir=None,
     quality=95,
+    empty_cache_after_inpaint=False,
     enable_interactive_seg=False,
     interactive_seg_model=InteractiveSegModel.sam2_1_tiny,
     interactive_seg_device=Device.cpu,
@@ -96,6 +97,7 @@ def save_config(
     mask_dir,
     output_dir,
     quality,
+    empty_cache_after_inpaint,
     enable_interactive_seg,
     interactive_seg_model,
     interactive_seg_device,
@@ -185,6 +187,12 @@ def main(config_file: Path):
                     minimum=75,
                     maximum=100,
                     step=1,
+                )
+
+                empty_cache_after_inpaint = gr.Checkbox(
+                    init_config.empty_cache_after_inpaint,
+                    label="Empty CUDA cache after each inpainting. "
+                    "Disabled by default for faster repeated inference.",
                 )
 
                 no_half = gr.Checkbox(init_config.no_half, label=f"{NO_HALF_HELP}")
@@ -307,6 +315,7 @@ def main(config_file: Path):
                 mask_dir,
                 output_dir,
                 quality,
+                empty_cache_after_inpaint,
                 enable_interactive_seg,
                 interactive_seg_model,
                 interactive_seg_device,

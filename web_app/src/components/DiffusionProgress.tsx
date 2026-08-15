@@ -3,10 +3,11 @@ import io from "socket.io-client"
 import { Progress } from "./ui/progress"
 import { useStore } from "@/lib/states"
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const API_ENDPOINT = import.meta.env.DEV
   ? import.meta.env.VITE_BACKEND
   : ""
-const socket = io(API_ENDPOINT)
+const socket = io(API_ENDPOINT, { path: "/ws/socket.io" })
 
 const DiffusionProgress = () => {
   const [settings, isInpainting, isSD] = useStore((state) => [

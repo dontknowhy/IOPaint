@@ -1920,16 +1920,23 @@ class MAT(InpaintModel):
         """
 
         image = norm_img(image)  # [0, 1]
-        image = image * 2 - 1  # [0, 1] -> [-1, 1]
+        image *= 2
+        image -= 1  # [0, 1] -> [-1, 1]
 
         mask = (mask > 127) * 255
         mask = 255 - mask
         mask = norm_img(mask)
 
         image = (
-            torch.from_numpy(image).unsqueeze(0).to(self.torch_dtype).to(self.device)
+            torch.from_numpy(image)
+            .unsqueeze(0)
+            .to(device=self.device, dtype=self.torch_dtype)
         )
-        mask = torch.from_numpy(mask).unsqueeze(0).to(self.torch_dtype).to(self.device)
+        mask = (
+            torch.from_numpy(mask)
+            .unsqueeze(0)
+            .to(device=self.device, dtype=self.torch_dtype)
+        )
 
         output = self.model(
             image, mask, self.z, self.label, truncation_psi=1, noise_mode="none"

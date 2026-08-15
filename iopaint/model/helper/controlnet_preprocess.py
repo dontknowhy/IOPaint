@@ -1,3 +1,5 @@
+import threading
+
 import torch
 import PIL
 import cv2
@@ -5,6 +7,37 @@ from PIL import Image
 import numpy as np
 
 from iopaint.helper import pad_img_to_modulo
+
+# controlnet_aux processors are expensive to load (they read model weights from
+# disk). Cache a single instance per processor type instead of reloading them
+# on every forward call.
+_processor_lock = threading.Lock()
+_openpose_processor = None
+_midas_processor = None
+
+
+def _get_openpose_processor():
+    global _openpose_processor
+    if _openpose_processor is None:
+        with _processor_lock:
+            if _openpose_processor is None:
+                from controlnet_aux import OpenposeDetector
+
+                _openpose_processor = OpenposeDetector.from_pretrained(
+                    "lllyasviel/ControlNet"
+                )
+    return _openpose_processor
+
+
+def _get_midas_processor():
+    global _midas_processor
+    if _midas_processor is None:
+        with _processor_lock:
+            if _midas_processor is None:
+                from controlnet_aux import MidasDetector
+
+                _midas_processor = MidasDetector.from_pretrained("lllyasviel/Annotators")
+    return _midas_processor
 
 
 def make_canny_control_image(image: np.ndarray) -> Image:
@@ -17,9 +50,7 @@ def make_canny_control_image(image: np.ndarray) -> Image:
 
 
 def make_openpose_control_image(image: np.ndarray) -> Image:
-    from controlnet_aux import OpenposeDetector
-
-    processor = OpenposeDetector.from_pretrained("lllyasviel/ControlNet")
+    processor = _get_openpose_processor()
     control_image = processor(image, hand_and_face=True)
     return control_image
 
@@ -42,9 +73,7 @@ def resize_image(input_image, resolution):
 
 
 def make_depth_control_image(image: np.ndarray) -> Image:
-    from controlnet_aux import MidasDetector
-
-    midas = MidasDetector.from_pretrained("lllyasviel/Annotators")
+    midas = _get_midas_processor()
 
     origin_height, origin_width = image.shape[:2]
     pad_image = pad_img_to_modulo(image, mod=64, square=False, min_size=512)

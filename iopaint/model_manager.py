@@ -1,4 +1,5 @@
 from typing import List, Dict
+import threading
 
 import torch
 from loguru import logger
@@ -19,9 +20,9 @@ class ModelManager:
         self.name = name
         self.device = device
         self.kwargs = kwargs
+        self.lock = threading.Lock()
         self.available_models: Dict[str, ModelInfo] = {}
         self.scan_models()
-
         self.enable_controlnet = kwargs.get("enable_controlnet", False)
         controlnet_method = kwargs.get("controlnet_method", None)
         if (
@@ -92,7 +93,6 @@ class ModelManager:
     @torch.inference_mode()
     def __call__(self, image, mask, config: InpaintRequest):
         """
-
         Args:
             image: [H, W, C] RGB
             mask: [H, W, 1] 255 means area to repaint
@@ -101,6 +101,13 @@ class ModelManager:
         Returns:
             BGR image
         """
+        # Serialize model calls: the underlying pipeline shares mutable state
+        # (e.g. self.model.scheduler is swapped per request), so concurrent
+        # calls would race on it.
+        with self.lock:
+            return self._run(image, mask, config)
+
+    def _run(self, image, mask, config: InpaintRequest):
         if config.enable_controlnet:
             self.switch_controlnet_method(config)
         if config.enable_brushnet:
@@ -115,36 +122,40 @@ class ModelManager:
         self.available_models = {it.name: it for it in available_models}
         return available_models
 
+    def get_available_models(self) -> List[ModelInfo]:
+        return list(self.available_models.values())
+
     def switch(self, new_name: str):
         if new_name == self.name:
             return
 
-        old_name = self.name
-        old_controlnet_method = self.controlnet_method
-        self.name = new_name
+        with self.lock:
+            old_name = self.name
+            old_controlnet_method = self.controlnet_method
+            self.name = new_name
 
-        if (
-            self.available_models[new_name].support_controlnet
-            and self.controlnet_method
-            not in self.available_models[new_name].controlnets
-        ):
-            self.controlnet_method = self.available_models[new_name].controlnets[0]
-        try:
-            # TODO: enable/disable controlnet without reload model
-            del self.model
-            torch_gc()
+            if (
+                self.available_models[new_name].support_controlnet
+                and self.controlnet_method
+                not in self.available_models[new_name].controlnets
+            ):
+                self.controlnet_method = self.available_models[new_name].controlnets[0]
+            try:
+                # TODO: enable/disable controlnet without reload model
+                del self.model
+                torch_gc()
 
-            self.model = self.init_model(
-                new_name, switch_mps_device(new_name, self.device), **self.kwargs
-            )
-        except Exception as e:
-            self.name = old_name
-            self.controlnet_method = old_controlnet_method
-            logger.info(f"Switch model from {old_name} to {new_name} failed, rollback")
-            self.model = self.init_model(
-                old_name, switch_mps_device(old_name, self.device), **self.kwargs
-            )
-            raise e
+                self.model = self.init_model(
+                    new_name, switch_mps_device(new_name, self.device), **self.kwargs
+                )
+            except Exception as e:
+                self.name = old_name
+                self.controlnet_method = old_controlnet_method
+                logger.info(f"Switch model from {old_name} to {new_name} failed, rollback")
+                self.model = self.init_model(
+                    old_name, switch_mps_device(old_name, self.device), **self.kwargs
+                )
+                raise e
 
     def switch_brushnet_method(self, config):
         if not self.available_models[self.name].support_brushnet:
@@ -248,21 +259,21 @@ class ModelManager:
                 logger.info("Disable PowerPaintV2")
 
     def enable_disable_lcm_lora(self, config: InpaintRequest):
-        if self.available_models[self.name].support_lcm_lora:
+        if not self.available_models[self.name].support_lcm_lora:
+            return
+
+        if config.sd_lcm_lora:
             # TODO: change this if load other lora is supported
-            lcm_lora_loaded = bool(self.model.model.get_list_adapters())
-            if config.sd_lcm_lora:
-                if not lcm_lora_loaded:
-                    logger.info("Load LCM LORA")
-                    self.model.model.load_lora_weights(
-                        self.model.lcm_lora_id,
-                        weight_name="pytorch_lora_weights.safetensors",
-                        local_files_only=is_local_files_only(),
-                    )
-                else:
-                    logger.info("Enable LCM LORA")
-                    self.model.model.enable_lora()
+            if not bool(self.model.model.get_list_adapters()):
+                logger.info("Load LCM LORA")
+                self.model.model.load_lora_weights(
+                    self.model.lcm_lora_id,
+                    weight_name="pytorch_lora_weights.safetensors",
+                    local_files_only=is_local_files_only(),
+                )
             else:
-                if lcm_lora_loaded:
-                    logger.info("Disable LCM LORA")
-                    self.model.model.disable_lora()
+                logger.info("Enable LCM LORA")
+                self.model.model.enable_lora()
+        elif bool(self.model.model.get_list_adapters()):
+            logger.info("Disable LCM LORA")
+            self.model.model.disable_lora()

@@ -88,10 +88,10 @@ class MIGAN(InpaintModel):
         """
 
         image = norm_img(image)  # [0, 1]
-        image = image * 2 - 1  # [0, 1] -> [-1, 1]
+        image *= 2
+        image -= 1  # [0, 1] -> [-1, 1]
         mask = (mask > 120) * 255
         mask = norm_img(mask)
-
         image = torch.from_numpy(image).unsqueeze(0).to(self.device)
         mask = torch.from_numpy(mask).unsqueeze(0).to(self.device)
 

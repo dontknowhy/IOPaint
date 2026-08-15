@@ -74,7 +74,6 @@ class Manga(InpaintModel):
         ).to(self.device)
         start = time.time()
         lines = self.line_model(gray_img)
-        torch.cuda.empty_cache()
         lines = torch.clamp(lines, 0, 255)
         logger.info(f"erika_model time: {time.time() - start}")
 
