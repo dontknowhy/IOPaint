@@ -1,6 +1,12 @@
-torch>=2.0.0
+# NOTE: torch/torchvision must be built for CUDA 12.1 (cu121) and bundle cuDNN 8.9.x,
+# because cuDNN >= 9.1 dropped support for SM < 7.5 GPUs (e.g. Pascal P104).
+# Install from a CUDA index, e.g.:
+#   pip install -r requirements.txt --index-url https://mirror.sjtu.edu.cn/pytorch-wheels/cu121
+# (nvidia-cudnn-cu12==8.9.2.26 and other nvidia-* runtimes are pulled in by torch's own pins)
+torch==2.3.1+cu121
+torchvision==0.18.1+cu121
 opencv-python
-diffusers==0.39.0
+diffusers==0.34.0
 huggingface_hub==0.36.2
 accelerate
 peft==0.20.0
