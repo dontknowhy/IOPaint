@@ -46,6 +46,10 @@ import {
 
 const TOOLBAR_HEIGHT = 200
 const COMPARE_SLIDER_DURATION_MS = 300
+// 触控板捏合 / Ctrl+滚轮的恒定缩放速度：每单位 deltaY 缩放固定倍数
+// （指数缩放，几何级数，任何缩放级别下手感一致）
+const WHEEL_ZOOM_SPEED = 0.003
+const MAX_SCALE = 50
 // 双指中判定“哪根手指在动”的移动阈值（px）
 const TOUCH_MOVE_THRESHOLD = 10
 // 判定“哪根手指按住了没动”的阈值（px），避免把捏合开始阶段误判成锚定绘制
@@ -236,9 +240,13 @@ export default function Editor(props: EditorProps) {
     let base = maskBaseCanvasRef.current
     if (!base) {
       base = document.createElement("canvas")
+      maskBaseCanvasRef.current = base
+    }
+    // 始终与当前图片尺寸对齐：切换图片后尺寸变化时同步 base 画布，
+    // 避免绘制/提交时用旧的画布尺寸导致笔画错位或“消失”
+    if (base.width !== imageWidth || base.height !== imageHeight) {
       base.width = imageWidth
       base.height = imageHeight
-      maskBaseCanvasRef.current = base
     }
     const baseCtx = base.getContext("2d")
     if (!baseCtx) {
@@ -264,6 +272,8 @@ export default function Editor(props: EditorProps) {
         imageHeight
       )
     }
+    // 只画当前提交的笔画（curLineGroup）。inpaint 完成后由 runInpainting
+    // 清空 curLineGroup，掩膜随之从画布清除（标准行为）。
     drawLines(baseCtx, curLineGroup)
 
     context.canvas.width = imageWidth
@@ -534,6 +544,9 @@ export default function Editor(props: EditorProps) {
       const { blob } = res
       const img = new Image()
       img.onload = () => {
+        if (useStore.getState().file !== file) {
+          return
+        }
         updateInteractiveSegState({ tmpInteractiveSegMask: img })
       }
       img.src = blob
@@ -649,6 +662,43 @@ export default function Editor(props: EditorProps) {
     viewport.instance.setTransformState(scale, x, y)
     setPanned(true)
   }, [])
+
+  // 恒定速度缩放：缩放量只与 deltaY（捏合/滚轮位移）成正比，
+  // 不随缩放级别变化，绕光标所在位置缩放。
+  const zoomByWheel = useCallback(
+    (event: WheelEvent) => {
+      const viewport = viewportRef.current
+      if (!viewport) {
+        return
+      }
+      const { instance } = viewport
+      const content = instance.contentComponent
+      if (!content) {
+        return
+      }
+      const { scale, positionX, positionY } = instance.transformState
+      const factor = Math.exp(-event.deltaY * WHEEL_ZOOM_SPEED)
+      const newScale = Math.min(
+        Math.max(scale * factor, minScale * 0.3),
+        MAX_SCALE
+      )
+      if (newScale === scale) {
+        return
+      }
+      const rect = content.getBoundingClientRect()
+      const mouseX = (event.clientX - rect.left) / scale
+      const mouseY = (event.clientY - rect.top) / scale
+      const scaleDiff = newScale - scale
+      instance.setTransformState(
+        newScale,
+        positionX - mouseX * scaleDiff,
+        positionY - mouseY * scaleDiff
+      )
+      setScale(newScale)
+      setPanned(true)
+    },
+    [minScale]
+  )
 
   const handleUndo = (keyboardEvent: KeyboardEvent | SyntheticEvent) => {
     keyboardEvent.preventDefault()
@@ -917,9 +967,9 @@ export default function Editor(props: EditorProps) {
           }
         }}
         panning={{ disabled: !isPanning, velocityDisabled: true }}
-        // wheelDisabled 始终为 true：普通滚轮交给外部监听器平移，
-        // 只有 Ctrl+滚轮 / 触控板捏合（ctrlKey=true）才由库缩放
-        wheel={{ step: 2, wheelDisabled: true }}
+        // wheel 处理全部交给外部原生监听器（普通滚轮平移、Ctrl+滚轮/捏合恒定速度缩放），
+        // 禁用库自带的 wheel 缩放，避免它 stopPropagation 抢占事件
+        wheel={{ disabled: true }}
         centerZoomedOut
         alignmentAnimation={{ disabled: true }}
         centerOnInit
@@ -1379,8 +1429,8 @@ export default function Editor(props: EditorProps) {
         return
       }
       if (event.ctrlKey) {
-        // 库的 wheel 监听器已经在 wrapper 上 stopPropagation，
-        // 这里只会命中图片区域以外的空白处，阻止浏览器页面级缩放
+        // 触控板捏合 / Ctrl+滚轮：恒定速度缩放
+        zoomByWheel(event)
         event.preventDefault()
         return
       }
@@ -1405,7 +1455,13 @@ export default function Editor(props: EditorProps) {
       container.removeEventListener("touchstart", onNativeTouchStart)
       container.removeEventListener("touchmove", onNativeTouchMove)
     }
-  }, [isChangingBrushSizeByWheel, panBy, increaseBaseBrushSize, decreaseBaseBrushSize])
+  }, [
+    isChangingBrushSizeByWheel,
+    panBy,
+    zoomByWheel,
+    increaseBaseBrushSize,
+    decreaseBaseBrushSize,
+  ])
 
   return (
     <div

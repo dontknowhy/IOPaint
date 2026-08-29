@@ -523,6 +523,11 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           }
           const newRender = new Image()
           await loadImage(newRender, blob)
+          // 若期间用户切换了图片，丢弃过期结果，避免污染新图片的编辑器状态
+          // （否则会出现新图片上显示旧图渲染结果 / 画布尺寸错乱等“画笔消失”现象）
+          if (get().file !== file) {
+            return
+          }
           const newRenders = [...renders, newRender]
           get().setImageSize(newRender.width, newRender.height)
           get().updateEditorState({
@@ -540,6 +545,9 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           })
         }
 
+        if (get().file !== file) {
+          return
+        }
         get().resetRedoState()
         set((state) => {
           state.isInpainting = false
@@ -552,6 +560,7 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         pluginName: string,
         params: PluginParams = { upscale: 1 }
       ) => {
+        const file = get().file
         const { renders, lineGroups } = get().editorState
         set((state) => {
           state.isPluginRunning = true
@@ -571,6 +580,9 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           if (!genMask) {
             const newRender = new Image()
             await loadImage(newRender, blob)
+            if (get().file !== file) {
+              return
+            }
             get().setImageSize(newRender.width, newRender.height)
             const newRenders = [...renders, newRender]
             const newLineGroups = [...lineGroups, []]
@@ -581,6 +593,9 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           } else {
             const newMask = new Image()
             await loadImage(newMask, blob)
+            if (get().file !== file) {
+              return
+            }
             set((state) => {
               state.editorState.extraMasks.push(castDraft(newMask))
             })
@@ -595,6 +610,9 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
             variant: "destructive",
             description: getErrorMessage(e),
           })
+        }
+        if (get().file !== file) {
+          return
         }
         set((state) => {
           state.isPluginRunning = false
@@ -911,6 +929,9 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         }
         set((state) => {
           state.file = file
+          state.isInpainting = false
+          state.isPluginRunning = false
+          state.isAdjustingMask = false
           state.interactiveSegState = castDraft(
             defaultValues.interactiveSegState
           )
@@ -1031,6 +1052,7 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         }),
 
       adjustMask: async (operate: AdjustMaskOperate) => {
+        const file = get().file
         const { imageWidth, imageHeight } = get()
         const { curLineGroup, extraMasks } = get().editorState
         const { adjustMaskKernelSize } = get().settings
@@ -1056,6 +1078,9 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           adjustMaskKernelSize
         )
         const newMask = await blobToImage(newMaskBlob)
+        if (get().file !== file) {
+          return
+        }
 
         // TODO: currently ignore stroke undo/redo
         set((state) => {
