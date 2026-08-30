@@ -1,5 +1,5 @@
 import * as React from "react"
-import io from "socket.io-client"
+import io, { Socket } from "socket.io-client"
 import { Progress } from "./ui/progress"
 import { useStore } from "@/lib/states"
 
@@ -7,7 +7,6 @@ import { useStore } from "@/lib/states"
 export const API_ENDPOINT = import.meta.env.DEV
   ? import.meta.env.VITE_BACKEND
   : ""
-const socket = io(API_ENDPOINT, { path: "/ws/socket.io" })
 
 const DiffusionProgress = () => {
   const [settings, isInpainting, isSD] = useStore((state) => [
@@ -18,10 +17,14 @@ const DiffusionProgress = () => {
 
   const [isConnected, setIsConnected] = React.useState(false)
   const [step, setStep] = React.useState(0)
+  const socketRef = React.useRef<Socket | null>(null)
 
   const progress = Math.min(Math.round((step / settings.sdSteps) * 100), 100)
 
   React.useEffect(() => {
+    const socket = io(API_ENDPOINT, { path: "/ws/socket.io" })
+    socketRef.current = socket
+
     socket.on("connect", () => {
       setIsConnected(true)
     })
@@ -45,6 +48,8 @@ const DiffusionProgress = () => {
       socket.off("disconnect")
       socket.off("diffusion_progress")
       socket.off("diffusion_finish")
+      socket.disconnect()
+      socketRef.current = null
     }
   }, [])
 

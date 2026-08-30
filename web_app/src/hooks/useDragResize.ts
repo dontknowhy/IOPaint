@@ -1,11 +1,5 @@
 import { useEffect, useState } from "react"
-
-export interface Rect {
-  x: number
-  y: number
-  width: number
-  height: number
-}
+import { Rect } from "@/lib/types"
 
 interface EVData {
   initX: number

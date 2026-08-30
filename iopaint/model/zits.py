@@ -176,7 +176,7 @@ def load_image(img, mask, device, sigma256=3.0):
         edge_256 = skimage.feature.canny(gray_256, sigma=3.0, mask=None).astype(float)
         # cv2.imwrite("skimage_gray.jpg", (gray_256*255).astype(np.uint8))
         # cv2.imwrite("skimage_edge.jpg", (edge_256*255).astype(np.uint8))
-    except:
+    except Exception:
         gray_256 = cv2.cvtColor(img_256, cv2.COLOR_RGB2GRAY)
         gray_256_blured = cv2.GaussianBlur(
             gray_256, ksize=(7, 7), sigmaX=sigma256, sigmaY=sigma256
@@ -287,7 +287,7 @@ class ZITS(InpaintModel):
                 masks=items["mask_512"],
                 mask_th=0.85,
             )
-        except:
+        except Exception:
             line_256 = torch.zeros_like(items["mask_256"])
 
         print(f"wireframe_forward time: {(time.time() - start) * 1000:.2f}ms")
@@ -411,7 +411,7 @@ class ZITS(InpaintModel):
                         *to_int(line[0:2]), *to_int(line[2:4])
                     )
                     lmap[rr, cc] = np.maximum(lmap[rr, cc], value)
-                except:
+                except Exception:
                     cv2.line(
                         lmap,
                         to_int(line[0:2][::-1]),

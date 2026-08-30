@@ -13,7 +13,7 @@ const useResolution = () => {
     return () => {
       window.removeEventListener('resize', windowSizeHandler)
     }
-  })
+  }, [windowSizeHandler])
 
   if (width < 768) {
     return 'mobile'

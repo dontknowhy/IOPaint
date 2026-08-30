@@ -61,11 +61,11 @@ def download_model(url, model_md5: str = None):
                         f"Model md5: {_md5}, expected md5: {model_md5}, wrong model deleted. Please restart iopaint."
                         f"If you still have errors, please try download model manually first https://lama-cleaner-docs.vercel.app/install/download_model_manually.\n"
                     )
-                except:
+                except OSError:
                     logger.error(
                         f"Model md5: {_md5}, expected md5: {model_md5}, please delete {cached_file} and restart iopaint."
                     )
-                exit(-1)
+                raise SystemExit(1)
 
     return cached_file
 
@@ -85,16 +85,16 @@ def handle_error(model_path, model_md5, e):
                 f"Model md5: {_md5}, expected md5: {model_md5}, wrong model deleted. Please restart iopaint."
                 f"If you still have errors, please try download model manually first https://lama-cleaner-docs.vercel.app/install/download_model_manually.\n"
             )
-        except:
+        except OSError:
             logger.error(
                 f"Model md5: {_md5}, expected md5: {model_md5}, please delete {model_path} and restart iopaint."
             )
     else:
         logger.error(
             f"Failed to load model {model_path},"
-            f"please submit an issue at https://github.com/Sanster/lama-cleaner/issues and include a screenshot of the error:\n{e}"
+            f"please submit an issue at https://github.com/Sanster/IOPaint/issues and include a screenshot of the error:\n{e}"
         )
-    exit(-1)
+    raise SystemExit(1)
 
 
 def load_jit_model(url_or_path, device, model_md5: str):
@@ -144,7 +144,9 @@ def numpy_to_bytes(image_numpy: np.ndarray, ext: str) -> bytes:
 _PIL_SAVE_WHITELIST = ("exif", "icc_profile", "dpi", "comment")
 
 
-def pil_to_bytes(pil_img, ext: str, quality: int = 95, infos={}) -> bytes:
+def pil_to_bytes(pil_img, ext: str, quality: int = 95, infos=None) -> bytes:
+    if infos is None:
+        infos = {}
     with io.BytesIO() as output:
         if ext == "jpg":
             ext = "jpeg"
@@ -175,7 +177,7 @@ def load_img(img_bytes, gray: bool = False, return_info: bool = False):
 
     try:
         image = ImageOps.exif_transpose(image)
-    except:
+    except Exception:
         pass
 
     if gray:
@@ -327,7 +329,7 @@ def decode_base64_to_image(
     alpha_channel = None
     try:
         image = ImageOps.exif_transpose(image)
-    except:
+    except Exception:
         pass
     # exif_transpose will remove exif rotate info，we must call image.info after exif_transpose
     infos = image.info

@@ -144,7 +144,7 @@ def scan_single_file_diffusion_models(cache_dir) -> List[ModelInfo]:
             with open(cache_file, "r", encoding="utf-8") as f:
                 model_type_cache = json.load(f)
                 assert isinstance(model_type_cache, dict)
-        except:
+        except (json.JSONDecodeError, AssertionError, OSError):
             pass
 
     res = []
@@ -179,7 +179,7 @@ def scan_single_file_diffusion_models(cache_dir) -> List[ModelInfo]:
             with open(sdxl_cache_file, "r", encoding="utf-8") as f:
                 sdxl_model_type_cache = json.load(f)
                 assert isinstance(sdxl_model_type_cache, dict)
-        except:
+        except (json.JSONDecodeError, AssertionError, OSError):
             pass
 
     for it in stable_diffusion_xl_dir.glob("*.*"):
@@ -241,7 +241,7 @@ def scan_diffusers_models() -> List[ModelInfo]:
         try:
             with open(it, "r", encoding="utf-8") as f:
                 data = json.load(f)
-        except:
+        except (json.JSONDecodeError, OSError):
             continue
 
         _class_name = data["_class_name"]
@@ -291,7 +291,7 @@ def _scan_converted_diffusers_models(cache_dir) -> List[ModelInfo]:
         with open(it, "r", encoding="utf-8") as f:
             try:
                 data = json.load(f)
-            except:
+            except (json.JSONDecodeError, ValueError):
                 logger.error(
                     f"Failed to load {it}, please try revert from original model or fix model_index.json by hand."
                 )

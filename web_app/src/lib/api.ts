@@ -114,7 +114,7 @@ export default async function inpaint(
     { responseType: "blob" }
   )
   return {
-    blob: URL.createObjectURL(res.data),
+    blob: res.data as Blob,
     seed: res.headers["x-seed"] as string | undefined,
   }
 }
@@ -160,7 +160,7 @@ export async function runPlugin(
     },
     { responseType: "blob" }
   )
-  return { blob: URL.createObjectURL(res.data) }
+  return { blob: res.data as Blob }
 }
 
 async function getMedia(tab: string, filename: string): Promise<Blob> {

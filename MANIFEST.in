@@ -1,0 +1,9 @@
+include README.md
+include requirements.txt
+include pyproject.toml
+
+recursive-include iopaint/web_app *
+recursive-include iopaint/model *.yaml *.txt
+
+global-exclude __pycache__
+global-exclude *.pyc

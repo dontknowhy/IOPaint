@@ -9,7 +9,7 @@ from starlette.responses import FileResponse
 
 from ..schema import MediasResponse, MediaTab
 
-LARGE_ENOUGH_NUMBER = 100
+LARGE_ENOUGH_NUMBER = 10
 PngImagePlugin.MAX_TEXT_CHUNK = LARGE_ENOUGH_NUMBER * (1024**2)
 from .storage_backends import FilesystemStorageBackend
 from .utils import aspect_to_string, generate_filename, glob_img
@@ -101,14 +101,14 @@ class FileManager:
             ):
                 new_cache[name] = entry
             else:
-                img = Image.open(path)
-                entry = MediasResponse(
-                    name=name,
-                    height=img.height,
-                    width=img.width,
-                    ctime=st.st_ctime,
-                    mtime=st.st_mtime,
-                )
+                with Image.open(path) as img:
+                    entry = MediasResponse(
+                        name=name,
+                        height=img.height,
+                        width=img.width,
+                        ctime=st.st_ctime,
+                        mtime=st.st_mtime,
+                    )
                 changed = True
             new_cache[name] = entry
             res.append(entry)
@@ -128,51 +128,53 @@ class FileManager:
         original_path, original_filename = os.path.split(original_filename)
         original_filepath = os.path.join(directory, original_path, original_filename)
         image = Image.open(BytesIO(storage.read(original_filepath)))
-
-        # keep ratio resize
-        if not width and not height:
-            width = 256
-
-        if width != 0:
-            height = int(image.height * width / image.width)
-        else:
-            width = int(image.width * height / image.height)
-
-        thumbnail_size = (width, height)
-
-        thumbnail_filename = generate_filename(
-            directory,
-            original_filename,
-            aspect_to_string(thumbnail_size),
-            crop,
-            background,
-            quality,
-        )
-
-        thumbnail_filepath = os.path.join(
-            self.thumbnail_directory, original_path, thumbnail_filename
-        )
-
-        if storage.exists(thumbnail_filepath):
-            return thumbnail_filepath, (width, height)
-
         try:
-            image.load()
-        except (IOError, OSError):
-            self.app.logger.warning("Thumbnail not load image: %s", original_filepath)
+            # keep ratio resize
+            if not width and not height:
+                width = 256
+
+            if width != 0:
+                height = int(image.height * width / image.width)
+            else:
+                width = int(image.width * height / image.height)
+
+            thumbnail_size = (width, height)
+
+            thumbnail_filename = generate_filename(
+                directory,
+                original_filename,
+                aspect_to_string(thumbnail_size),
+                crop,
+                background,
+                quality,
+            )
+
+            thumbnail_filepath = os.path.join(
+                self.thumbnail_directory, original_path, thumbnail_filename
+            )
+
+            if storage.exists(thumbnail_filepath):
+                return thumbnail_filepath, (width, height)
+
+            try:
+                image.load()
+            except (IOError, OSError):
+                self.app.logger.warning("Thumbnail not load image: %s", original_filepath)
+                return thumbnail_filepath, (width, height)
+
+            # get original image format
+            options["format"] = options.get("format", image.format)
+
+            image = self._create_thumbnail(
+                image, thumbnail_size, crop, background=background
+            )
+
+            raw_data = self.get_raw_data(image, **options)
+            storage.save(thumbnail_filepath, raw_data)
+
             return thumbnail_filepath, (width, height)
-
-        # get original image format
-        options["format"] = options.get("format", image.format)
-
-        image = self._create_thumbnail(
-            image, thumbnail_size, crop, background=background
-        )
-
-        raw_data = self.get_raw_data(image, **options)
-        storage.save(thumbnail_filepath, raw_data)
-
-        return thumbnail_filepath, (width, height)
+        finally:
+            image.close()
 
     def get_raw_data(self, image, **options):
         data = {

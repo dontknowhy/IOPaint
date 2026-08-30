@@ -35,6 +35,8 @@ import {
   loadImage,
   srcToFile,
 } from "./utils"
+
+const _activeBlobUrls = new Set<string>()
 import inpaint, { getGenInfo, postAdjustMask, runPlugin } from "./api"
 import { toast } from "@/components/ui/use-toast"
 
@@ -521,11 +523,15 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           if (seed) {
             get().setSeed(parseInt(seed, 10))
           }
+          const blobUrl = URL.createObjectURL(blob)
+          _activeBlobUrls.add(blobUrl)
           const newRender = new Image()
-          await loadImage(newRender, blob)
+          await loadImage(newRender, blobUrl)
           // 若期间用户切换了图片，丢弃过期结果，避免污染新图片的编辑器状态
-          // （否则会出现新图片上显示旧图渲染结果 / 画布尺寸错乱等“画笔消失”现象）
+          // （否则会出现新图片上显示旧图渲染结果 / 画布尺寸错乱等"画笔消失"现象）
           if (get().file !== file) {
+            URL.revokeObjectURL(blobUrl)
+            _activeBlobUrls.delete(blobUrl)
             return
           }
           const newRenders = [...renders, newRender]
@@ -578,9 +584,13 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           const { blob } = res
 
           if (!genMask) {
+            const blobUrl = URL.createObjectURL(blob)
+            _activeBlobUrls.add(blobUrl)
             const newRender = new Image()
-            await loadImage(newRender, blob)
+            await loadImage(newRender, blobUrl)
             if (get().file !== file) {
+              URL.revokeObjectURL(blobUrl)
+              _activeBlobUrls.delete(blobUrl)
               return
             }
             get().setImageSize(newRender.width, newRender.height)
@@ -591,8 +601,10 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
               lineGroups: newLineGroups,
             })
           } else {
+            const blobUrl = URL.createObjectURL(blob)
             const newMask = new Image()
-            await loadImage(newMask, blob)
+            await loadImage(newMask, blobUrl)
+            URL.revokeObjectURL(blobUrl)
             if (get().file !== file) {
               return
             }
@@ -759,6 +771,10 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           state.editorState.redoLineGroups = []
           state.editorState.redoRenders = []
         })
+        for (const url of _activeBlobUrls) {
+          URL.revokeObjectURL(url)
+        }
+        _activeBlobUrls.clear()
       },
 
       //****//
@@ -893,8 +909,9 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
 
       handleFileManagerMaskSelect: async (blob: Blob) => {
         const newMask = new Image()
-
-        await loadImage(newMask, URL.createObjectURL(blob))
+        const url = URL.createObjectURL(blob)
+        await loadImage(newMask, url)
+        URL.revokeObjectURL(url)
         set((state) => {
           state.editorState.extraMasks.push(castDraft(newMask))
         })
@@ -927,6 +944,10 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
             })
           }
         }
+        for (const url of _activeBlobUrls) {
+          URL.revokeObjectURL(url)
+        }
+        _activeBlobUrls.clear()
         set((state) => {
           state.file = file
           state.isInpainting = false

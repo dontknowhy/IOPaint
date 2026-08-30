@@ -1,27 +1,39 @@
 import setuptools
 from pathlib import Path
 
-package_files = Path("iopaint/web_app").glob("**/*")
-package_files = [str(it).replace("iopaint/", "") for it in package_files]
-package_files += ["model/anytext/ocr_recog/ppocr_keys_v1.txt"]
-package_files += ["model/anytext/anytext_sd15.yaml"]
-package_files += ["model/original_sd_configs/sd_xl_base.yaml"]
-package_files += ["model/original_sd_configs/sd_xl_refiner.yaml"]
-package_files += ["model/original_sd_configs/v1-inference.yaml"]
-package_files += ["model/original_sd_configs/v2-inference-v.yaml"]
+# --- Web-app assets -------------------------------------------------------
+# The frontend is built with npm and the dist/ output is copied into
+# iopaint/web_app/ by publish.sh (or by the developer manually).
+# When that directory doesn't exist (e.g. a raw clone + `pip install ./`),
+# we gracefully fall back to an empty list so that the install still works
+# (the CLI/API will function, just without the bundled web UI).
+_web_app_dir = Path("iopaint/web_app")
+if _web_app_dir.is_dir():
+    package_files = [str(p.relative_to("iopaint")) for p in _web_app_dir.rglob("*") if p.is_file()]
+else:
+    package_files = []
 
+# --- Static data files shipped inside the iopaint package -----------------
+package_files += [
+    "model/anytext/ocr_recog/ppocr_keys_v1.txt",
+    "model/anytext/anytext_sd15.yaml",
+    "model/original_sd_configs/sd_xl_base.yaml",
+    "model/original_sd_configs/sd_xl_refiner.yaml",
+    "model/original_sd_configs/v1-inference.yaml",
+    "model/original_sd_configs/v2-inference-v.yaml",
+]
 
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 
 def load_requirements():
-    requirements_file_name = "requirements.txt"
     requires = []
-    with open(requirements_file_name) as f:
+    with open("requirements.txt") as f:
         for line in f:
-            if line:
-                requires.append(line.strip())
+            line = line.strip()
+            if line and not line.startswith("#"):
+                requires.append(line)
     return requires
 
 
@@ -38,16 +50,17 @@ setuptools.setup(
     packages=setuptools.find_packages("."),
     package_data={"iopaint": package_files},
     install_requires=load_requirements(),
-    python_requires=">=3.7",
+    python_requires=">=3.8",
     entry_points={"console_scripts": ["iopaint=iopaint:entry_point"]},
     classifiers=[
         "License :: OSI Approved :: Apache Software License",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.7",
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
 )

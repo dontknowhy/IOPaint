@@ -8,6 +8,8 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+let _keepAliveTimer: ReturnType<typeof setInterval> | null = null
+
 export function keepGUIAlive() {
   async function getRequest(url = "") {
     const response = await fetch(url, {
@@ -25,9 +27,19 @@ export function keepGUIAlive() {
     })
   }
 
+  if (_keepAliveTimer !== null) {
+    return
+  }
   const intervalRequest = 3 * 1000
   keepAliveServer()
-  setInterval(keepAliveServer, intervalRequest)
+  _keepAliveTimer = setInterval(keepAliveServer, intervalRequest)
+}
+
+export function stopGUIAlive() {
+  if (_keepAliveTimer !== null) {
+    clearInterval(_keepAliveTimer)
+    _keepAliveTimer = null
+  }
 }
 
 export function loadImage(image: HTMLImageElement, src: string) {
@@ -47,6 +59,7 @@ export async function blobToImage(blob: Blob) {
   const dataURL = URL.createObjectURL(blob)
   const newImage = new Image()
   await loadImage(newImage, dataURL)
+  URL.revokeObjectURL(dataURL)
   return newImage
 }
 
@@ -205,16 +218,18 @@ export function drawLines(
   ctx.lineCap = "round"
   ctx.lineJoin = "round"
 
-  lines.forEach((line) => {
+  for (const line of lines) {
     if (!line?.pts.length || !line.size) {
-      return
+      continue
     }
     ctx.lineWidth = line.size
     ctx.beginPath()
     ctx.moveTo(line.pts[0].x, line.pts[0].y)
-    line.pts.forEach((pt) => ctx.lineTo(pt.x, pt.y))
+    for (let i = 1; i < line.pts.length; i++) {
+      ctx.lineTo(line.pts[i].x, line.pts[i].y)
+    }
     ctx.stroke()
-  })
+  }
 }
 
 export const generateMask = (

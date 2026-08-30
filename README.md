@@ -58,7 +58,17 @@
 
 ## Quick Start
 
-### Start webui
+### Using Conda (Recommended)
+
+```bash
+git clone https://github.com/Sanster/IOPaint.git
+cd IOPaint
+bash scripts/setup_conda.sh
+conda activate iopaint
+iopaint start --model=lama --device=cuda --port=8080
+```
+
+### Using pip
 
 IOPaint provides a convenient webui for using the latest AI models to edit your images.
 You can install and start IOPaint easily by running following command:
@@ -107,11 +117,21 @@ You can see more information about the available models and plugins supported by
 
 ## Development
 
-Install [nodejs](https://nodejs.org/en), then install the frontend dependencies.
+### Setup
 
 ```bash
 git clone https://github.com/Sanster/IOPaint.git
-cd IOPaint/web_app
+cd IOPaint
+bash scripts/setup_conda.sh
+conda activate iopaint
+```
+
+### Frontend
+
+Install [nodejs](https://nodejs.org/en), then install the frontend dependencies.
+
+```bash
+cd web_app
 npm install
 npm run build
 cp -r dist/ ../iopaint/web_app

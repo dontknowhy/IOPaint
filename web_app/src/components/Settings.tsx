@@ -564,68 +564,6 @@ export function SettingsDialog() {
       </div>
     )
   }
-  // function renderFileManagerSettings() {
-  //   return (
-  //     <div className="flex flex-col justify-between rounded-lg gap-4 w-[400px]">
-  //       <FormField
-  //         control={form.control}
-  //         name="enableFileManager"
-  //         render={({ field }) => (
-  //           <FormItem className="flex items-center justify-between gap-4">
-  //             <div className="space-y-0.5">
-  //               <FormLabel>Enable file manger</FormLabel>
-  //               <FormDescription className="max-w-sm">
-  //                 Browser images
-  //               </FormDescription>
-  //             </div>
-  //             <FormControl>
-  //               <Switch
-  //                 checked={field.value}
-  //                 onCheckedChange={field.onChange}
-  //               />
-  //             </FormControl>
-  //           </FormItem>
-  //         )}
-  //       />
-
-  //       <Separator />
-
-  //       <FormField
-  //         control={form.control}
-  //         name="inputDirectory"
-  //         render={({ field }) => (
-  //           <FormItem>
-  //             <FormLabel>Input directory</FormLabel>
-  //             <FormControl>
-  //               <Input placeholder="" {...field} />
-  //             </FormControl>
-  //             <FormDescription>
-  //               Browser images from this directory.
-  //             </FormDescription>
-  //             <FormMessage />
-  //           </FormItem>
-  //         )}
-  //       />
-
-  //       <FormField
-  //         control={form.control}
-  //         name="outputDirectory"
-  //         render={({ field }) => (
-  //           <FormItem>
-  //             <FormLabel>Save directory</FormLabel>
-  //             <FormControl>
-  //               <Input placeholder="" {...field} />
-  //             </FormControl>
-  //             <FormDescription>
-  //               Result images will be saved to this directory.
-  //             </FormDescription>
-  //             <FormMessage />
-  //           </FormItem>
-  //         )}
-  //       />
-  //     </div>
-  //   )
-  // }
 
   return (
     <>

@@ -6,7 +6,7 @@ import {
   useRef,
   FormEvent,
 } from "react"
-import _ from "lodash"
+import orderBy from "lodash/orderBy"
 import PhotoAlbum from "react-photo-album"
 import "react-photo-album/styles.css"
 import { BarsArrowDownIcon, BarsArrowUpIcon } from "@heroicons/react/24/outline"
@@ -168,7 +168,7 @@ export default function FileManager(props: Props) {
           )
         }
 
-        filteredFilenames = _.orderBy(
+        filteredFilenames = orderBy(
           filteredFilenames,
           fileManagerState.sortBy,
           fileManagerState.sortOrder

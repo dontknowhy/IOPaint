@@ -9,7 +9,6 @@ import FileSelect from "@/components/FileSelect"
 import { Toaster } from "./components/ui/toaster"
 import { useStore } from "./lib/states"
 import { toast } from "./components/ui/use-toast"
-import { useWindowSize } from "react-use"
 
 const SUPPORTED_FILE_TYPE = [
   "image/jpeg",
@@ -28,8 +27,6 @@ function Home() {
 
   const userInputImage = useInputImage()
 
-  const windowSize = useWindowSize()
-
   useEffect(() => {
     if (userInputImage) {
       setFile(userInputImage)
@@ -37,8 +34,15 @@ function Home() {
   }, [userInputImage, setFile])
 
   useEffect(() => {
-    updateAppState({ windowSize })
-  }, [windowSize, updateAppState])
+    const handleResize = () => {
+      updateAppState({
+        windowSize: { width: window.innerWidth, height: window.innerHeight },
+      })
+    }
+    handleResize()
+    window.addEventListener("resize", handleResize)
+    return () => window.removeEventListener("resize", handleResize)
+  }, [updateAppState])
 
   useEffect(() => {
     const fetchServerConfig = async () => {

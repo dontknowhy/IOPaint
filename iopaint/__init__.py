@@ -42,7 +42,7 @@ def fix_window_pytorch():
             except FileNotFoundError:
                 logging.warning("Detected pytorch version with libomp issue, patching.")
                 shutil.copyfile(os.path.join(lib_folder, "libiomp5md.dll"), dest)
-    except:
+    except Exception:
         pass
 
 

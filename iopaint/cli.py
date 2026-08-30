@@ -121,7 +121,7 @@ def start(
     device: Device = Option(Device.cpu),
     input: Optional[Path] = Option(None, help=INPUT_HELP),
     mask_dir: Optional[Path] = Option(
-        None, help=MODEL_DIR_HELP, dir_okay=True, file_okay=False
+        None, help=MASK_DIR_HELP, dir_okay=True, file_okay=False
     ),
     output_dir: Optional[Path] = Option(
         None, help=OUTPUT_DIR_HELP, dir_okay=True, file_okay=False
@@ -158,15 +158,15 @@ def start(
 
     if input and not input.exists():
         logger.error(f"invalid --input: {input} not exists")
-        exit(-1)
+        raise SystemExit(1)
     if mask_dir and not mask_dir.exists():
         logger.error(f"invalid --mask-dir: {mask_dir} not exists")
-        exit(-1)
+        raise SystemExit(1)
     if input and input.is_dir() and not output_dir:
         logger.error(
             "invalid --output-dir: --output-dir must be set when --input is a directory"
         )
-        exit(-1)
+        raise SystemExit(1)
     if output_dir:
         output_dir = output_dir.expanduser().absolute()
         logger.info(f"Image will be saved to {output_dir}")

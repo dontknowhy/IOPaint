@@ -47,7 +47,7 @@ def batch_inpaint(
         logger.error(
             "invalid --output: when image is a directory, output should be a directory"
         )
-        exit(-1)
+        raise SystemExit(1)
     output.mkdir(parents=True, exist_ok=True)
 
     image_paths = glob_images(image)

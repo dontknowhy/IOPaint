@@ -16,7 +16,7 @@ try:
     torch._C._jit_set_texpr_fuser_enabled(False)
     torch._C._jit_set_nvfuser_enabled(False)
     torch._C._jit_set_profiling_mode(False)
-except:
+except Exception:
     pass
 
 import uvicorn
@@ -164,7 +164,9 @@ def emit_from_thread(sio, event: str, data=None):
     future.add_done_callback(_log_emit_error)
 
 
-def diffuser_callback(pipe, step: int, timestep: int, callback_kwargs: Dict = {}):
+def diffuser_callback(pipe, step: int, timestep: int, callback_kwargs: Dict = None):
+    if callback_kwargs is None:
+        callback_kwargs = {}
     # self: DiffusionPipeline, step: int, timestep: int, callback_kwargs: Dict
     emit_from_thread(global_sio, "diffusion_progress", {"step": step})
     return {}
@@ -285,7 +287,7 @@ class Api:
 
     def api_input_image(self) -> FileResponse:
         if self.config.input is None:
-            raise HTTPException(status_code=200, detail="No input image configured")
+            raise HTTPException(status_code=204, detail="No input image configured")
 
         if self.config.input.is_file():
             return FileResponse(self.config.input)

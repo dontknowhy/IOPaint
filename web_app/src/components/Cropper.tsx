@@ -1,6 +1,7 @@
 import { useStore } from "@/lib/states"
 import { useEffect, useState } from "react"
-import useDragResize, { Rect } from "@/hooks/useDragResize"
+import useDragResize from "@/hooks/useDragResize"
+import { Rect } from "@/lib/types"
 import {
   ResizeBorder,
   ResizeEdges,

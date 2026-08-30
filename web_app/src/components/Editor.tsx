@@ -159,6 +159,16 @@ export default function Editor(props: EditorProps) {
   const brushCursorRef = useRef<HTMLDivElement>(null)
   const cursorPosRef = useRef<Point>({ x: -1, y: -1 })
   const cursorFrameRef = useRef<number>(0)
+  const timeoutRefs = useRef<Set<ReturnType<typeof setTimeout>>>(new Set())
+
+  const trackedTimeout = useCallback((fn: () => void, ms: number) => {
+    const id: ReturnType<typeof setTimeout> = setTimeout(() => {
+      timeoutRefs.current.delete(id)
+      fn()
+    }, ms)
+    timeoutRefs.current.add(id)
+    return id
+  }, [])
   // ---- 触屏状态机（原生监听器，绕开 React passive 限制）----
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   // 每根手指上次的屏幕坐标（identifier -> {x,y}）
@@ -444,6 +454,10 @@ export default function Editor(props: EditorProps) {
       if (cursorFrameRef.current !== 0) {
         cancelAnimationFrame(cursorFrameRef.current)
       }
+      for (const t of timeoutRefs.current) {
+        clearTimeout(t)
+      }
+      timeoutRefs.current.clear()
     }
   }, [])
 
@@ -542,14 +556,16 @@ export default function Editor(props: EditorProps) {
         newClicks
       )
       const { blob } = res
+      const blobUrl = URL.createObjectURL(blob)
       const img = new Image()
       img.onload = () => {
+        URL.revokeObjectURL(blobUrl)
         if (useStore.getState().file !== file) {
           return
         }
         updateInteractiveSegState({ tmpInteractiveSegMask: img })
       }
-      img.src = blob
+      img.src = blobUrl
     } catch (e) {
       toast({
         variant: "destructive",
@@ -719,7 +735,7 @@ export default function Editor(props: EditorProps) {
       ev?.stopPropagation()
       if (hadRunInpainting()) {
         setShowOriginal(() => {
-          window.setTimeout(() => {
+          trackedTimeout(() => {
             setSliderPos(100)
           }, 10)
           return true
@@ -730,10 +746,10 @@ export default function Editor(props: EditorProps) {
       ev?.preventDefault()
       ev?.stopPropagation()
       if (hadRunInpainting()) {
-        window.setTimeout(() => {
+        trackedTimeout(() => {
           setSliderPos(0)
         }, 10)
-        window.setTimeout(() => {
+        trackedTimeout(() => {
           setShowOriginal(false)
         }, COMPARE_SLIDER_DURATION_MS)
       }
@@ -952,7 +968,7 @@ export default function Editor(props: EditorProps) {
 
     if (!showRefBrush) {
       setShowRefBrush(true)
-      window.setTimeout(() => {
+      trackedTimeout(() => {
         setShowRefBrush(false)
       }, 10000)
     }
@@ -1040,7 +1056,10 @@ export default function Editor(props: EditorProps) {
               ref={(r) => {
                 canvasRef.current = r
                 if (r && !context) {
-                  const ctx = r.getContext("2d", { desynchronized: true })
+                  const isEdge = navigator.userAgent.includes("Edg/")
+                  const ctx = r.getContext("2d", {
+                    desynchronized: !isEdge,
+                  })
                   if (ctx) {
                     setContext(ctx)
                   }
@@ -1532,19 +1551,19 @@ export default function Editor(props: EditorProps) {
             onPointerDown={(ev) => {
               ev.preventDefault()
               setShowOriginal(() => {
-                window.setTimeout(() => {
+                trackedTimeout(() => {
                   setSliderPos(100)
                 }, 10)
                 return true
               })
             }}
             onPointerUp={() => {
-              window.setTimeout(() => {
+              trackedTimeout(() => {
                 // 防止快速点击 show original image 按钮时图片消失
                 setSliderPos(0)
               }, 10)
 
-              window.setTimeout(() => {
+              trackedTimeout(() => {
                 setShowOriginal(false)
               }, COMPARE_SLIDER_DURATION_MS)
             }}
