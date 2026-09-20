@@ -49,6 +49,8 @@ const COMPARE_SLIDER_DURATION_MS = 300
 // 触控板捏合 / Ctrl+滚轮的恒定缩放速度：每单位 deltaY 缩放固定倍数
 // （指数缩放，几何级数，任何缩放级别下手感一致）
 const WHEEL_ZOOM_SPEED = 0.003
+// Page Up / Page Down 键盘缩放的每次缩放倍数
+const KEY_ZOOM_FACTOR = 1.25
 const MAX_SCALE = 50
 // 双指中判定“哪根手指在动”的移动阈值（px）
 const TOUCH_MOVE_THRESHOLD = 10
@@ -160,6 +162,7 @@ export default function Editor(props: EditorProps) {
   const cursorPosRef = useRef<Point>({ x: -1, y: -1 })
   const cursorFrameRef = useRef<number>(0)
   const timeoutRefs = useRef<Set<ReturnType<typeof setTimeout>>>(new Set())
+  const spacePressedRef = useRef(false)
 
   const trackedTimeout = useCallback((fn: () => void, ms: number) => {
     const id: ReturnType<typeof setTimeout> = setTimeout(() => {
@@ -679,10 +682,10 @@ export default function Editor(props: EditorProps) {
     setPanned(true)
   }, [])
 
-  // 恒定速度缩放：缩放量只与 deltaY（捏合/滚轮位移）成正比，
-  // 不随缩放级别变化，绕光标所在位置缩放。
-  const zoomByWheel = useCallback(
-    (event: WheelEvent) => {
+  // 恒定速度缩放：在指定屏幕坐标锚点（通常为光标/视口中心）缩放固定倍数。
+  // 缩放量只与倍数有关，不随缩放级别变化。
+  const zoomAt = useCallback(
+    (anchorX: number, anchorY: number, factor: number) => {
       const viewport = viewportRef.current
       if (!viewport) {
         return
@@ -693,7 +696,6 @@ export default function Editor(props: EditorProps) {
         return
       }
       const { scale, positionX, positionY } = instance.transformState
-      const factor = Math.exp(-event.deltaY * WHEEL_ZOOM_SPEED)
       const newScale = Math.min(
         Math.max(scale * factor, minScale * 0.3),
         MAX_SCALE
@@ -702,18 +704,68 @@ export default function Editor(props: EditorProps) {
         return
       }
       const rect = content.getBoundingClientRect()
-      const mouseX = (event.clientX - rect.left) / scale
-      const mouseY = (event.clientY - rect.top) / scale
+      const anchorXInContent = (anchorX - rect.left) / scale
+      const anchorYInContent = (anchorY - rect.top) / scale
       const scaleDiff = newScale - scale
       instance.setTransformState(
         newScale,
-        positionX - mouseX * scaleDiff,
-        positionY - mouseY * scaleDiff
+        positionX - anchorXInContent * scaleDiff,
+        positionY - anchorYInContent * scaleDiff
       )
       setScale(newScale)
       setPanned(true)
     },
     [minScale]
+  )
+
+  // 取滚轮主轴位移：覆盖浏览器在部分平台把纵向滚动转成横向（如 Shift+滚轮）
+  // 的行为。浏览器/操作系统已按用户的滚动方向设置翻转 delta 符号：
+  // deltaY<0 恒等于“用户配置下的向上滚动”手势，因此直接以 delta 为准即可
+  // 自动跟随自然滚动 / 经典滚动设置，无需额外检测。
+  const getWheelDelta = useCallback((event: WheelEvent) => {
+    return Math.abs(event.deltaX) > Math.abs(event.deltaY)
+      ? event.deltaX
+      : event.deltaY
+  }, [])
+
+  // 恒定速度缩放：缩放量只与 deltaY（捏合/滚轮位移）成正比，
+  // 不随缩放级别变化，绕光标所在位置缩放。
+  const zoomByWheel = useCallback(
+    (event: WheelEvent) => {
+      const factor = Math.exp(-getWheelDelta(event) * WHEEL_ZOOM_SPEED)
+      zoomAt(event.clientX, event.clientY, factor)
+    },
+    [getWheelDelta, zoomAt]
+  )
+
+  // Page Up / Page Down 键盘缩放：绕视口中心缩放
+  const zoomByKeys = useCallback(
+    (zoomIn: boolean) => {
+      zoomAt(
+        windowCenterX,
+        windowCenterY,
+        zoomIn ? KEY_ZOOM_FACTOR : 1 / KEY_ZOOM_FACTOR
+      )
+    },
+    [zoomAt, windowCenterX, windowCenterY]
+  )
+
+  useHotKey(
+    "PageUp",
+    (keyboardEvent) => {
+      keyboardEvent.preventDefault()
+      zoomByKeys(true)
+    },
+    [zoomByKeys]
+  )
+
+  useHotKey(
+    "PageDown",
+    (keyboardEvent) => {
+      keyboardEvent.preventDefault()
+      zoomByKeys(false)
+    },
+    [zoomByKeys]
   )
 
   const handleUndo = (keyboardEvent: KeyboardEvent | SyntheticEvent) => {
@@ -883,6 +935,7 @@ export default function Editor(props: EditorProps) {
       if (!disableShortCuts) {
         ev?.preventDefault()
         ev?.stopPropagation()
+        spacePressedRef.current = true
         setShowBrush(false)
         setIsPanning(true)
       }
@@ -891,6 +944,7 @@ export default function Editor(props: EditorProps) {
       if (!disableShortCuts) {
         ev?.preventDefault()
         ev?.stopPropagation()
+        spacePressedRef.current = false
         setShowBrush(true)
         setIsPanning(false)
       }
@@ -902,10 +956,14 @@ export default function Editor(props: EditorProps) {
       if (ev.key === SHORTCUT_KEY_CHANGE_BRUSH_SIZE) {
         setIsChangingBrushSizeByWheel(false)
       }
+      if (ev.key === " ") {
+        spacePressedRef.current = false
+      }
     }
 
     const handleBlur = () => {
       setIsChangingBrushSizeByWheel(false)
+      spacePressedRef.current = false
     }
 
     window.addEventListener("keyup", handleKeyUp)
@@ -1447,6 +1505,18 @@ export default function Editor(props: EditorProps) {
         event.preventDefault()
         return
       }
+      if (spacePressedRef.current) {
+        // Space+滚轮：缩放（方向跟随用户滚动设置，见 getWheelDelta 注释）
+        zoomByWheel(event)
+        event.preventDefault()
+        return
+      }
+      if (event.shiftKey) {
+        // Shift+滚轮：横向平移照片（保留浏览器横向滚动的习惯）
+        panBy(getWheelDelta(event), 0)
+        event.preventDefault()
+        return
+      }
       if (event.ctrlKey) {
         // 触控板捏合 / Ctrl+滚轮：恒定速度缩放
         zoomByWheel(event)
@@ -1478,6 +1548,7 @@ export default function Editor(props: EditorProps) {
     isChangingBrushSizeByWheel,
     panBy,
     zoomByWheel,
+    getWheelDelta,
     increaseBaseBrushSize,
     decreaseBaseBrushSize,
   ])

@@ -61,6 +61,10 @@ export function Shortcuts() {
           <div className="flex gap-2 flex-col pt-4">
             <ShortCut content="Pan" keys={["Space + Drag"]} />
             <ShortCut content="Reset Zoom/Pan" keys={["Esc"]} />
+            <ShortCut content="Zoom In" keys={["PageUp"]} />
+            <ShortCut content="Zoom Out" keys={["PageDown"]} />
+            <ShortCut content="Zoom In/Out" keys={["Space + Scroll"]} />
+            <ShortCut content="Pan Horizontally" keys={["Shift + Scroll"]} />
             <ShortCut content="Decrease Brush Size" keys={["["]} />
             <ShortCut content="Increase Brush Size" keys={["]"]} />
             <ShortCut content="View Original Image" keys={["Hold Tab"]} />

@@ -102,9 +102,14 @@ def api_middleware(app: FastAPI):
                 )
             else:
                 traceback.print_exc()
-        return JSONResponse(
-            status_code=vars(e).get("status_code", 500), content=jsonable_encoder(err)
-        )
+        status_code = vars(e).get("status_code", 500)
+        # RFC 9110: 204 No Content / 304 Not Modified (and any response to a
+        # HEAD request) must not carry a message body. h11 forces Content-Length
+        # to 0 for them, so sending a body here lets the app crash with:
+        #   h11._util.LocalProtocolError: Too much data for declared Content-Length
+        if status_code in (204, 304) or request.method == "HEAD":
+            return Response(status_code=status_code)
+        return JSONResponse(status_code=status_code, content=jsonable_encoder(err))
 
     @app.middleware("http")
     async def exception_handling(request: Request, call_next):
