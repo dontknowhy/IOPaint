@@ -11,6 +11,9 @@ from iopaint.model_manager import ModelManager
 from iopaint.schema import SDSampler
 from iopaint.tests.test_model import get_config, assert_equal
 
+# 整个文件都依赖 SD 权重（首次运行会下载）
+pytestmark = pytest.mark.slow
+
 
 @pytest.mark.parametrize("name", ["runwayml/stable-diffusion-inpainting"])
 @pytest.mark.parametrize("device", ["cuda", "mps"])

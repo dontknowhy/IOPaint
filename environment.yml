@@ -35,7 +35,6 @@ dependencies:
     - gradio==5.50.0
     - typer-config==1.4.0
     - Pillow>=10.0.0
-    - # Dev tools
-    - ruff
+    - # Dev tools（和 requirements-dev.txt 是同一份，见根目录 requirements-dev.txt）
     - pytest
     - pytest-loguru

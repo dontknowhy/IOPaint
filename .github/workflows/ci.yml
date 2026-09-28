@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend (pytest -m "not slow")
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # requirements.txt 钉的是 torch==2.3.1+cu121，那个 local version 只有 CUDA 索引上有，
+      # 所以先摘掉这两行走 CPU wheel（代码本身不挑 CUDA 版本）。别改 requirements.txt 的钉法。
+      - name: Install backend
+        run: |
+          python -m pip install --upgrade pip
+          grep -vE '^(torch|torchvision)==' requirements.txt > /tmp/req-notorch.txt
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+            torch==2.3.1+cpu torchvision==0.18.1+cpu
+          pip install -r /tmp/req-notorch.txt
+          pip install pytest pytest-loguru
+
+      # 不 build 前端、不下权重就跑：--model cv2 没有权重。
+      # 顺带盯着 api.py 的 StaticFiles 挂载——check_dir=True 的话这里会直接 RuntimeError。
+      - name: Run fast test suite
+        run: pytest -m "not slow" -q
+
+  frontend:
+    name: frontend (lint + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web_app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web_app/.nvmrc
+          cache: npm
+          cache-dependency-path: web_app/package-lock.json
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+
+  webui:
+    name: webui (playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install backend + playwright
+        run: |
+          python -m pip install --upgrade pip
+          grep -vE '^(torch|torchvision)==' requirements.txt > /tmp/req-notorch.txt
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+            torch==2.3.1+cpu torchvision==0.18.1+cpu
+          pip install -r /tmp/req-notorch.txt
+          pip install pytest pytest-loguru playwright
+          playwright install --with-deps chromium
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web_app/.nvmrc
+          cache: npm
+          cache-dependency-path: web_app/package-lock.json
+
+      # test_webui 用真浏览器打真前端，所以必须先把 dist 装进 iopaint/web_app，
+      # 不然 `/` 只回 503（见 api.py 的 WebAppStaticFiles），17 个用例会全挂。
+      - name: Build frontend into the package
+        run: |
+          cd web_app
+          npm ci
+          npm run build
+          cd ..
+          rm -rf iopaint/web_app && cp -r web_app/dist iopaint/web_app
+
+      # conftest 的 iopaint_server 跑在 bind(("", 0)) 拿到的空闲端口上，不碰 8080
+      - name: Run web UI tests
+        run: pytest iopaint/tests/test_webui.py -q

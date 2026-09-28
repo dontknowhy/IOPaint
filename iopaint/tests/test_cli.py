@@ -1,5 +1,6 @@
 """Tests for iopaint.cli – CLI argument parsing and validation."""
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
@@ -43,14 +44,18 @@ class TestCliStartValidation:
         img_dir.mkdir()
         output_dir = tmp_path / "output"
 
-        result = runner.invoke(typer_app, [
-            "start",
-            "--model", "cv2",
-            "--device", "cpu",
-            "--input", str(img_dir),
-            "--output-dir", str(output_dir),
-            "--port", "19999",
-        ])
-        # Should start (then we'd need to kill it; the test just checks parsing works)
-        # The server would block, so we check the config was printed
-        assert "cv2" in result.output or result.exit_code == 0
+        # 必须 mock 掉 Api.launch：它会真的起 uvicorn 阻塞住并占住端口，
+        # 这里只验证参数解析和 ApiConfig 是否被正确组装出来。
+        with patch("iopaint.api.Api.launch") as mock_launch:
+            result = runner.invoke(typer_app, [
+                "start",
+                "--model", "cv2",
+                "--device", "cpu",
+                "--input", str(img_dir),
+                "--output-dir", str(output_dir),
+                "--port", "19999",
+            ])
+
+        mock_launch.assert_called_once()
+        assert result.exit_code == 0
+        assert "cv2" in result.output

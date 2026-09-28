@@ -25,7 +25,7 @@ from fastapi import APIRouter, FastAPI, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse, Response
+from fastapi.responses import JSONResponse, FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from socketio import AsyncServer
@@ -64,6 +64,38 @@ from iopaint.schema import (
 
 CURRENT_DIR = Path(__file__).parent.absolute().resolve()
 WEB_APP_DIR = CURRENT_DIR / "web_app"
+
+WEB_APP_NOT_BUILT_MSG = (
+    "IOPaint web UI 还没构建（iopaint/web_app 是 gitignore 的构建产物）。\n"
+    "请先构建前端：\n"
+    "  cd web_app && npm install && npm run build\n"
+    "  rm -rf iopaint/web_app && cp -r web_app/dist iopaint/web_app\n"
+    "后端 API (/api/v1/*) 不受影响，可直接调用。"
+)
+
+
+class WebAppStaticFiles(StaticFiles):
+    """挂在前端产物目录上的静态服务。
+
+    `iopaint/web_app` 是 gitignore 的构建产物，源码 clone 里可能根本不存在。`check_dir=False`
+    让 `iopaint start` 和测试不再依赖 `npm run build`。但 Starlette 每次请求都会跑
+    check_config()，目录缺失时直接抛 RuntimeError（表现成 500 栈），所以覆盖成：目录不在
+    就回一句可操作的 503，目录在了（哪怕是服务启动之后才 build 的）就正常发静态文件。
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs["check_dir"] = False
+        super().__init__(*args, **kwargs)
+
+    async def check_config(self):
+        return None
+
+    async def __call__(self, scope, receive, send):
+        if not self.directory.is_dir():
+            response = PlainTextResponse(WEB_APP_NOT_BUILT_MSG, status_code=503)
+            await response(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
 
 
 def api_middleware(app: FastAPI):
@@ -216,7 +248,8 @@ class Api:
         # Mount socketio before the static file server: the "/" static mount would
         # otherwise shadow the "/ws" socket.io endpoint.
         self.app.mount("/ws", self.combined_asgi_app)
-        self.app.mount("/", StaticFiles(directory=WEB_APP_DIR, html=True), name="assets")
+        # 前端产物可能不存在（见 WebAppStaticFiles），但不能因此挡住后端启动。
+        self.app.mount("/", WebAppStaticFiles(directory=WEB_APP_DIR, html=True), name="assets")
         global_sio = self.sio
 
     def add_api_route(self, path: str, endpoint, **kwargs):

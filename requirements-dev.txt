@@ -1,3 +1,6 @@
+# 开发/打包依赖。conda 环境见根目录 environment.yml（那边已包含 pytest、pytest-loguru，
+# 不需要再装这份）。只给 pip 用户用：`pip install -r requirements-dev.txt`。
 wheel
 twine
+pytest
 pytest-loguru

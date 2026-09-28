@@ -2,6 +2,10 @@
 
 Requires:  ``pip install playwright && playwright install chromium``
 Run with:  ``pytest iopaint/tests/test_webui.py -v``
+
+These drive the real built frontend in a real browser, so they need both playwright
+*and* the build output in ``iopaint/web_app``. Without the build output the whole module
+skips (see ``WEB_APP_DIR``) — the ``webui`` CI job builds it first.
 """
 import base64
 import io
@@ -11,6 +15,13 @@ import pytest
 
 pw = pytest.importorskip("playwright", reason="playwright not installed")
 from playwright.sync_api import sync_playwright, expect  # noqa: E402
+
+from iopaint.api import WEB_APP_DIR
+
+pytestmark = pytest.mark.skipif(
+    not WEB_APP_DIR.is_dir(),
+    reason=f"前端没构建（{WEB_APP_DIR} 不存在），先 npm run build 并拷进 iopaint/web_app",
+)
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────

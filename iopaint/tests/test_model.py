@@ -5,6 +5,9 @@ from iopaint.model_manager import ModelManager
 from iopaint.schema import HDStrategy, LDMSampler
 from iopaint.tests.utils import assert_equal, get_config, current_dir, check_device
 
+# 整个文件都依赖 erase 模型权重（首次运行会下载）
+pytestmark = pytest.mark.slow
+
 
 @pytest.mark.parametrize("device", ["cuda", "mps", "cpu"])
 @pytest.mark.parametrize(

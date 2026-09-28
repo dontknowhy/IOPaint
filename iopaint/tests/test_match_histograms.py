@@ -5,6 +5,9 @@ from iopaint.model_manager import ModelManager
 from iopaint.schema import SDSampler, HDStrategy
 from iopaint.tests.utils import check_device, get_config, assert_equal, current_dir
 
+# 整个文件都依赖 SD 权重（首次运行会下载）
+pytestmark = pytest.mark.slow
+
 
 @pytest.mark.parametrize("device", ["cuda", "mps"])
 @pytest.mark.parametrize("sampler", [SDSampler.ddim])

@@ -11,6 +11,9 @@ node_modules
 dist
 dist-ssr
 *.local
+# 但 .env.local 要入库：里面有 VITE_BACKEND，缺了 npm run dev 会静默请求
+# undefined/api/v1，debug 很浪费时间。只有真的机器级私有值才另开 .env.local.local。
+!.env.local
 
 # Editor directories and files
 .vscode/*

@@ -1,3 +1,9 @@
+import pytest
+
+# 整个文件都遍历加载全部 erase 模型 + vit_l（需要下载权重）
+pytestmark = pytest.mark.slow
+
+
 def test_load_model():
     from iopaint.plugins import InteractiveSeg
     from iopaint.model_manager import ModelManager

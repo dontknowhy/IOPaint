@@ -4,9 +4,13 @@ from iopaint.schema import InpaintRequest
 
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
+import pytest
 import torch
 
 from iopaint.model_manager import ModelManager
+
+# 整个文件都依赖 SD + controlnet 权重（首次运行会下载），且写死 mps
+pytestmark = pytest.mark.slow
 
 
 def test_model_switch():

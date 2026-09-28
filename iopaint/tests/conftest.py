@@ -43,13 +43,19 @@ def iopaint_server(tmp_path_factory, iopaint_port):
         stderr=subprocess.PIPE,
     )
 
-    # Wait until the server is accepting connections (max 30s)
+    # Wait until the server is accepting connections (max 30s).
+    # 只要拿到 HTTP 响应就算起来了：前端没 build 时 `/` 会回 503（见 api.py 的
+    # WebAppStaticFiles），那是"服务已就绪但 UI 未构建"，不是"没起来"。
     base_url = f"http://127.0.0.1:{iopaint_port}"
     deadline = time.time() + 30
     while time.time() < deadline:
         try:
+            import urllib.error
             import urllib.request
-            urllib.request.urlopen(base_url, timeout=2)
+            try:
+                urllib.request.urlopen(base_url, timeout=2)
+            except urllib.error.HTTPError:
+                pass  # 有响应即就绪（4xx/5xx 都算）
             break
         except Exception:
             time.sleep(0.3)

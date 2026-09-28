@@ -7,6 +7,9 @@ from iopaint.model_manager import ModelManager
 from iopaint.schema import HDStrategy
 from iopaint.tests.utils import get_config, check_device, assert_equal, current_dir
 
+# 整个文件都依赖 instruct-pix2pix 权重（首次运行会下载）
+pytestmark = pytest.mark.slow
+
 model_name = "timbrooks/instruct-pix2pix"
 
 

@@ -11,6 +11,9 @@ from iopaint.model_manager import ModelManager
 from iopaint.schema import HDStrategy, SDSampler
 from iopaint.tests.test_model import get_config, assert_equal
 
+# 整个文件都依赖 SDXL 权重（首次运行会下载）
+pytestmark = pytest.mark.slow
+
 
 @pytest.mark.parametrize("device", ["cuda", "mps"])
 @pytest.mark.parametrize("strategy", [HDStrategy.ORIGINAL])

@@ -15,6 +15,9 @@ from iopaint.tests.utils import (
 
 model_name = "Fantasy-Studio/Paint-by-Example"
 
+# 整个文件都依赖 paint-by-example 权重（首次运行会下载）
+pytestmark = pytest.mark.slow
+
 
 def assert_equal(
     model,

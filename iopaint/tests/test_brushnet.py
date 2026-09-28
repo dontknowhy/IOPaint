@@ -12,6 +12,9 @@ import torch
 from iopaint.model_manager import ModelManager
 from iopaint.schema import HDStrategy, SDSampler, PowerPaintTask
 
+# 整个文件都依赖 brushnet 权重（首次运行会下载）
+pytestmark = pytest.mark.slow
+
 current_dir = Path(__file__).parent.absolute().resolve()
 save_dir = current_dir / "result"
 save_dir.mkdir(exist_ok=True, parents=True)

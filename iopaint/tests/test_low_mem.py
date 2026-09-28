@@ -12,6 +12,9 @@ import torch
 from iopaint.model_manager import ModelManager
 from iopaint.schema import HDStrategy, SDSampler
 
+# 整个文件都依赖 SD 权重（首次运行会下载）
+pytestmark = pytest.mark.slow
+
 
 @pytest.mark.parametrize("device", ["cuda", "mps"])
 def test_runway_sd_1_5_low_mem(device):

@@ -134,16 +134,20 @@ Install [nodejs](https://nodejs.org/en), then install the frontend dependencies.
 cd web_app
 npm install
 npm run build
-cp -r dist/ ../iopaint/web_app
+cd ..
+rm -rf iopaint/web_app && cp -r web_app/dist iopaint/web_app
 ```
 
-Create a `.env.local` file in `web_app` and fill in the backend IP and port.
+`iopaint/web_app` is the build output and gitignored, so copy the *contents* of `dist` into it. Copying the `dist` directory itself nests it one level too deep and `/` returns 404.
+
+`.env.local` is committed with the default backend address; edit it if your backend is not on `127.0.0.1:8080`.
 ```
 VITE_BACKEND=http://127.0.0.1:8080
 ```
 
 Start front-end development environment
 ```bash
+cd web_app
 npm run dev
 ```
 

@@ -19,6 +19,9 @@ from iopaint.plugins import (
     InteractiveSeg,
 )
 
+# 整个文件都依赖插件权重（rembg / anime_seg / vit_l，首次运行会下载）
+pytestmark = pytest.mark.slow
+
 img_p = current_dir / "bunny.jpeg"
 img_bytes = open(img_p, "rb").read()
 bgr_img = cv2.imread(str(img_p))

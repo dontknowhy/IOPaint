@@ -19,6 +19,9 @@ from iopaint.download import scan_models
 from iopaint.helper import load_img
 from iopaint.schema import ApiConfig, Device, HDStrategy, InpaintRequest
 
+# 依赖本地已下载的 lama/fcf 权重，没有就 assert 失败
+pytestmark = pytest.mark.slow
+
 
 # ---------------------------------------------------------------------------
 # Discover which local models are actually available
