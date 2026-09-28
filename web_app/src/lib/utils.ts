@@ -1,7 +1,7 @@
 import { type ClassValue, clsx } from "clsx"
 import { SyntheticEvent } from "react"
 import { twMerge } from "tailwind-merge"
-import { LineGroup, Point } from "./types"
+import { Line, LineGroup, Point } from "./types"
 import { BRUSH_COLOR } from "./const"
 
 export function cn(...inputs: ClassValue[]) {
@@ -162,25 +162,26 @@ export function downloadImage(uri: string, name: string) {
   const link = document.createElement("a")
   link.href = uri
   link.download = name
+  link.rel = "noopener"
+  link.style.display = "none"
 
-  // this is necessary as link.click() does not work on the latest firefox
-  link.dispatchEvent(
-    new MouseEvent("click", {
-      bubbles: true,
-      cancelable: true,
-      view: window,
-    })
-  )
+  // 锚点必须先挂载到文档中，click() 才会触发下载。
+  // 之前用的是「未挂载节点 + 合成 MouseEvent」，Chromium/Firefox 行为不一致，
+  // 下载经常不触发或被取消。
+  document.body.appendChild(link)
+  link.click()
 
+  // 延迟移除，等浏览器真正开始读取 blob 再回收
   setTimeout(() => {
-    // For Firefox it is necessary to delay revoking the ObjectURL
-    // window.URL.revokeObjectURL(base64)
     link.remove()
-  }, 100)
+  }, 1000)
 }
 
-export function mouseXY(ev: SyntheticEvent) {
-    const mouseEvent = ev.nativeEvent as MouseEvent
+// 返回图片坐标系（原图像素）下的鼠标位置。
+// 既接受 React 的 SyntheticEvent，也接受原生 MouseEvent（getCoalescedEvents 的结果）。
+export function mouseXY(ev: SyntheticEvent | MouseEvent) {
+    const mouseEvent =
+        'nativeEvent' in ev ? (ev.nativeEvent as MouseEvent) : ev
     // Handle mask drawing coordinate on mobile/tablet devices.
     // On touchend `touches` is empty, so fall back to `changedTouches`.
     if ('touches' in ev) {
@@ -209,6 +210,8 @@ export function touchPointXY(touch: Touch, target: HTMLElement): Point {
   }
 }
 
+// 描一条笔迹。坐标/线宽都按 ctx 当前的变换矩阵解释，
+// 因此显示画布可以用 ctx.setTransform(scale,0,0,scale,0,0) 缩小后仍按原图坐标绘制。
 export function drawLines(
   ctx: CanvasRenderingContext2D,
   lines: LineGroup,
@@ -229,6 +232,29 @@ export function drawLines(
       ctx.lineTo(line.pts[i].x, line.pts[i].y)
     }
     ctx.stroke()
+  }
+}
+
+// 一条笔迹里所有点的包围盒（笔刷是圆头，调用方需要按 lineWidth/2 外扩）
+export function strokeBounds(line: Line, pad = 0) {
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const pt of line.pts) {
+    if (pt.x < minX) minX = pt.x
+    if (pt.y < minY) minY = pt.y
+    if (pt.x > maxX) maxX = pt.x
+    if (pt.y > maxY) maxY = pt.y
+  }
+  if (minX === Infinity) {
+    return null
+  }
+  return {
+    x: minX - pad,
+    y: minY - pad,
+    w: maxX - minX + pad * 2,
+    h: maxY - minY + pad * 2,
   }
 }
 

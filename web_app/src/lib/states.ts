@@ -766,15 +766,25 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
       },
 
       resetRedoState: () => {
+        // 只回收「即将被丢弃的 redo 栈」所持有的 blob URL。
+        // 之前会遍历 _activeBlobUrls 全部 revoke，其中包含 renders（当前显示
+        // 的结果、undo 历史）以及刚刚 runInpainting 生成的最新结果 URL，
+        // 导致 renders[last].currentSrc 变成已失效的 blob URL，
+        // 下载产物时浏览器报网络错误 / 下载被取消。
+        const staleUrls = get().editorState.redoRenders
+          .map((render) => render.currentSrc)
+          .filter((url): url is string => !!url && url.startsWith("blob:"))
         set((state) => {
           state.editorState.redoCurLines = []
           state.editorState.redoLineGroups = []
           state.editorState.redoRenders = []
         })
-        for (const url of _activeBlobUrls) {
-          URL.revokeObjectURL(url)
+        for (const url of staleUrls) {
+          if (_activeBlobUrls.has(url)) {
+            URL.revokeObjectURL(url)
+            _activeBlobUrls.delete(url)
+          }
         }
-        _activeBlobUrls.clear()
       },
 
       //****//
@@ -910,8 +920,11 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
       handleFileManagerMaskSelect: async (blob: Blob) => {
         const newMask = new Image()
         const url = URL.createObjectURL(blob)
+        _activeBlobUrls.add(url)
         await loadImage(newMask, url)
-        URL.revokeObjectURL(url)
+        // 不能在这里立刻 revoke：extraMasks 之后还要被 generateMask 重新绘制
+        // 到画布上，URL 失效会导致掩膜（及掩膜下载）失败。改为登记到
+        // _activeBlobUrls，随 setFile 统一回收。
         set((state) => {
           state.editorState.extraMasks.push(castDraft(newMask))
         })

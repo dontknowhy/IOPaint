@@ -2,6 +2,7 @@ import {
   SyntheticEvent,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -26,6 +27,7 @@ import {
   isMidClick,
   isRightClick,
   mouseXY,
+  strokeBounds,
   touchPointXY,
 } from "@/lib/utils"
 import { Eraser, Eye, Redo, Undo, Expand, Download } from "lucide-react"
@@ -38,7 +40,6 @@ import { InteractiveSegPoints } from "./InteractiveSeg"
 import useHotKey from "@/hooks/useHotkey"
 import Extender from "./Extender"
 import {
-  BRUSH_COLOR,
   MAX_BRUSH_SIZE,
   MIN_BRUSH_SIZE,
   SHORTCUT_KEY_CHANGE_BRUSH_SIZE,
@@ -56,6 +57,12 @@ const MAX_SCALE = 50
 const TOUCH_MOVE_THRESHOLD = 10
 // 判定“哪根手指按住了没动”的阈值（px），避免把捏合开始阶段误判成锚定绘制
 const TOUCH_ANCHOR_THRESHOLD = 6
+// 显示用掩膜画布的像素上限。笔迹是矢量数据，提交时按原图分辨率重新栅格化，
+// 所以屏幕上的画布不需要跟原图一样大。如果按原分辨率逐帧
+// clearRect + drawImage + stroke()，6000x4000 这种图每帧要处理 2400 万像素，
+// 是画笔掉帧的主因（代价随图片分辨率线性增长）。按上限等比缩小后，
+// 每帧的重绘量被限制住，画笔手感与图片分辨率无关。
+const MASK_CANVAS_MAX_PIXELS = 4 * 1024 * 1024
 
 interface EditorProps {
   file: File
@@ -158,6 +165,10 @@ export default function Editor(props: EditorProps) {
 
   const containerRef = useRef<HTMLDivElement>(null)
   const strokeRef = useRef<Line | null>(null)
+  // 当前笔画已经画到第几个点（后面这些点等下一帧再画）
+  const strokeDrawnCountRef = useRef(0)
+  // 待 flush 的笔画帧 id
+  const strokeFrameRef = useRef(0)
   const brushCursorRef = useRef<HTMLDivElement>(null)
   const cursorPosRef = useRef<Point>({ x: -1, y: -1 })
   const cursorFrameRef = useRef<number>(0)
@@ -236,10 +247,48 @@ export default function Editor(props: EditorProps) {
     imageWidth,
   ])
 
+  // 显示用掩膜画布的分辨率：不超过 MASK_CANVAS_MAX_PIXELS，坐标仍用原图坐标，
+  // 靠 ctx.setTransform 映射。maskScale === 1 时与原来完全一致。
+  const maskScale = useMemo(() => {
+    if (imageWidth === 0 || imageHeight === 0) {
+      return 1
+    }
+    const pixels = imageWidth * imageHeight
+    if (pixels <= MASK_CANVAS_MAX_PIXELS) {
+      return 1
+    }
+    return Math.sqrt(MASK_CANVAS_MAX_PIXELS / pixels)
+  }, [imageWidth, imageHeight])
+  const maskCanvasWidth = Math.max(1, Math.round(imageWidth * maskScale))
+  const maskCanvasHeight = Math.max(1, Math.round(imageHeight * maskScale))
+  // 给原生 touch 监听器用的最新快照
+  const maskScaleRef = useRef(maskScale)
+  maskScaleRef.current = maskScale
+
+  // 给原图分辨率的坐标 -> 画布位图像素 的换算，供绘制路径复用
+  const applyMaskTransform = useCallback(
+    (ctx: CanvasRenderingContext2D, scale: number) => {
+      ctx.setTransform(scale, 0, 0, scale, 0, 0)
+    },
+    []
+  )
+
   // 已提交内容（已提交的笔迹/掩膜/分割临时掩膜）画在这个“底层”画布上，
-  // 绘制进行中的笔画时只需把它原样拷贝到显示画布上，再一次性画当前笔画，
-  // 避免每帧重复重绘所有已提交内容，也避免重复 stroke() 同一条累计路径。
+  // 显示画布 = 底层画布 + 当前正在画的笔画。
+  // 底层画布只在内容真正变化时重建；单纯提交新笔画时只把新增的那一笔补上去。
   const maskBaseCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  // 底层画布已经画到 curLineGroup 的第几条（用于增量追加）
+  const baseDrawnLinesRef = useRef<Line[]>([])
+  // 上一次 redrawMaskCanvas 的“内容类”入参，用来判断能不能只做增量追加
+  const baseContentRef = useRef<{
+    temporaryMasks: HTMLImageElement[]
+    extraMasks: HTMLImageElement[]
+    segMask: HTMLImageElement | null
+    segClicks: number[][]
+    imageWidth: number
+    imageHeight: number
+    context: CanvasRenderingContext2D | undefined
+  } | null>(null)
 
   const redrawMaskCanvas = useCallback(() => {
     if (
@@ -255,44 +304,94 @@ export default function Editor(props: EditorProps) {
       base = document.createElement("canvas")
       maskBaseCanvasRef.current = base
     }
-    // 始终与当前图片尺寸对齐：切换图片后尺寸变化时同步 base 画布，
-    // 避免绘制/提交时用旧的画布尺寸导致笔画错位或“消失”
-    if (base.width !== imageWidth || base.height !== imageHeight) {
-      base.width = imageWidth
-      base.height = imageHeight
+    // 画布位图跟着显示分辨率走，尺寸变化时同步（改 width/height 会清空位图并
+    // 重置变换，所以之后必须重新 setTransform）
+    const bitmapChanged =
+      base.width !== maskCanvasWidth || base.height !== maskCanvasHeight
+    if (bitmapChanged) {
+      base.width = maskCanvasWidth
+      base.height = maskCanvasHeight
+      baseDrawnLinesRef.current = []
     }
     const baseCtx = base.getContext("2d")
     if (!baseCtx) {
       return
     }
-    baseCtx.clearRect(0, 0, base.width, base.height)
-    temporaryMasks.forEach((maskImage) => {
-      baseCtx.drawImage(maskImage, 0, 0, imageWidth, imageHeight)
-    })
-    extraMasks.forEach((maskImage) => {
-      baseCtx.drawImage(maskImage, 0, 0, imageWidth, imageHeight)
-    })
 
-    if (
-      interactiveSegState.isInteractiveSeg &&
-      interactiveSegState.tmpInteractiveSegMask
-    ) {
-      baseCtx.drawImage(
-        interactiveSegState.tmpInteractiveSegMask,
-        0,
-        0,
-        imageWidth,
-        imageHeight
+    const segMask = interactiveSegState.tmpInteractiveSegMask ?? null
+    const prev = baseContentRef.current
+    // 内容没变、且 curLineGroup 是在已画部分后面追加的 => 只需补画新增的笔画
+    const appendable =
+      !bitmapChanged &&
+      prev !== null &&
+      prev.temporaryMasks === temporaryMasks &&
+      prev.extraMasks === extraMasks &&
+      prev.segMask === segMask &&
+      prev.segClicks === interactiveSegState.clicks &&
+      prev.imageWidth === imageWidth &&
+      prev.imageHeight === imageHeight &&
+      prev.context === context &&
+      curLineGroup.length >= baseDrawnLinesRef.current.length &&
+      baseDrawnLinesRef.current.every(
+        (line, i) => curLineGroup[i] === line
       )
-    }
-    // 只画当前提交的笔画（curLineGroup）。inpaint 完成后由 runInpainting
-    // 清空 curLineGroup，掩膜随之从画布清除（标准行为）。
-    drawLines(baseCtx, curLineGroup)
 
-    context.canvas.width = imageWidth
-    context.canvas.height = imageHeight
-    context.clearRect(0, 0, context.canvas.width, context.canvas.height)
-    context.drawImage(base, 0, 0, imageWidth, imageHeight)
+    if (appendable) {
+      applyMaskTransform(baseCtx, maskScale)
+      for (
+        let i = baseDrawnLinesRef.current.length;
+        i < curLineGroup.length;
+        i++
+      ) {
+        drawLines(baseCtx, [curLineGroup[i]])
+      }
+      baseDrawnLinesRef.current = curLineGroup.slice()
+    } else {
+      baseCtx.setTransform(1, 0, 0, 1, 0, 0)
+      baseCtx.clearRect(0, 0, base.width, base.height)
+      applyMaskTransform(baseCtx, maskScale)
+      temporaryMasks.forEach((maskImage) => {
+        baseCtx.drawImage(maskImage, 0, 0, imageWidth, imageHeight)
+      })
+      extraMasks.forEach((maskImage) => {
+        baseCtx.drawImage(maskImage, 0, 0, imageWidth, imageHeight)
+      })
+      if (interactiveSegState.isInteractiveSeg && segMask) {
+        baseCtx.drawImage(segMask, 0, 0, imageWidth, imageHeight)
+      }
+      // 只画当前提交的笔画（curLineGroup）。inpaint 完成后由 runInpainting
+      // 清空 curLineGroup，掩膜随之从画布清除（标准行为）。
+      drawLines(baseCtx, curLineGroup)
+      baseDrawnLinesRef.current = curLineGroup.slice()
+    }
+    baseContentRef.current = {
+      temporaryMasks,
+      extraMasks,
+      segMask,
+      segClicks: interactiveSegState.clicks,
+      imageWidth,
+      imageHeight,
+      context,
+    }
+
+    const canvas = context.canvas
+    if (canvas.width !== maskCanvasWidth) {
+      canvas.width = maskCanvasWidth
+    }
+    if (canvas.height !== maskCanvasHeight) {
+      canvas.height = maskCanvasHeight
+    }
+    context.setTransform(1, 0, 0, 1, 0, 0)
+    context.clearRect(0, 0, maskCanvasWidth, maskCanvasHeight)
+    // base 和显示画布位图尺寸相同，这里是 1:1 拷贝，必须在 identity 下做；
+    // 缩放变换要等 drawImage 之后再上，否则整块内容会被二次缩小
+    context.drawImage(base, 0, 0, maskCanvasWidth, maskCanvasHeight)
+    applyMaskTransform(context, maskScale)
+    // 把进行中的笔画补上：上面整块重画把它擦掉了，避免绘制过程中出现空白
+    if (strokeRef.current) {
+      drawLines(context, [strokeRef.current])
+      strokeDrawnCountRef.current = strokeRef.current.pts.length
+    }
   }, [
     temporaryMasks,
     extraMasks,
@@ -302,6 +401,10 @@ export default function Editor(props: EditorProps) {
     curLineGroup,
     imageHeight,
     imageWidth,
+    maskCanvasWidth,
+    maskCanvasHeight,
+    maskScale,
+    applyMaskTransform,
   ])
 
   useEffect(() => {
@@ -351,11 +454,12 @@ export default function Editor(props: EditorProps) {
     setScale(s)
 
     if (context?.canvas) {
-      if (width != context.canvas.width) {
-        context.canvas.width = width
+      // 位图尺寸用显示分辨率；redrawMaskCanvas 会随后重置变换并重建内容
+      if (maskCanvasWidth != context.canvas.width) {
+        context.canvas.width = maskCanvasWidth
       }
-      if (height != context.canvas.height) {
-        context.canvas.height = height
+      if (maskCanvasHeight != context.canvas.height) {
+        context.canvas.height = maskCanvasHeight
       }
     }
 
@@ -375,6 +479,8 @@ export default function Editor(props: EditorProps) {
     getCurrentWidthHeight,
     context?.canvas,
     setImageSize,
+    maskCanvasWidth,
+    maskCanvasHeight,
   ])
 
   useEffect(() => {
@@ -453,14 +559,19 @@ export default function Editor(props: EditorProps) {
   }
 
   useEffect(() => {
+    // 同一个 Set 只会增删、不会重新赋值，先取出引用供 cleanup 使用
+    const pendingTimeouts = timeoutRefs.current
     return () => {
       if (cursorFrameRef.current !== 0) {
         cancelAnimationFrame(cursorFrameRef.current)
       }
-      for (const t of timeoutRefs.current) {
+      if (strokeFrameRef.current !== 0) {
+        cancelAnimationFrame(strokeFrameRef.current)
+      }
+      for (const t of pendingTimeouts) {
         clearTimeout(t)
       }
-      timeoutRefs.current.clear()
+      pendingTimeouts.clear()
     }
   }, [])
 
@@ -473,39 +584,109 @@ export default function Editor(props: EditorProps) {
     if (!context?.canvas) {
       return
     }
+    strokeDrawnCountRef.current = 0
     strokeRef.current = { size: brushSize, pts: [pt] }
+    // 也要 flush 一次，这样“点一下不拖”也能留下一个圆点
+    scheduleStrokeFlush()
   }
 
-  // 追加一个绘制点：把“已提交内容(底层画布) + 当前笔画(一次性重画)”合成到显示画布。
-  // 整个路径只 stroke() 一次，笔刷透明度不会因为反复描边而自我叠加成实心，
-  // 也不会随着笔画变长而不断重复重绘旧段落（避免掉帧）。
+  // 把当前笔画里“还没画”的新增点画到显示画布上。
+  // 只重画新增线段的包围盒（脏矩形）：清掉上一帧画在这里的像素 -> 从底层画布
+  // 拷回已提交内容 -> 在同一块区域里重新描一次整条当前笔画。
+  // 整条路径在一次 stroke() 内并集覆盖，笔刷的半透明不会自我叠加成实心，
+  // 像素结果与“每次全画布重画”完全一致，但每帧的代价只跟笔尖扫过的一小块
+  // 区域有关，不再随图片分辨率增长。
+  const flushStroke = useCallback(() => {
+    strokeFrameRef.current = 0
+    const stroke = strokeRef.current
+    const ctx = context
+    if (!stroke || !ctx) {
+      return
+    }
+    const from = strokeDrawnCountRef.current
+    if (from >= stroke.pts.length) {
+      return
+    }
+    const base = maskBaseCanvasRef.current
+    if (!base || !ctx.canvas.width || !ctx.canvas.height) {
+      return
+    }
+    const scale = maskScaleRef.current
+    // 脏矩形要带上“上一个已画点”：本次新增的第一个线段是 上一点 -> 新点，
+    // 只取新点的话，快速甩笔时这段会伸到脏矩形外面，那部分像素就永远补不上
+    const added: Line = {
+      size: stroke.size,
+      pts: stroke.pts.slice(Math.max(0, from - 1)),
+    }
+    // 圆头笔刷会画到路径外 lineWidth/2（注意 strokeBounds 用的是原图坐标，
+    // 这里也要用原图单位；多留 2 个画布像素给抗锯齿和 floor/ceil 取整）
+    const pad = (stroke.size ?? brushSize) / 2 + 2 / scale
+    const dirty = strokeBounds(added, pad)
+    if (!dirty) {
+      return
+    }
+    // 脏矩形换算到画布位图像素，并夹到画布范围内
+    const x0 = Math.max(0, Math.floor(dirty.x * scale))
+    const y0 = Math.max(0, Math.floor(dirty.y * scale))
+    const x1 = Math.min(
+      ctx.canvas.width,
+      Math.ceil((dirty.x + dirty.w) * scale)
+    )
+    const y1 = Math.min(
+      ctx.canvas.height,
+      Math.ceil((dirty.y + dirty.h) * scale)
+    )
+    const bw = x1 - x0
+    const bh = y1 - y0
+    if (bw <= 0 || bh <= 0) {
+      return
+    }
+    // clearRect / drawImage / clip 必须用同一个矩形，否则两者之间那圈像素
+    // 被清掉又没补描，笔迹上会出现 1px 的缺口
+    ctx.save()
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    ctx.clearRect(x0, y0, bw, bh)
+    ctx.drawImage(base, x0, y0, bw, bh, x0, y0, bw, bh)
+    ctx.beginPath()
+    ctx.rect(x0, y0, bw, bh)
+    ctx.clip()
+    applyMaskTransform(ctx, scale)
+    drawLines(ctx, [stroke])
+    ctx.restore()
+    strokeDrawnCountRef.current = stroke.pts.length
+  }, [context, brushSize, applyMaskTransform])
+
+  const scheduleStrokeFlush = useCallback(() => {
+    if (strokeFrameRef.current !== 0) {
+      return
+    }
+    // 用 rAF 合帧：一次绘制期间可能有上百个 pointermove，
+    // 但每个显示帧只需要把最新的一段画上去
+    strokeFrameRef.current = requestAnimationFrame(flushStroke)
+  }, [flushStroke])
+
+  const cancelStrokeFlush = useCallback(() => {
+    if (strokeFrameRef.current !== 0) {
+      cancelAnimationFrame(strokeFrameRef.current)
+      strokeFrameRef.current = 0
+    }
+  }, [])
+
+  // 追加一个绘制点：只记录坐标，实际绘制由 rAF 合帧后统一做（见 flushStroke）
   const pushStrokePoint = useCallback(
     (pt: Point) => {
       const stroke = strokeRef.current
-      const ctx = context
-      if (!stroke || !ctx) {
+      if (!stroke) {
+        return
+      }
+      const last = stroke.pts[stroke.pts.length - 1]
+      if (last && last.x === pt.x && last.y === pt.y) {
         return
       }
       stroke.pts.push(pt)
-      const base = maskBaseCanvasRef.current
-      if (!base) {
-        return
-      }
-      const canvas = ctx.canvas
-      ctx.clearRect(0, 0, canvas.width, canvas.height)
-      ctx.drawImage(base, 0, 0, imageWidth, imageHeight)
-      ctx.strokeStyle = BRUSH_COLOR
-      ctx.lineCap = "round"
-      ctx.lineJoin = "round"
-      ctx.lineWidth = stroke.size ?? brushSize
-      ctx.beginPath()
-      ctx.moveTo(stroke.pts[0].x, stroke.pts[0].y)
-      for (let i = 1; i < stroke.pts.length; i++) {
-        ctx.lineTo(stroke.pts[i].x, stroke.pts[i].y)
-      }
-      ctx.stroke()
+      scheduleStrokeFlush()
     },
-    [context, imageWidth, imageHeight, brushSize]
+    [scheduleStrokeFlush]
   )
 
   const commitCurrentStroke = () => {
@@ -513,7 +694,11 @@ export default function Editor(props: EditorProps) {
     if (!stroke) {
       return
     }
+    // 先把这一帧剩下的点画完再提交，避免最后一小段留白
+    cancelStrokeFlush()
+    flushStroke()
     strokeRef.current = null
+    strokeDrawnCountRef.current = 0
     commitStroke(stroke)
   }
 
@@ -522,10 +707,12 @@ export default function Editor(props: EditorProps) {
     if (!strokeRef.current) {
       return
     }
+    cancelStrokeFlush()
     strokeRef.current = null
+    strokeDrawnCountRef.current = 0
     setIsDraging(false)
     redrawMaskCanvas()
-  }, [redrawMaskCanvas])
+  }, [redrawMaskCanvas, cancelStrokeFlush])
 
   const onMouseDrag = (ev: SyntheticEvent) => {
     if (isProcessing) {
@@ -544,7 +731,22 @@ export default function Editor(props: EditorProps) {
     if (!strokeRef.current) {
       return
     }
-    pushStrokePoint(mouseXY(ev))
+    // getCoalescedEvents 带上浏览器合并掉的中间点，快速划动时笔迹不会断
+    const nativeEvent = ev.nativeEvent as MouseEvent
+    const withCoalesced = nativeEvent as MouseEvent & {
+      getCoalescedEvents?: () => MouseEvent[]
+    }
+    if (typeof withCoalesced.getCoalescedEvents === "function") {
+      const events = withCoalesced.getCoalescedEvents()
+      if (events.length > 1) {
+        for (const coalesced of events) {
+          const xy = mouseXY(coalesced)
+          pushStrokePoint(xy)
+        }
+        return
+      }
+    }
+    pushStrokePoint(mouseXY(nativeEvent))
   }
 
   const runInteractiveSeg = async (newClicks: number[][]) => {
@@ -847,8 +1049,11 @@ export default function Editor(props: EditorProps) {
       aDownloadLink.download = maskFileName
       // Attach the data to the link
       aDownloadLink.href = maskCanvas.toDataURL("image/jpeg")
-      // Get the code to click the download link
+      aDownloadLink.style.display = "none"
+      // 需先挂载再 click，否则部分浏览器不会触发下载
+      document.body.appendChild(aDownloadLink)
       aDownloadLink.click()
+      setTimeout(() => aDownloadLink.remove(), 1000)
     }
   }, [
     file,
@@ -917,15 +1122,19 @@ export default function Editor(props: EditorProps) {
     async () => {
       const hasPermission = await askWritePermission()
       if (hasPermission && renders.length > 0) {
-        if (context?.canvas) {
-          await copyCanvasImage(context?.canvas)
+        // 显示画布是按显示分辨率缩小的，这里按原图分辨率重新生成，避免拷到低清掩膜
+        if (imageWidth > 0 && imageHeight > 0) {
+          const fullRes = generateMask(imageWidth, imageHeight, [
+            curLineGroup,
+          ])
+          await copyCanvasImage(fullRes)
           toast({
             title: "Copy inpainting result to clipboard",
           })
         }
       }
     },
-    [renders, context]
+    [renders, imageWidth, imageHeight, curLineGroup]
   )
 
   // Toggle clean/zoom tool on spacebar.
@@ -1098,6 +1307,10 @@ export default function Editor(props: EditorProps) {
                 cursor: getCursor(),
                 clipPath: `inset(0 ${sliderPos}% 0 0)`,
                 transition: `clip-path ${COMPARE_SLIDER_DURATION_MS}ms`,
+                // 位图可能比原图小（见 MASK_CANVAS_MAX_PIXELS），
+                // 用 CSS 尺寸把布局盒子撑回原图大小，坐标系和缩放行为保持不变
+                width: `${imageWidth}px`,
+                height: `${imageHeight}px`,
               }}
               onContextMenu={(e) => {
                 e.preventDefault()
@@ -1114,10 +1327,9 @@ export default function Editor(props: EditorProps) {
               ref={(r) => {
                 canvasRef.current = r
                 if (r && !context) {
-                  const isEdge = navigator.userAgent.includes("Edg/")
-                  const ctx = r.getContext("2d", {
-                    desynchronized: !isEdge,
-                  })
+                  // 不要加 desynchronized：Firefox 并没有实现低延迟画布路径，
+                  // 只会让这个画布走上一条对大尺寸画布很不利的合成路径
+                  const ctx = r.getContext("2d")
                   if (ctx) {
                     setContext(ctx)
                   }
