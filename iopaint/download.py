@@ -241,10 +241,13 @@ def scan_diffusers_models() -> List[ModelInfo]:
         try:
             with open(it, "r", encoding="utf-8") as f:
                 data = json.load(f)
-        except (json.JSONDecodeError, OSError):
+            # BUG-7/D-18：脏 model_index.json（缺 _class_name、不是对象、读不了）
+            # 只跳过该目录，不让一个坏文件把整个模型扫描打挂（server 起不来）
+            _class_name = data["_class_name"]
+        except (json.JSONDecodeError, OSError, KeyError, TypeError, UnicodeDecodeError) as e:
+            logger.warning(f"Skip invalid model_index.json {it}: {e}")
             continue
 
-        _class_name = data["_class_name"]
         name = folder_name_to_show_name(it.parent.parent.parent.name)
         if name in diffusers_model_names:
             continue
@@ -288,38 +291,47 @@ def _scan_converted_diffusers_models(cache_dir) -> List[ModelInfo]:
     )
     for it in model_index_files:
         it = Path(it)
-        with open(it, "r", encoding="utf-8") as f:
-            try:
+        # BUG-7/D-18：同 scan_diffusers_models，坏文件只 warning + 跳过
+        try:
+            with open(it, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            except (json.JSONDecodeError, ValueError):
-                logger.error(
-                    f"Failed to load {it}, please try revert from original model or fix model_index.json by hand."
-                )
-                continue
-
             _class_name = data["_class_name"]
-            name = folder_name_to_show_name(it.parent.name)
-            if name in diffusers_model_names:
-                continue
-            elif _class_name == DIFFUSERS_SD_CLASS_NAME:
-                model_type = ModelType.DIFFUSERS_SD
-            elif _class_name == DIFFUSERS_SD_INPAINT_CLASS_NAME:
-                model_type = ModelType.DIFFUSERS_SD_INPAINT
-            elif _class_name == DIFFUSERS_SDXL_CLASS_NAME:
-                model_type = ModelType.DIFFUSERS_SDXL
-            elif _class_name == DIFFUSERS_SDXL_INPAINT_CLASS_NAME:
-                model_type = ModelType.DIFFUSERS_SDXL_INPAINT
-            else:
-                continue
-
-            diffusers_model_names.append(name)
-            available_models.append(
-                ModelInfo(
-                    name=name,
-                    path=str(it.parent.absolute()),
-                    model_type=model_type,
-                )
+        except (
+            json.JSONDecodeError,
+            ValueError,
+            OSError,
+            KeyError,
+            TypeError,
+            UnicodeDecodeError,
+        ) as e:
+            logger.warning(
+                f"Failed to load {it} ({e}), skip it. "
+                f"You can revert the model or fix model_index.json by hand."
             )
+            continue
+
+        name = folder_name_to_show_name(it.parent.name)
+        if name in diffusers_model_names:
+            continue
+        elif _class_name == DIFFUSERS_SD_CLASS_NAME:
+            model_type = ModelType.DIFFUSERS_SD
+        elif _class_name == DIFFUSERS_SD_INPAINT_CLASS_NAME:
+            model_type = ModelType.DIFFUSERS_SD_INPAINT
+        elif _class_name == DIFFUSERS_SDXL_CLASS_NAME:
+            model_type = ModelType.DIFFUSERS_SDXL
+        elif _class_name == DIFFUSERS_SDXL_INPAINT_CLASS_NAME:
+            model_type = ModelType.DIFFUSERS_SDXL_INPAINT
+        else:
+            continue
+
+        diffusers_model_names.append(name)
+        available_models.append(
+            ModelInfo(
+                name=name,
+                path=str(it.parent.absolute()),
+                model_type=model_type,
+            )
+        )
     return available_models
 
 

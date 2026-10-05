@@ -753,14 +753,24 @@ export default function Editor(props: EditorProps) {
 
   const runInteractiveSeg = async (newClicks: number[][]) => {
     updateAppState({ isPluginRunning: true })
-    const targetFile = await getCurrentTargetFile()
     try {
+      // FE-1/D-11：getCurrentTargetFile 也可能 reject，必须放进 try，
+      // 否则 isPluginRunning 永远停在 true（编辑器交互被 getIsProcessing 挡死）
+      const targetFile = await getCurrentTargetFile()
+      // API-1/D-12：clicks 的 schema 类型是 List[List[int]]，pydantic 对小数
+      // 坐标直接 422（已实测）。鼠标/触屏/缩放后的坐标可能带小数，
+      // 这里在入口统一取整，覆盖所有调用来源；笔迹绘制的浮点精度不受影响。
+      const clicks = newClicks.map(([x, y, ...rest]) => [
+        Math.round(x),
+        Math.round(y),
+        ...rest,
+      ])
       const res = await runPlugin(
         true,
         PluginName.InteractiveSeg,
         targetFile,
         undefined,
-        newClicks
+        clicks
       )
       const { blob } = res
       const blobUrl = URL.createObjectURL(blob)
@@ -778,8 +788,13 @@ export default function Editor(props: EditorProps) {
         variant: "destructive",
         description: getErrorMessage(e),
       })
+    } finally {
+      // 图片切换路径由 setFile 复位，此处不复位，
+      // 以免旧请求晚到的 finally 误清新一次请求的标志
+      if (useStore.getState().file === file) {
+        updateAppState({ isPluginRunning: false })
+      }
     }
-    updateAppState({ isPluginRunning: false })
   }
 
   const onPointerUp = (ev: SyntheticEvent) => {
@@ -1042,11 +1057,20 @@ export default function Editor(props: EditorProps) {
 
     // TODO: download to output directory
     const curRender = renders[renders.length - 1]
-    const renderMime = curRender
-      ? await mimeFromSrc(curRender.currentSrc)
-      : undefined
-    const name = buildDownloadName(file.name, "_cleanup", renderMime)
-    downloadImage(curRender.currentSrc, name)
+    if (curRender) {
+      const renderMime = await mimeFromSrc(curRender.currentSrc)
+      const name = buildDownloadName(file.name, "_cleanup", renderMime)
+      downloadImage(curRender.currentSrc, name)
+    } else {
+      // FE-2/D-14：还没有任何渲染结果（例如刚打开图片就按 Ctrl+S）时
+      // 回落下载原图，而不是读 undefined.currentSrc 抛 TypeError
+      const originalUrl = URL.createObjectURL(file)
+      downloadImage(
+        originalUrl,
+        buildDownloadName(file.name, "_cleanup", file.type)
+      )
+      setTimeout(() => URL.revokeObjectURL(originalUrl), 10_000)
+    }
     if (settings.enableDownloadMask) {
       // mask 是 0/255 二值图，JPEG 的有损压缩会污染边缘 → 恒定 PNG（CONS-3）
       const maskFileName = buildDownloadName(file.name, "_mask", "image/png")

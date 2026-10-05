@@ -308,7 +308,6 @@ class LDM(InpaintModel):
         masked_image = self._norm(masked_image)
 
         c = self.cond_stage_model_encode(masked_image)
-        torch.cuda.empty_cache()
 
         cc = torch.nn.functional.interpolate(mask, size=c.shape[-2:])  # 1,1,128,128
         c = torch.cat((c, cc), dim=1)  # 1,4,128,128
@@ -317,11 +316,9 @@ class LDM(InpaintModel):
         samples_ddim = sampler.sample(
             steps=steps, conditioning=c, batch_size=c.shape[0], shape=shape
         )
-        torch.cuda.empty_cache()
         x_samples_ddim = self.cond_stage_model_decode(
             samples_ddim
         )  # samples_ddim: 1, 3, 128, 128 float32
-        torch.cuda.empty_cache()
 
         # image = torch.clamp((image + 1.0) / 2.0, min=0.0, max=1.0)
         # mask = torch.clamp((mask + 1.0) / 2.0, min=0.0, max=1.0)

@@ -134,8 +134,10 @@ class InteractiveSeg(BasePlugin):
             input_label.append(click[2])
 
         if img_md5 and img_md5 != self.prev_img_md5:
-            self.prev_img_md5 = img_md5
+            # check-then-act：set_image 成功后才能更新缓存标记，
+            # 否则失败后下次请求会跳过 set_image，拿旧图去 predict
             self.predictor.set_image(rgb_np_img)
+            self.prev_img_md5 = img_md5
 
         masks, _, _ = self.predictor.predict(
             point_coords=np.array(input_point),

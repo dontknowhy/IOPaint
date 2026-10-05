@@ -757,39 +757,8 @@ const DiffusionOptions = () => {
     )
   }
 
-  const renderMaskBlur = () => {
-    return (
-      <>
-        <RowContainer>
-          <LabelTitle
-            text="Mask blur"
-            toolTip="How much to blur the mask before processing, in pixels. Make the generated inpainting boundaries appear more natural."
-          />
-          <div className="flex gap-4">
-            <Slider
-              className="w-[120px]"
-              defaultValue={[settings.sdMaskBlur]}
-              min={0}
-              max={96}
-              step={1}
-              value={[Math.floor(settings.sdMaskBlur)]}
-              onValueChange={(vals) => updateSettings({ sdMaskBlur: vals[0] })}
-            />
-            <NumberInput
-              id="mask-blur"
-              className="w-[50px] rounded-full"
-              numberValue={settings.sdMaskBlur}
-              allowFloat={false}
-              onNumberValueChange={(value) => {
-                updateSettings({ sdMaskBlur: value })
-              }}
-            />
-          </div>
-        </RowContainer>
-        <Separator />
-      </>
-    )
-  }
+  // D-17：Mask blur 滑块已删除 —— sd_mask_blur 参数不再暴露给用户，
+  // 合成羽化由后端固定（DiffusionInpaintModel.COMPOSITE_MASK_BLUR）
 
   const renderMatchHistograms = () => {
     return (
@@ -900,7 +869,6 @@ const DiffusionOptions = () => {
     <div className="flex flex-col gap-[14px] mt-4">
       {renderCropper()}
       {renderExtender()}
-      {renderMaskBlur()}
       {renderMaskAdjuster()}
       {renderMatchHistograms()}
       {renderPowerPaintV1()}

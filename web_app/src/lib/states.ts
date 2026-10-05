@@ -83,7 +83,8 @@ export type Settings = {
   seedFixed: boolean
 
   // For SD
-  sdMaskBlur: number
+  // D-17：sdMaskBlur 已删除（后端合成羽化固定为 COMPOSITE_MASK_BLUR），
+  // 旧 persist 数据里残留的同名字段会被忽略
   sdStrength: number
   sdSteps: number
   sdGuidanceScale: number
@@ -332,7 +333,6 @@ const defaultValues: AppState = {
     negativePrompt: DEFAULT_NEGATIVE_PROMPT,
     seed: 42,
     seedFixed: false,
-    sdMaskBlur: 12,
     sdStrength: 1.0,
     sdSteps: 50,
     sdGuidanceScale: 7.5,
@@ -474,91 +474,102 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           state.isInpainting = true
         })
 
-        let targetFile = file
-        if (useLastLineGroup === true) {
-          // renders.length == 1 还是用原来的
-          if (renders.length > 1) {
-            const lastRender = renders[renders.length - 2]
+        // FE-1/D-11：isInpainting 是全局标志，从 set(true) 到结束必须由 finally 兜底。
+        // 此前 srcToFile/generateMask 等 await 在 try 之外，一旦 reject 就会
+        // 永久停在 true（按钮一直转圈，且后续请求被 isInpainting 守卫挡死）。
+        try {
+          let targetFile = file
+          if (useLastLineGroup === true) {
+            // renders.length == 1 还是用原来的
+            if (renders.length > 1) {
+              const lastRender = renders[renders.length - 2]
+              targetFile = await srcToFile(
+                lastRender.currentSrc,
+                file.name,
+                file.type
+              )
+            }
+          } else if (renders.length > 0) {
+            const lastRender = renders[renders.length - 1]
             targetFile = await srcToFile(
               lastRender.currentSrc,
               file.name,
               file.type
             )
           }
-        } else if (renders.length > 0) {
-          const lastRender = renders[renders.length - 1]
-          targetFile = await srcToFile(
-            lastRender.currentSrc,
-            file.name,
-            file.type
+
+          const maskCanvas = generateMask(
+            imageWidth,
+            imageHeight,
+            [maskLineGroup],
+            maskImages,
+            BRUSH_COLOR
           )
-        }
-
-        const maskCanvas = generateMask(
-          imageWidth,
-          imageHeight,
-          [maskLineGroup],
-          maskImages,
-          BRUSH_COLOR
-        )
-        if (useLastLineGroup) {
-          const temporaryMask = await canvasToImage(maskCanvas)
-          set((state) => {
-            state.editorState.temporaryMasks = castDraft([temporaryMask])
-          })
-        }
-
-        try {
-          const maskBlob = await canvasToBlob(maskCanvas, "image/png")
-          const res = await inpaint(
-            targetFile,
-            settings,
-            cropperState,
-            extenderState,
-            maskBlob,
-            paintByExampleFile
-          )
-
-          const { blob, seed } = res
-          if (seed) {
-            get().setSeed(parseInt(seed, 10))
+          if (useLastLineGroup) {
+            const temporaryMask = await canvasToImage(maskCanvas)
+            set((state) => {
+              state.editorState.temporaryMasks = castDraft([temporaryMask])
+            })
           }
-          const blobUrl = URL.createObjectURL(blob)
-          _activeBlobUrls.add(blobUrl)
-          const newRender = new Image()
-          await loadImage(newRender, blobUrl)
-          // 若期间用户切换了图片，丢弃过期结果，避免污染新图片的编辑器状态
-          // （否则会出现新图片上显示旧图渲染结果 / 画布尺寸错乱等"画笔消失"现象）
+
+          try {
+            const maskBlob = await canvasToBlob(maskCanvas, "image/png")
+            const res = await inpaint(
+              targetFile,
+              settings,
+              cropperState,
+              extenderState,
+              maskBlob,
+              paintByExampleFile
+            )
+
+            const { blob, seed } = res
+            if (seed) {
+              get().setSeed(parseInt(seed, 10))
+            }
+            const blobUrl = URL.createObjectURL(blob)
+            _activeBlobUrls.add(blobUrl)
+            const newRender = new Image()
+            await loadImage(newRender, blobUrl)
+            // 若期间用户切换了图片，丢弃过期结果，避免污染新图片的编辑器状态
+            // （否则会出现新图片上显示旧图渲染结果 / 画布尺寸错乱等"画笔消失"现象）
+            if (get().file !== file) {
+              URL.revokeObjectURL(blobUrl)
+              _activeBlobUrls.delete(blobUrl)
+              return
+            }
+            const newRenders = [...renders, newRender]
+            get().setImageSize(newRender.width, newRender.height)
+            get().updateEditorState({
+              renders: newRenders,
+              lineGroups: newLineGroups,
+              lastLineGroup: maskLineGroup,
+              curLineGroup: [],
+              extraMasks: [],
+              prevExtraMasks: maskImages,
+            })
+          } catch (e) {
+            toast({
+              variant: "destructive",
+              description: getErrorMessage(e),
+            })
+          }
+
           if (get().file !== file) {
-            URL.revokeObjectURL(blobUrl)
-            _activeBlobUrls.delete(blobUrl)
             return
           }
-          const newRenders = [...renders, newRender]
-          get().setImageSize(newRender.width, newRender.height)
-          get().updateEditorState({
-            renders: newRenders,
-            lineGroups: newLineGroups,
-            lastLineGroup: maskLineGroup,
-            curLineGroup: [],
-            extraMasks: [],
-            prevExtraMasks: maskImages,
-          })
-        } catch (e) {
-          toast({
-            variant: "destructive",
-            description: getErrorMessage(e),
-          })
+          get().resetRedoState()
+        } finally {
+          // 只在图片没切换时复位：切图路径由 setFile 复位（见 setFile 内的
+          // isInpainting/isPluginRunning/isAdjustingMask），
+          // 而且此刻复位会误清掉新一次请求刚 set 上的标志（旧请求晚到的 finally）
+          if (get().file === file) {
+            set((state) => {
+              state.isInpainting = false
+              state.editorState.temporaryMasks = []
+            })
+          }
         }
-
-        if (get().file !== file) {
-          return
-        }
-        get().resetRedoState()
-        set((state) => {
-          state.isInpainting = false
-          state.editorState.temporaryMasks = []
-        })
       },
 
       runRenderablePlugin: async (
@@ -622,13 +633,16 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
             variant: "destructive",
             description: getErrorMessage(e),
           })
+        } finally {
+          // FE-1/D-11：isPluginRunning 同样必须无条件兜底，否则图片切换/异常
+          // 之后会一直卡在 true（编辑器所有交互被 isPluginRunning 守卫挡死）。
+          // 切图路径由 setFile 复位，且此时复位会误清新一次请求的标志。
+          if (get().file === file) {
+            set((state) => {
+              state.isPluginRunning = false
+            })
+          }
         }
-        if (get().file !== file) {
-          return
-        }
-        set((state) => {
-          state.isPluginRunning = false
-        })
       },
 
       // Edirot State //
@@ -1098,33 +1112,47 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           state.isAdjustingMask = true
         })
 
-        const maskCanvas = generateMask(
-          imageWidth,
-          imageHeight,
-          [curLineGroup],
-          extraMasks,
-          BRUSH_COLOR
-        )
-        const maskBlob = await canvasToBlob(maskCanvas, "image/png")
-        const newMaskBlob = await postAdjustMask(
-          maskBlob,
-          operate,
-          adjustMaskKernelSize
-        )
-        const newMask = await blobToImage(newMaskBlob)
-        if (get().file !== file) {
-          return
+        // FE-1/D-11：这一段此前完全在 try 之外 —— postAdjustMask 一旦 reject
+        // （网络/422），isAdjustingMask 就永久停在 true，用户既看不到错误提示，
+        // 后续 adjustMask 也会被 isAdjustingMask 守卫挡死。
+        try {
+          const maskCanvas = generateMask(
+            imageWidth,
+            imageHeight,
+            [curLineGroup],
+            extraMasks,
+            BRUSH_COLOR
+          )
+          const maskBlob = await canvasToBlob(maskCanvas, "image/png")
+          const newMaskBlob = await postAdjustMask(
+            maskBlob,
+            operate,
+            adjustMaskKernelSize
+          )
+          const newMask = await blobToImage(newMaskBlob)
+          if (get().file !== file) {
+            return
+          }
+
+          // TODO: currently ignore stroke undo/redo
+          set((state) => {
+            state.editorState.extraMasks = [castDraft(newMask)]
+            state.editorState.curLineGroup = []
+          })
+        } catch (e) {
+          toast({
+            variant: "destructive",
+            description: getErrorMessage(e),
+          })
+        } finally {
+          // 切图路径由 setFile 复位，此处不复位以免误清
+          // 新一次请求的标志
+          if (get().file === file) {
+            set((state) => {
+              state.isAdjustingMask = false
+            })
+          }
         }
-
-        // TODO: currently ignore stroke undo/redo
-        set((state) => {
-          state.editorState.extraMasks = [castDraft(newMask)]
-          state.editorState.curLineGroup = []
-        })
-
-        set((state) => {
-          state.isAdjustingMask = false
-        })
       },
       clearMask: () => {
         set((state) => {

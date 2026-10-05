@@ -285,18 +285,22 @@ class Api:
         return self.app.add_api_route(path, endpoint, **kwargs)
 
     def api_save_image(self, file: UploadFile):
-        # Sanitize filename to prevent path traversal
-        safe_filename = Path(file.filename).name  # Get just the filename component
-
-        # Construct the full path within output_dir
-        output_path = self.config.output_dir / safe_filename
-
-        # Ensure output directory exists
+        # 校验必须放在构造路径之前：output_dir 未配置时 `None / str` 会抛
+        # TypeError → 500（D-14）
         if not self.config.output_dir or not self.config.output_dir.exists():
             raise HTTPException(
                 status_code=400,
                 detail="Output directory not configured or doesn't exist",
             )
+
+        # Sanitize filename to prevent path traversal
+        safe_filename = Path(file.filename or "").name  # Get just the filename component
+        # Path("..").name 仍是 ".."，直接拼会指到上一级目录
+        if not safe_filename or safe_filename in (".", ".."):
+            raise HTTPException(status_code=400, detail="Invalid filename")
+
+        # Construct the full path within output_dir
+        output_path = self.config.output_dir / safe_filename
 
         # Read and write the file
         origin_image_bytes = file.file.read()
@@ -314,7 +318,10 @@ class Api:
 
     def api_switch_plugin_model(self, req: SwitchPluginModelRequest):
         if req.plugin_name in self.plugins:
-            self.plugins[req.plugin_name].switch_model(req.model_name)
+            plugin = self.plugins[req.plugin_name]
+            # CON-1: 换模型同样要独占插件（否则与正在进行的推理互踩）
+            with plugin.lock:
+                plugin.switch_model(req.model_name)
             if req.plugin_name == RemoveBG.name:
                 self.config.remove_bg_model = req.model_name
             if req.plugin_name == RealESRGANUpscaler.name:
@@ -480,7 +487,11 @@ class Api:
 
     def _plugin_gen_image_blocking(self, req: RunPluginRequest) -> bytes:
         rgb_np_img, alpha_channel, infos, _ = decode_base64_to_image(req.image)
-        bgr_or_rgba_np_img = self.plugins[req.name].gen_image(rgb_np_img, req)
+        plugin = self.plugins[req.name]
+        # CON-1: 插件内部状态（模型句柄等）不接受并发重入；锁只包推理，
+        # 解码/编码留在锁外
+        with plugin.lock:
+            bgr_or_rgba_np_img = plugin.gen_image(rgb_np_img, req)
         if self.config.empty_cache_after_inpaint:
             torch_gc()
 
@@ -512,7 +523,9 @@ class Api:
 
     def _plugin_gen_mask_blocking(self, req: RunPluginRequest) -> bytes:
         rgb_np_img, _, _, _ = decode_base64_to_image(req.image)
-        bgr_or_gray_mask = self.plugins[req.name].gen_mask(rgb_np_img, req)
+        plugin = self.plugins[req.name]
+        with plugin.lock:
+            bgr_or_gray_mask = plugin.gen_mask(rgb_np_img, req)
         if self.config.empty_cache_after_inpaint:
             torch_gc()
         res_mask = gen_frontend_mask(bgr_or_gray_mask)

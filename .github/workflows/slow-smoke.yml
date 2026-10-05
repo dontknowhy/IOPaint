@@ -1,0 +1,57 @@
+name: Slow smoke
+
+# D-16：慢速（下载权重）冒烟，只在每周定时 + 手动触发时跑，
+# **不挂在 push/pull_request 上** —— PR 必跑集保持"快、离线"（见 ci.yml）。
+on:
+  schedule:
+    - cron: "0 2 * * 1" # 每周一 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      cache_suffix:
+        description: "想强制重新下载权重时填个新值，否则复用缓存"
+        required: false
+        default: ""
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  slow-smoke:
+    name: slow (pytest -m slow)
+    runs-on: ubuntu-latest
+    # 权重按 GB 计，首次跑没有缓存，给足时间（GH 单 job 上限 6h）
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # 同 ci.yml：requirements.txt 钉的 +cu121 只在 CUDA 索引上，摘掉走 CPU wheel
+      - name: Install backend
+        run: |
+          python -m pip install --upgrade pip
+          grep -vE '^(torch|torchvision)==' requirements.txt > /tmp/req-notorch.txt
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+            torch==2.3.1+cpu torchvision==0.18.1+cpu
+          pip install -r /tmp/req-notorch.txt
+          pip install pytest pytest-loguru
+
+      # 模型缓存 = XDG_CACHE_HOME（默认 ~/.cache），HF hub、torch hub、
+      # 以及 --model-dir 的默认目录都在里面；命中缓存后这一步几乎不花时间。
+      - name: Cache model weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache
+          key: ${{ runner.os }}-slow-weights-${{ hashFiles('requirements.txt') }}-${{ github.event.inputs.cache_suffix || 'fresh' }}
+          restore-keys: |
+            ${{ runner.os }}-slow-weights-${{ hashFiles('requirements.txt') }}-
+            ${{ runner.os }}-slow-weights-
+
+      # 没有 GPU 的 runner：check_device() 会跳过 cuda/mps 分支，cpu 分支只跑 2 步
+      - name: Run slow test suite
+        run: pytest -m slow -q

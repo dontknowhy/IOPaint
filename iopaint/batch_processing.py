@@ -27,10 +27,24 @@ def glob_images(path: Path) -> Dict[str, Path]:
     if path.is_file():
         return {path.stem: path}
     elif path.is_dir():
-        res = {}
-        for it in path.glob("*.*"):
-            if it.suffix.lower() in [".png", ".jpg", ".jpeg"]:
-                res[it.stem] = it
+        res: Dict[str, Path] = {}
+        # 排序：glob 顺序不保证，排序后同名文件的 _1/_2 后缀才可复现
+        for it in sorted(path.glob("*.*")):
+            if it.suffix.lower() not in [".png", ".jpg", ".jpeg"]:
+                continue
+            key = it.stem
+            if key in res:
+                # D-15：a.jpg + a.png 撞同一个 stem，后扫描到的会把先前的
+                # 静默覆盖 → 少跑一张图。改成 a_1 并告警。
+                n = 1
+                while f"{key}_{n}" in res:
+                    n += 1
+                new_key = f"{key}_{n}"
+                logger.warning(
+                    f"Duplicate stem '{key}': {it.name} will be processed as '{new_key}'"
+                )
+                key = new_key
+            res[key] = it
         return res
 
 
@@ -70,6 +84,11 @@ def batch_inpaint(
     model_manager = ModelManager(name=model, device=device)
     first_mask = list(mask_paths.values())[0]
 
+    # D-15：判断输出会不会覆盖输入时按解析后的绝对路径比对
+    # （--image 与 --output 可能一个是相对路径一个是绝对路径）
+    input_files = {it.resolve() for it in image_paths.values()}
+    input_files |= {it.resolve() for it in mask_paths.values()}
+
     console = Console()
 
     with Progress(
@@ -84,11 +103,19 @@ def batch_inpaint(
     ) as progress:
         task = progress.add_task("Batch processing...", total=len(image_paths))
         for stem, image_p in image_paths.items():
-            if stem not in mask_paths and mask.is_dir():
-                progress.log(f"mask for {image_p} not found")
-                progress.update(task, advance=1)
-                continue
-            mask_p = mask_paths.get(stem, first_mask)
+            if mask.is_dir():
+                mask_p = mask_paths.get(stem)
+                if mask_p is None:
+                    # D-15：同名文件被 glob_images 改成 stem_1 后，仍要能回退到
+                    # 基础 stem，保证 a.jpg + a.png 共用 a.png 的 mask
+                    mask_p = mask_paths.get(stem.rsplit("_", 1)[0])
+                if mask_p is None:
+                    progress.log(f"mask for {image_p} not found")
+                    progress.update(task, advance=1)
+                    continue
+            else:
+                # 单个 mask 应用到所有图片
+                mask_p = mask_paths.get(stem, first_mask)
 
             infos = Image.open(image_p).info
 
@@ -116,6 +143,16 @@ def batch_inpaint(
 
             img_bytes = pil_to_bytes(Image.fromarray(inpaint_result), "png", 100, infos)
             save_p = output / f"{stem}.png"
+            # D-15：--output-dir 指向输入目录时，会把输入原图覆盖掉。
+            # 只有"文件已存在且属于输入集合"才改名，避免影响重复跑同一输出目录。
+            if save_p.exists() and save_p.resolve() in input_files:
+                n = 1
+                while (candidate := output / f"{stem}_{n}.png").resolve() in input_files:
+                    n += 1
+                logger.warning(
+                    f"Output {save_p.name} is an input file, write to {candidate.name} instead"
+                )
+                save_p = candidate
             with open(save_p, "wb") as fw:
                 fw.write(img_bytes)
 

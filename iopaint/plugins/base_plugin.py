@@ -1,3 +1,5 @@
+import threading
+
 from loguru import logger
 import numpy as np
 
@@ -11,6 +13,10 @@ class BasePlugin:
     support_gen_mask: bool = False
 
     def __init__(self):
+        # CON-1: 插件实例带着可变状态（InteractiveSeg 的 predictor/prev_img_md5、
+        # 各模型句柄），并发请求会互相踩。与 ModelManager.lock 同一模式：
+        # 锁放在组件上、在 executor 内持锁，不在 async 层持锁。
+        self.lock = threading.Lock()
         err_msg = self.check_dep()
         if err_msg:
             logger.error(err_msg)

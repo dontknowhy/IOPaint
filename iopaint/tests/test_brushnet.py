@@ -93,7 +93,6 @@ def test_runway_powerpaint_v2(device, sampler):
             enable_powerpaint_v2=True,
             powerpaint_task=task,
             sd_sampler=sampler,
-            sd_mask_blur=11,
             sd_seed=42,
             # sd_keep_unmasked_area=False
         )

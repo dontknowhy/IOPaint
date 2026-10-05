@@ -92,10 +92,13 @@ export default function FileManager(props: Props) {
   useHotKey(
     "left",
     () => {
-      let newIndex = photoIndex
-      if (photoIndex > 0) {
-        newIndex = photoIndex - 1
+      // FE-2/D-14：列表为空（尚未加载/目录无文件）时直接忽略，
+      // 否则 photos[newIndex].name 会抛 TypeError
+      if (photos.length === 0) {
+        return
       }
+      const current = Math.min(photoIndex, photos.length - 1)
+      const newIndex = current > 0 ? current - 1 : 0
       setPhotoIndex(newIndex)
       onPhotoClick(tab, photos[newIndex].name)
     },
@@ -105,10 +108,13 @@ export default function FileManager(props: Props) {
   useHotKey(
     "right",
     () => {
-      let newIndex = photoIndex
-      if (photoIndex < photos.length - 1) {
-        newIndex = photoIndex + 1
+      // 同上：空列表忽略；同时把越界的 photoIndex 夹回新列表范围
+      if (photos.length === 0) {
+        return
       }
+      const current = Math.min(photoIndex, photos.length - 1)
+      const newIndex =
+        current < photos.length - 1 ? current + 1 : photos.length - 1
       setPhotoIndex(newIndex)
       onPhotoClick(tab, photos[newIndex].name)
     },

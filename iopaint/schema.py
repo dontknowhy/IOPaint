@@ -347,10 +347,8 @@ class InpaintRequest(BaseModel):
         gt=0.0,
         le=1.0,
     )
-    sd_mask_blur: int = Field(
-        11,
-        description="Blur the edge of mask area. The higher the number the smoother blend with the original image",
-    )
+    # D-17：sd_mask_blur 已删除（合成羽化固定为 DiffusionInpaintModel.COMPOSITE_MASK_BLUR，
+    # 前端滑块与 payload 同步移除）。pydantic 默认忽略未知字段，旧客户端仍可正常提交。
     sd_strength: float = Field(
         1.0,
         description="Strength is a measure of how much noise is added to the base image, which influences how similar the output is to the base image. Higher value means more noise and more different from the base image",

@@ -2,6 +2,7 @@ from typing import List, Dict
 import threading
 
 import torch
+from fastapi import HTTPException
 from loguru import logger
 import numpy as np
 
@@ -108,6 +109,13 @@ class ModelManager:
             return self._run(image, mask, config)
 
     def _run(self, image, mask, config: InpaintRequest):
+        # 切换失败且回滚也失败时 self.model 为 None（REL-2/D-9）；
+        # 给出明确 503 而不是 AttributeError 级联
+        if self.model is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Model load failed, please switch model",
+            )
         if config.enable_controlnet:
             self.switch_controlnet_method(config)
         if config.enable_brushnet:
@@ -126,36 +134,59 @@ class ModelManager:
         return list(self.available_models.values())
 
     def switch(self, new_name: str):
+        # 未知模型名先拒（此前 available_models[new_name] 抛 KeyError → 500，
+        # 且此时 self.name 已经被改成新值，状态被污染）
+        if new_name not in self.available_models:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown model: {new_name}",
+            )
         if new_name == self.name:
             return
 
         with self.lock:
             old_name = self.name
             old_controlnet_method = self.controlnet_method
-            self.name = new_name
 
+            new_controlnet_method = old_controlnet_method
             if (
                 self.available_models[new_name].support_controlnet
-                and self.controlnet_method
+                and new_controlnet_method
                 not in self.available_models[new_name].controlnets
             ):
-                self.controlnet_method = self.available_models[new_name].controlnets[0]
+                new_controlnet_method = self.available_models[new_name].controlnets[0]
+
+            # init_model 内部读 self.controlnet_method，所以新值先提交；
+            # self.name 等 init_model 成功之后再提交（REL-2/D-9）。
+            # 中途失败一律回滚到旧状态，避免"名字换了模型没换"。
+            self.controlnet_method = new_controlnet_method
+            # 原实现是 del self.model，失败后 AttributeError 会级联；
+            # 置 None 让 _run 能给出 503
+            self.model = None
+            torch_gc()
+
             try:
                 # TODO: enable/disable controlnet without reload model
-                del self.model
-                torch_gc()
-
-                self.model = self.init_model(
+                model = self.init_model(
                     new_name, switch_mps_device(new_name, self.device), **self.kwargs
                 )
             except Exception as e:
-                self.name = old_name
                 self.controlnet_method = old_controlnet_method
-                logger.info(f"Switch model from {old_name} to {new_name} failed, rollback")
-                self.model = self.init_model(
-                    old_name, switch_mps_device(old_name, self.device), **self.kwargs
+                logger.info(
+                    f"Switch model from {old_name} to {new_name} failed: {e}, rollback"
                 )
-                raise e
+                try:
+                    self.model = self.init_model(
+                        old_name, switch_mps_device(old_name, self.device), **self.kwargs
+                    )
+                except Exception as rollback_err:
+                    logger.error(
+                        f"Rollback to model {old_name} failed too: {rollback_err}"
+                    )
+                    self.model = None
+                raise
+            self.name = new_name
+            self.model = model
 
     def switch_brushnet_method(self, config):
         if not self.available_models[self.name].support_brushnet:
@@ -167,13 +198,16 @@ class ModelManager:
             and self.brushnet_method != config.brushnet_method
         ):
             old_brushnet_method = self.brushnet_method
-            self.brushnet_method = config.brushnet_method
+            # 先让模型完成切换，成功后再提交状态（失败则保留旧值）
             self.model.switch_brushnet_method(config.brushnet_method)
+            self.brushnet_method = config.brushnet_method
             logger.info(
                 f"Switch Brushnet method from {old_brushnet_method} to {config.brushnet_method}"
             )
 
         elif self.enable_brushnet != config.enable_brushnet:
+            old_enable_brushnet = self.enable_brushnet
+            old_brushnet_method = self.brushnet_method
             self.enable_brushnet = config.enable_brushnet
             self.brushnet_method = config.brushnet_method
 
@@ -189,12 +223,19 @@ class ModelManager:
             if hasattr(self.model.model, "tokenizer_2"):
                 pipe_components["tokenizer_2"] = self.model.model.tokenizer_2
 
-            self.model = self.init_model(
-                self.name,
-                switch_mps_device(self.name, self.device),
-                pipe_components=pipe_components,
-                **self.kwargs,
-            )
+            try:
+                model = self.init_model(
+                    self.name,
+                    switch_mps_device(self.name, self.device),
+                    pipe_components=pipe_components,
+                    **self.kwargs,
+                )
+            except Exception as e:
+                self.enable_brushnet = old_enable_brushnet
+                self.brushnet_method = old_brushnet_method
+                logger.error(f"Switch Brushnet enable/disable failed: {e}")
+                raise
+            self.model = model
 
             if not config.enable_brushnet:
                 logger.info("BrushNet Disabled")
@@ -211,12 +252,15 @@ class ModelManager:
             and self.controlnet_method != config.controlnet_method
         ):
             old_controlnet_method = self.controlnet_method
-            self.controlnet_method = config.controlnet_method
+            # 先让模型完成切换，成功后再提交状态（失败则保留旧值）
             self.model.switch_controlnet_method(config.controlnet_method)
+            self.controlnet_method = config.controlnet_method
             logger.info(
                 f"Switch Controlnet method from {old_controlnet_method} to {config.controlnet_method}"
             )
         elif self.enable_controlnet != config.enable_controlnet:
+            old_enable_controlnet = self.enable_controlnet
+            old_controlnet_method = self.controlnet_method
             self.enable_controlnet = config.enable_controlnet
             self.controlnet_method = config.controlnet_method
 
@@ -228,12 +272,20 @@ class ModelManager:
             if hasattr(self.model.model, "text_encoder_2"):
                 pipe_components["text_encoder_2"] = self.model.model.text_encoder_2
 
-            self.model = self.init_model(
-                self.name,
-                switch_mps_device(self.name, self.device),
-                pipe_components=pipe_components,
-                **self.kwargs,
-            )
+            try:
+                model = self.init_model(
+                    self.name,
+                    switch_mps_device(self.name, self.device),
+                    pipe_components=pipe_components,
+                    **self.kwargs,
+                )
+            except Exception as e:
+                # init_model 失败时旧模型还在，只需把状态改回去（REL-2/D-9）
+                self.enable_controlnet = old_enable_controlnet
+                self.controlnet_method = old_controlnet_method
+                logger.error(f"Switch controlnet enable/disable failed: {e}")
+                raise
+            self.model = model
             if not config.enable_controlnet:
                 logger.info("Disable controlnet")
             else:
@@ -244,15 +296,22 @@ class ModelManager:
             return
 
         if self.enable_powerpaint_v2 != config.enable_powerpaint_v2:
+            old_enable_powerpaint_v2 = self.enable_powerpaint_v2
             self.enable_powerpaint_v2 = config.enable_powerpaint_v2
             pipe_components = {"vae": self.model.model.vae}
 
-            self.model = self.init_model(
-                self.name,
-                switch_mps_device(self.name, self.device),
-                pipe_components=pipe_components,
-                **self.kwargs,
-            )
+            try:
+                model = self.init_model(
+                    self.name,
+                    switch_mps_device(self.name, self.device),
+                    pipe_components=pipe_components,
+                    **self.kwargs,
+                )
+            except Exception as e:
+                self.enable_powerpaint_v2 = old_enable_powerpaint_v2
+                logger.error(f"Switch PowerPaintV2 enable/disable failed: {e}")
+                raise
+            self.model = model
             if config.enable_powerpaint_v2:
                 logger.info("Enable PowerPaintV2")
             else:

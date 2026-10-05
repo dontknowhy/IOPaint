@@ -73,8 +73,12 @@ class InpaintModel:
         result, image, mask = self.forward_post_process(result, image, mask, config)
 
         if config.sd_keep_unmasked_area:
-            mask = mask[:, :, np.newaxis]
-            result = result * (mask / 255) + image[:, :, ::-1] * (1 - (mask / 255))
+            # D-18/BUG-5：原写法 `mask / 255` 由 uint8 升成 float64，12MP 图
+            # 这一步的分配峰值实测 641MB；显式 float32 后降到 366MB。
+            # 二值 0/255 mask 下与 float64 逐像素相同；羽化后的部分 mask 会
+            # 有约 0.5% 的元素在 uint8 截断边界上差 1/255（肉眼不可见）。
+            alpha = mask[:, :, np.newaxis].astype(np.float32) / 255.0
+            result = result * alpha + image[:, :, ::-1] * (1.0 - alpha)
         return result
 
     def forward_pre_process(self, image, mask, config):
@@ -400,18 +404,18 @@ class DiffusionInpaintModel(InpaintModel):
             self._scheduler_cache[cache_key] = scheduler
         self.model.scheduler = scheduler
 
-    def forward_pre_process(self, image, mask, config):
-        if config.sd_mask_blur != 0:
-            k = 2 * config.sd_mask_blur + 1
-            mask = cv2.GaussianBlur(mask, (k, k), 0)
-
-        return image, mask
+    # 合成羽化半径。原 sd_mask_blur 参数已按 D-17 删除，但 sd_keep_unmasked_area
+    # 的合成需要羽化边缘：实测去掉羽化后接缝会从平滑过渡变成硬边
+    # （默认路径 4660px 差异 / 单通道最大 140，outpainting 14407px / 141），
+    # 所以固定沿用原默认值 11，保证默认输出与删除前逐像素一致。
+    COMPOSITE_MASK_BLUR = 11
 
     def forward_post_process(self, result, image, mask, config):
+        # 羽化放在直方图匹配之前：删除前它发生在 forward_pre_process，
+        # _match_histograms 拿到的一向是羽化后的 mask，口径不能变
+        k = 2 * self.COMPOSITE_MASK_BLUR + 1
+        mask = cv2.GaussianBlur(mask, (k, k), 0)
+
         if config.sd_match_histograms:
             result = self._match_histograms(result, image[:, :, ::-1], mask)
-
-        if config.use_extender and config.sd_mask_blur != 0:
-            k = 2 * config.sd_mask_blur + 1
-            mask = cv2.GaussianBlur(mask, (k, k), 0)
         return result, image, mask

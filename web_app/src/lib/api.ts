@@ -25,6 +25,38 @@ const api = axios.create({
   baseURL: API_ENDPOINT,
 })
 
+/**
+ * 把服务端的 `detail` 拍平成一行可读文本（CONS-2/D-13）。
+ * FastAPI 的 422 校验错误形如 `[{loc: ["body","sd_steps"], msg, type}]`，
+ * 直接插值会变成 `[object Object],[object Object]`。
+ */
+function formatDetail(detail: unknown): string {
+  if (typeof detail === "string") {
+    return detail
+  }
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (item && typeof item === "object") {
+          const { loc, msg } = item as { loc?: unknown; msg?: unknown }
+          const path = Array.isArray(loc)
+            ? loc.map((it) => String(it)).join(".")
+            : String(loc ?? "")
+          if (msg) {
+            return path ? `${path}: ${msg}` : String(msg)
+          }
+        }
+        return JSON.stringify(item)
+      })
+      .filter(Boolean)
+      .join("; ")
+  }
+  if (detail && typeof detail === "object") {
+    return JSON.stringify(detail)
+  }
+  return ""
+}
+
 api.interceptors.response.use(
   (res) => res,
   async (error: AxiosError) => {
@@ -32,10 +64,14 @@ api.interceptors.response.use(
     try {
       const data = error.response?.data
       if (data instanceof Blob) {
-        detail = (JSON.parse(await data.text()) as { errors?: string }).errors ?? ""
+        const body = JSON.parse(await data.text()) as {
+          errors?: unknown
+          detail?: unknown
+        }
+        detail = formatDetail(body.errors) || formatDetail(body.detail)
       } else if (data && typeof data === "object") {
-        const body = data as { errors?: string; detail?: string }
-        detail = body.errors ?? body.detail ?? ""
+        const body = data as { errors?: unknown; detail?: unknown }
+        detail = formatDetail(body.errors) || formatDetail(body.detail)
       } else if (typeof data === "string") {
         detail = data
       }
@@ -88,7 +124,6 @@ export default async function inpaint(
       extender_y: extenderState.y,
       extender_height: extenderState.height,
       extender_width: extenderState.width,
-      sd_mask_blur: settings.sdMaskBlur,
       sd_strength: settings.sdStrength,
       sd_steps: settings.sdSteps,
       sd_guidance_scale: settings.sdGuidanceScale,

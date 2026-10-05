@@ -1,3 +1,5 @@
+import re
+
 import setuptools
 from pathlib import Path
 
@@ -32,8 +34,16 @@ def load_requirements():
     with open("requirements.txt") as f:
         for line in f:
             line = line.strip()
-            if line and not line.startswith("#"):
-                requires.append(line)
+            # 行内注释必须去掉：`Pillow>=10.0.0 # for AnyText` 会被
+            # packaging 判成 InvalidRequirement，wheel 装不上（PKG-1）
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            # PKG-1：torch==2.3.1+cu121 的本地版本号只有 CUDA 索引上有，
+            # PyPI 上解析不到 → 打包时剥掉 `+xxx`（运行时行为不受影响，
+            # 本仓库安装仍按 requirements.txt 走 CUDA 索引）
+            line = re.sub(r"(==[^;#\s]+)\+[^;#\s]+", r"\1", line)
+            requires.append(line)
     return requires
 
 
