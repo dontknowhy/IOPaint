@@ -15,7 +15,16 @@ os.environ["TORCH_CUDNN_V8_API_LRU_CACHE_LIMIT"] = "1"
 
 import warnings
 
+from PIL import Image
+
 warnings.simplefilter("ignore", UserWarning)
+
+# 防解压炸弹：显式钉住单张图片的最大像素数（约 1 亿像素）。
+# PIL 默认值是 89,478,485（≈89.5MP），本仓库此前未显式设置；这里把它写成
+# 显式常量，让限制可见。超过 2× 上限时 Pillow 抛 DecompressionBombError，
+# 超过上限时抛 DecompressionBombWarning（RuntimeWarning，不受上面的
+# simplefilter("ignore", UserWarning) 影响）。
+Image.MAX_IMAGE_PIXELS = 100_000_000
 
 
 def fix_window_pytorch():

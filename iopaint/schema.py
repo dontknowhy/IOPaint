@@ -284,10 +284,14 @@ class ApiConfig(BaseModel):
 
 
 class InpaintRequest(BaseModel):
-    image: Optional[str] = Field(None, description="base64 encoded image")
-    mask: Optional[str] = Field(None, description="base64 encoded mask")
+    image: Optional[str] = Field(
+        None, description="base64 encoded image", max_length=64_000_000
+    )
+    mask: Optional[str] = Field(
+        None, description="base64 encoded mask", max_length=64_000_000
+    )
 
-    ldm_steps: int = Field(20, description="Steps for ldm model.")
+    ldm_steps: int = Field(20, ge=1, le=150, description="Steps for ldm model.")
     ldm_sampler: str = Field(LDMSampler.plms, description="Sampler for ldm model.")
     zits_wireframe: bool = Field(True, description="Enable wireframe for zits model.")
 
@@ -297,13 +301,15 @@ class InpaintRequest(BaseModel):
     )
     hd_strategy_crop_trigger_size: int = Field(
         800,
+        ge=1,
+        le=65536,
         description="Crop trigger size for hd_strategy=CROP, if the longer side of the image is larger than this value, use crop strategy",
     )
     hd_strategy_crop_margin: int = Field(
-        128, description="Crop margin for hd_strategy=CROP"
+        128, ge=0, le=65536, description="Crop margin for hd_strategy=CROP"
     )
     hd_strategy_resize_limit: int = Field(
-        1280, description="Resize limit for hd_strategy=RESIZE"
+        1280, ge=1, le=65536, description="Resize limit for hd_strategy=RESIZE"
     )
 
     prompt: str = Field("", description="Prompt for diffusion models.")
@@ -313,18 +319,27 @@ class InpaintRequest(BaseModel):
     use_croper: bool = Field(
         False, description="Crop image before doing diffusion inpainting"
     )
-    croper_x: int = Field(0, description="Crop x for croper")
-    croper_y: int = Field(0, description="Crop y for croper")
-    croper_height: int = Field(512, description="Crop height for croper")
-    croper_width: int = Field(512, description="Crop width for croper")
+    croper_x: int = Field(0, ge=-16384, le=16384, description="Crop x for croper")
+    croper_y: int = Field(0, ge=-16384, le=16384, description="Crop y for croper")
+    croper_height: int = Field(
+        512, ge=1, le=16384, description="Crop height for croper"
+    )
+    croper_width: int = Field(
+        512, ge=1, le=16384, description="Crop width for croper"
+    )
 
     use_extender: bool = Field(
         False, description="Extend image before doing sd outpainting"
     )
-    extender_x: int = Field(0, description="Extend x for extender")
-    extender_y: int = Field(0, description="Extend y for extender")
-    extender_height: int = Field(640, description="Extend height for extender")
-    extender_width: int = Field(640, description="Extend width for extender")
+    # extender 坐标可能为负数，见 base.py:_do_outpainting 中 cropper_x/y 注释
+    extender_x: int = Field(0, ge=-16384, le=16384, description="Extend x for extender")
+    extender_y: int = Field(0, ge=-16384, le=16384, description="Extend y for extender")
+    extender_height: int = Field(
+        640, ge=1, le=16384, description="Extend height for extender"
+    )
+    extender_width: int = Field(
+        640, ge=1, le=16384, description="Extend width for extender"
+    )
 
     sd_scale: float = Field(
         1.0,
@@ -343,6 +358,8 @@ class InpaintRequest(BaseModel):
     )
     sd_steps: int = Field(
         50,
+        ge=1,
+        le=150,
         description="The number of denoising steps. More denoising steps usually lead to a higher quality image at the expense of slower inference.",
     )
     sd_guidance_scale: float = Field(
@@ -509,4 +526,6 @@ class AdjustMaskRequest(BaseModel):
         ..., description="base64 encoded mask. 255 means area to do inpaint"
     )
     operate: AdjustMaskOperate = Field(..., description="expand/shrink/reverse")
-    kernel_size: int = Field(5, description="Kernel size for expanding mask")
+    kernel_size: int = Field(
+        5, ge=1, le=1000, description="Kernel size for expanding mask"
+    )

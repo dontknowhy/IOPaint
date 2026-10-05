@@ -30,6 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from socketio import AsyncServer
 
+from iopaint.exceptions import ModelLoadError
 from iopaint.file_manager import FileManager
 from iopaint.helper import (
     load_img,
@@ -64,6 +65,10 @@ from iopaint.schema import (
 
 CURRENT_DIR = Path(__file__).parent.absolute().resolve()
 WEB_APP_DIR = CURRENT_DIR / "web_app"
+
+# 单个请求体上限（256MB）。12MP PNG 的 base64 约 15MB，留足余量；
+# 超过则 413，避免超大 body 打爆内存（DOS-1）。
+MAX_REQUEST_BODY_BYTES = 256 * 1024 * 1024
 
 WEB_APP_NOT_BUILT_MSG = (
     "IOPaint web UI 还没构建（iopaint/web_app 是 gitignore 的构建产物）。\n"
@@ -118,6 +123,10 @@ def api_middleware(app: FastAPI):
             "body": vars(e).get("body", ""),
             "errors": str(e),
         }
+        if isinstance(e, ModelLoadError):
+            # REL-1: 模型下载/加载失败原先 raise SystemExit 直接杀进程。
+            # 现在转成 500，并把可读原因放到 detail 给前端展示。
+            err["detail"] = f"模型加载失败：{e}"
         if not isinstance(
             e, HTTPException
         ):  # do not print backtrace on known httpexceptions
@@ -150,6 +159,24 @@ def api_middleware(app: FastAPI):
         except Exception as e:
             return handle_exception(request, e)
 
+    @app.middleware("http")
+    async def body_size_limit(request: Request, call_next):
+        # DOS-1: 请求体上限。image/mask 是 base64 字符串，schema 侧已按字段限长，
+        # 这里再按 Content-Length 兜一层（防其它大 body 端点）。
+        content_length = request.headers.get("content-length")
+        if content_length and content_length.isdigit():
+            if int(content_length) > MAX_REQUEST_BODY_BYTES:
+                return JSONResponse(
+                    status_code=413,
+                    content={
+                        "error": "RequestEntityTooLarge",
+                        "detail": f"Request body too large (limit {MAX_REQUEST_BODY_BYTES} bytes)",
+                        "body": "",
+                        "errors": "",
+                    },
+                )
+        return await call_next(request)
+
     @app.exception_handler(Exception)
     async def fastapi_exception_handler(request: Request, e: Exception):
         return handle_exception(request, e)
@@ -162,7 +189,9 @@ def api_middleware(app: FastAPI):
         "allow_methods": ["*"],
         "allow_headers": ["*"],
         "allow_origins": ["*"],
-        "allow_credentials": True,
+        # 全站无 cookie/鉴权，credentials 没有用途；且 "origins=* + credentials=true"
+        # 是规范禁止的组合（浏览器会直接拒绝响应）。见 SEC-3。
+        "allow_credentials": False,
         "expose_headers": ["X-Seed"],
     }
     app.add_middleware(CORSMiddleware, **cors_options)
@@ -341,6 +370,49 @@ class Api:
         return GenInfoResponse(prompt=prompt, negative_prompt=negative_prompt)
 
     async def api_inpaint(self, req: InpaintRequest):
+        if not req.image or not req.mask:
+            raise HTTPException(status_code=400, detail="image and mask are required")
+
+        # PERF-1: base64 解码、后处理、PNG/JPEG 编码都是 CPU 密集操作。
+        # 原实现里它们跑在事件循环上，一张 12MP 图的 PNG 编码就要 ~7s，
+        # 期间整个服务（含 /api/v1/samplers 等轻请求）都会被卡住。
+        # 连同模型推理一起整体放进线程池。
+        loop = asyncio.get_running_loop()
+        res_img_bytes, ext = await loop.run_in_executor(
+            None, self._inpaint_blocking, req
+        )
+
+        await self.sio.emit("diffusion_finish")
+
+        return Response(
+            content=res_img_bytes,
+            media_type=f"image/{ext}",
+            headers={"X-Seed": str(req.sd_seed)},
+        )
+
+    @staticmethod
+    def _validate_rect(
+        shape, enabled: bool, x: int, y: int, w: int, h: int, name: str
+    ):
+        """裁剪/扩展框必须与图像相交（DOS-1 的 handler 侧兜底）。"""
+        if not enabled:
+            return
+        img_h, img_w = shape[:2]
+        left = max(x, 0)
+        top = max(y, 0)
+        right = min(x + w, img_w)
+        bottom = min(y + h, img_h)
+        if right <= left or bottom <= top:
+            raise HTTPException(
+                400,
+                detail=(
+                    f"{name} rect ({x}, {y}, {w}x{h}) does not intersect "
+                    f"image size ({img_w}x{img_h})"
+                ),
+            )
+
+    def _inpaint_blocking(self, req: InpaintRequest) -> tuple:
+        """同步版 inpaint：decode → inference → encode。跑在线程池里。"""
         image, alpha_channel, infos, ext = decode_base64_to_image(req.image)
         mask, _, _, _ = decode_base64_to_image(req.mask, gray=True)
         logger.debug(f"image ext: {ext}")
@@ -352,11 +424,30 @@ class Api:
                 detail=f"Image size({image.shape[:2]}) and mask size({mask.shape[:2]}) not match.",
             )
 
-        start = time.time()
-        loop = asyncio.get_running_loop()
-        rgb_np_img = await loop.run_in_executor(
-            None, self.model_manager, image, mask, req
+        # DOS-1: schema 只给了坐标 ±16384 的量级边界，这里再对照真实图像尺寸
+        # 校验矩形确实与图像相交——完全不相交的裁剪/扩展框会让下面
+        # 得到空切片（shape=0），进而 forward 报难以理解的错误。
+        self._validate_rect(
+            image.shape,
+            enabled=req.use_croper,
+            x=req.croper_x,
+            y=req.croper_y,
+            w=req.croper_width,
+            h=req.croper_height,
+            name="cropper",
         )
+        self._validate_rect(
+            image.shape,
+            enabled=req.use_extender,
+            x=req.extender_x,
+            y=req.extender_y,
+            w=req.extender_width,
+            h=req.extender_height,
+            name="extender",
+        )
+
+        start = time.time()
+        rgb_np_img = self.model_manager(image, mask, req)
         logger.info(f"process time: {(time.time() - start) * 1000:.2f}ms")
         if self.config.empty_cache_after_inpaint:
             torch_gc()
@@ -370,14 +461,7 @@ class Api:
             quality=self.config.quality,
             infos=infos,
         )
-
-        await self.sio.emit("diffusion_finish")
-
-        return Response(
-            content=res_img_bytes,
-            media_type=f"image/{ext}",
-            headers={"X-Seed": str(req.sd_seed)},
-        )
+        return res_img_bytes, ext
 
     async def api_run_plugin_gen_image(self, req: RunPluginRequest):
         ext = "png"
@@ -387,11 +471,16 @@ class Api:
             raise HTTPException(
                 status_code=422, detail="Plugin does not support output image"
             )
-        rgb_np_img, alpha_channel, infos, _ = decode_base64_to_image(req.image)
+        # PERF-1: decode + encode 与插件推理一起放进线程池
         loop = asyncio.get_running_loop()
-        bgr_or_rgba_np_img = await loop.run_in_executor(
-            None, self.plugins[req.name].gen_image, rgb_np_img, req
+        content = await loop.run_in_executor(
+            None, self._plugin_gen_image_blocking, req
         )
+        return Response(content=content, media_type=f"image/{ext}")
+
+    def _plugin_gen_image_blocking(self, req: RunPluginRequest) -> bytes:
+        rgb_np_img, alpha_channel, infos, _ = decode_base64_to_image(req.image)
+        bgr_or_rgba_np_img = self.plugins[req.name].gen_image(rgb_np_img, req)
         if self.config.empty_cache_after_inpaint:
             torch_gc()
 
@@ -401,14 +490,11 @@ class Api:
             rgba_np_img = cv2.cvtColor(bgr_or_rgba_np_img, cv2.COLOR_BGR2RGB)
             rgba_np_img = concat_alpha_channel(rgba_np_img, alpha_channel)
 
-        return Response(
-            content=pil_to_bytes(
-                Image.fromarray(rgba_np_img),
-                ext=ext,
-                quality=self.config.quality,
-                infos=infos,
-            ),
-            media_type=f"image/{ext}",
+        return pil_to_bytes(
+            Image.fromarray(rgba_np_img),
+            ext="png",
+            quality=self.config.quality,
+            infos=infos,
         )
 
     async def api_run_plugin_gen_mask(self, req: RunPluginRequest):
@@ -418,18 +504,19 @@ class Api:
             raise HTTPException(
                 status_code=422, detail="Plugin does not support output image"
             )
-        rgb_np_img, _, _, _ = decode_base64_to_image(req.image)
         loop = asyncio.get_running_loop()
-        bgr_or_gray_mask = await loop.run_in_executor(
-            None, self.plugins[req.name].gen_mask, rgb_np_img, req
+        content = await loop.run_in_executor(
+            None, self._plugin_gen_mask_blocking, req
         )
+        return Response(content=content, media_type="image/png")
+
+    def _plugin_gen_mask_blocking(self, req: RunPluginRequest) -> bytes:
+        rgb_np_img, _, _, _ = decode_base64_to_image(req.image)
+        bgr_or_gray_mask = self.plugins[req.name].gen_mask(rgb_np_img, req)
         if self.config.empty_cache_after_inpaint:
             torch_gc()
         res_mask = gen_frontend_mask(bgr_or_gray_mask)
-        return Response(
-            content=numpy_to_bytes(res_mask, "png"),
-            media_type="image/png",
-        )
+        return numpy_to_bytes(res_mask, "png")
 
     def api_samplers(self) -> List[str]:
         return [member.value for member in SDSampler.__members__.values()]

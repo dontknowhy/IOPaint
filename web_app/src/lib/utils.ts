@@ -105,6 +105,63 @@ export function srcToFile(src: string, fileName: string, mimeType: string) {
     })
 }
 
+// ---------------------------------------------------------------------------
+// 保存文件名的扩展名（CONS-3）
+//
+// 输入文件的 `file.type` / `file.name` 来自浏览器按**扩展名**的猜测，而服务端
+// 返回的字节格式跟随输入的真实字节（`helper.decode_base64_to_image` 以
+// `Image.format` 为准）。两者不一致时（例如改过名的 .png 实为 JPEG），
+// 落盘文件就会"名不副实"。所以扩展名一律以响应的 Content-Type 为准。
+// ---------------------------------------------------------------------------
+
+const EXT_BY_MIME: Record<string, string> = {
+  "image/jpeg": ".jpg",
+  "image/jpg": ".jpg",
+  "image/png": ".png",
+  "image/webp": ".webp",
+  "image/gif": ".gif",
+  "image/bmp": ".bmp",
+}
+
+/** 由 MIME 推扩展名（含点）；未知类型返回 undefined。 */
+export function extFromMime(mime?: string | null): string | undefined {
+  if (!mime) {
+    return undefined
+  }
+  return EXT_BY_MIME[mime.split(";")[0].trim().toLowerCase()]
+}
+
+/**
+ * 由 blob: URL 取出实际字节的 MIME（渲染结果的 blob 类型 = 响应 Content-Type）。
+ * 拿不到时返回 undefined，调用方回退到原来的扩展名。
+ */
+export async function mimeFromSrc(src: string): Promise<string | undefined> {
+  if (!src.startsWith("blob:")) {
+    return undefined
+  }
+  try {
+    const blob = await (await fetch(src)).blob()
+    return blob.type || undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 生成保存用文件名：`<stem><suffix><ext>`。
+ * `mime` 未给或未知扩展名时保留原扩展名。
+ */
+export function buildDownloadName(
+  filename: string,
+  suffix: string,
+  mime?: string | null
+): string {
+  const stem = filename.replace(/\.[\w\d_-]+$/i, "")
+  const origExt = filename.match(/\.[\w\d_-]+$/i)?.[0] ?? ""
+  const ext = extFromMime(mime) ?? origExt
+  return `${stem}${suffix}${ext}`
+}
+
 export async function askWritePermission() {
   try {
     // The clipboard-write permission is granted automatically to pages

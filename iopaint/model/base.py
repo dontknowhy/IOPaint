@@ -101,7 +101,8 @@ class InpaintModel:
                     crop_image, crop_box = self._run_box(image, mask, box, config)
                     crop_result.append((crop_image, crop_box))
 
-                inpaint_result = image[:, :, ::-1]
+                # image[:, :, ::-1] 是负步长视图，直接赋值会写穿调用方的 image
+                inpaint_result = image[:, :, ::-1].copy()
                 for crop_image, crop_box in crop_result:
                     x1, y1, x2, y2 = crop_box
                     inpaint_result[y1:y2, x1:x2, :] = crop_image
@@ -194,7 +195,12 @@ class InpaintModel:
 
     def _calculate_cdf(self, histogram):
         cdf = histogram.cumsum()
-        normalized_cdf = cdf / float(cdf[-1])
+        total = cdf[-1]
+        if total == 0:
+            # 选区为空（mask==0 区域没有像素）时 cdf[-1]==0，除零会得到 NaN，
+            # 进而 LUT 出全黑图。返回全 0 CDF，等价于“无变换”。
+            return np.zeros_like(cdf, dtype=np.float64)
+        normalized_cdf = cdf / float(total)
         return normalized_cdf
 
     def _calculate_lookup(self, source_cdf, reference_cdf):
@@ -206,6 +212,11 @@ class InpaintModel:
         transformed_channels = []
         if len(mask.shape) == 3:
             mask = mask[:, :, -1]
+
+        # mask==0（非遮罩区）为空时没有可统计的像素：直方图匹配无从谈起，
+        # 直接返回原图，否则会得到全黑结果。
+        if not np.any(mask == 0):
+            return source
 
         for channel in range(source.shape[-1]):
             source_channel = source[:, :, channel]
@@ -283,7 +294,8 @@ class DiffusionInpaintModel(InpaintModel):
         if config.use_croper:
             crop_img, crop_mask, (l, t, r, b) = self._apply_cropper(image, mask, config)
             crop_image = self._scaled_pad_forward(crop_img, crop_mask, config)
-            inpaint_result = image[:, :, ::-1]
+            # 同 __call__：负步长视图，赋值会写穿 image
+            inpaint_result = image[:, :, ::-1].copy()
             inpaint_result[t:b, l:r, :] = crop_image
         elif config.use_extender:
             inpaint_result = self._do_outpainting(image, config)

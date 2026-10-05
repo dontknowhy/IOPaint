@@ -14,6 +14,8 @@ from loguru import logger
 from torch.hub import download_url_to_file, get_dir
 import hashlib
 
+from iopaint.exceptions import ModelLoadError
+
 
 def md5sum(filename):
     md5 = hashlib.md5()
@@ -65,7 +67,9 @@ def download_model(url, model_md5: str = None):
                     logger.error(
                         f"Model md5: {_md5}, expected md5: {model_md5}, please delete {cached_file} and restart iopaint."
                     )
-                raise SystemExit(1)
+                raise ModelLoadError(
+                    f"Model md5 mismatch for {cached_file}, please delete it and restart iopaint."
+                )
 
     return cached_file
 
@@ -94,7 +98,7 @@ def handle_error(model_path, model_md5, e):
             f"Failed to load model {model_path},"
             f"please submit an issue at https://github.com/Sanster/IOPaint/issues and include a screenshot of the error:\n{e}"
         )
-    raise SystemExit(1)
+    raise ModelLoadError(f"Failed to load model {model_path}: {e}")
 
 
 def load_jit_model(url_or_path, device, model_md5: str):
@@ -129,12 +133,25 @@ def load_model(model: torch.nn.Module, url_or_path, device, model_md5):
     return model
 
 
-def numpy_to_bytes(image_numpy: np.ndarray, ext: str) -> bytes:
-    data = cv2.imencode(
-        f".{ext}",
-        image_numpy,
-        [int(cv2.IMWRITE_JPEG_QUALITY), 100, int(cv2.IMWRITE_PNG_COMPRESSION), 0],
-    )[1]
+def numpy_to_bytes(
+    image_numpy: np.ndarray, ext: str, quality: int = 95, png_compression: int = 6
+) -> bytes:
+    """Encode a numpy image with format-appropriate encoder params.
+
+    原实现把 JPEG 和 PNG 的参数混在同一个列表里传给 cv2.imencode：
+    `[JPEG_QUALITY, 100, PNG_COMPRESSION, 0]`。对 PNG 而言 compression=0 让
+    12MP RGBA mask 编出 48.08MB（实测），而 mask 这种 0/255 平坦图在
+    compression=6 下只有 0.05MB，耗时 418ms → 572ms（+154ms 换 960 倍体积）。
+    对 JPEG 而言 quality 硬编码 100，与 `--quality` 默认 95 不一致。
+    """
+    ext = ext.lower().lstrip(".")
+    if ext in ("jpg", "jpeg"):
+        params = [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)]
+    elif ext == "png":
+        params = [int(cv2.IMWRITE_PNG_COMPRESSION), int(png_compression)]
+    else:
+        params = []
+    data = cv2.imencode(f".{ext}", image_numpy, params)[1]
     image_bytes = data.tobytes()
     return image_bytes
 
@@ -144,7 +161,17 @@ def numpy_to_bytes(image_numpy: np.ndarray, ext: str) -> bytes:
 _PIL_SAVE_WHITELIST = ("exif", "icc_profile", "dpi", "comment")
 
 
-def pil_to_bytes(pil_img, ext: str, quality: int = 95, infos=None) -> bytes:
+def pil_to_bytes(
+    pil_img, ext: str, quality: int = 95, infos=None, png_compress_level: int = 1
+) -> bytes:
+    """Encode a PIL image to bytes.
+
+    `png_compress_level` 默认 1：PIL PNG 编码是纯 CPU 的 zlib 压缩，4000x3000
+    （12MP）实测 level0=506ms/36MB、level1=979ms/13.0MB、level6=6732ms/11.0MB、
+    level9=35317ms——降级只损失 ~18% 体积，却省下数秒延迟。PNG 本身无损，
+    降低压缩级别不影响像素，只影响响应延迟与字节数（实测 level1/6 均逐像素相等）。
+    响应路径（api.py / batch）都走默认值；需要更小体积时显式传 6/9。
+    """
     if infos is None:
         infos = {}
     with io.BytesIO() as output:
@@ -152,6 +179,8 @@ def pil_to_bytes(pil_img, ext: str, quality: int = 95, infos=None) -> bytes:
             ext = "jpeg"
 
         save_kwargs = {}
+        if ext.lower() == "png":
+            save_kwargs["compress_level"] = png_compress_level
         parameters = infos.get("parameters")
         if parameters is not None and ext.lower() == "png":
             pnginfo_data = PngImagePlugin.PngInfo()

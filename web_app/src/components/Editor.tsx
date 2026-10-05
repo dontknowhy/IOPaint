@@ -18,6 +18,7 @@ import { downloadToOutput, runPlugin } from "@/lib/api"
 import { IconButton } from "@/components/ui/button"
 import {
   askWritePermission,
+  buildDownloadName,
   cn,
   copyCanvasImage,
   downloadImage,
@@ -26,6 +27,7 @@ import {
   getErrorMessage,
   isMidClick,
   isRightClick,
+  mimeFromSrc,
   mouseXY,
   strokeBounds,
   touchPointXY,
@@ -1016,10 +1018,14 @@ export default function Editor(props: EditorProps) {
     }
     if (enableAutoSaving && renders.length > 0) {
       try {
+        const lastRender = renders[renders.length - 1]
+        // 保存名的扩展名以渲染结果（服务端响应）的真实类型为准；
+        // file.type/file.name 只是浏览器按扩展名的猜测，可能与字节不符（CONS-3）
+        const renderMime = (await mimeFromSrc(lastRender.currentSrc)) ?? file.type
         await downloadToOutput(
-          renders[renders.length - 1],
-          file.name,
-          file.type
+          lastRender,
+          buildDownloadName(file.name, "", renderMime),
+          renderMime
         )
         toast({
           description: "Save image success",
@@ -1035,12 +1041,15 @@ export default function Editor(props: EditorProps) {
     }
 
     // TODO: download to output directory
-    const name = file.name.replace(/(\.[\w\d_-]+)$/i, "_cleanup$1")
     const curRender = renders[renders.length - 1]
+    const renderMime = curRender
+      ? await mimeFromSrc(curRender.currentSrc)
+      : undefined
+    const name = buildDownloadName(file.name, "_cleanup", renderMime)
     downloadImage(curRender.currentSrc, name)
     if (settings.enableDownloadMask) {
-      let maskFileName = file.name.replace(/(\.[\w\d_-]+)$/i, "_mask$1")
-      maskFileName = maskFileName.replace(/\.[^/.]+$/, ".jpg")
+      // mask 是 0/255 二值图，JPEG 的有损压缩会污染边缘 → 恒定 PNG（CONS-3）
+      const maskFileName = buildDownloadName(file.name, "_mask", "image/png")
 
       const maskCanvas = generateMask(imageWidth, imageHeight, lineGroups)
       // Create a link
@@ -1048,7 +1057,7 @@ export default function Editor(props: EditorProps) {
       // Add the name of the file to the link
       aDownloadLink.download = maskFileName
       // Attach the data to the link
-      aDownloadLink.href = maskCanvas.toDataURL("image/jpeg")
+      aDownloadLink.href = maskCanvas.toDataURL("image/png")
       aDownloadLink.style.display = "none"
       // 需先挂载再 click，否则部分浏览器不会触发下载
       document.body.appendChild(aDownloadLink)

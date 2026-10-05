@@ -1,6 +1,7 @@
 from loguru import logger
 import numpy as np
 
+from iopaint.exceptions import ModelLoadError
 from iopaint.schema import RunPluginRequest
 
 
@@ -13,7 +14,7 @@ class BasePlugin:
         err_msg = self.check_dep()
         if err_msg:
             logger.error(err_msg)
-            exit(-1)
+            raise ModelLoadError(err_msg)
 
     def gen_image(self, rgb_np_img, req: RunPluginRequest) -> np.ndarray:
         # return RGBA np image or BGR np image

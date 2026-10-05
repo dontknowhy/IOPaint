@@ -9,7 +9,7 @@ import {
   ServerConfig,
 } from "@/lib/types"
 import { Settings } from "@/lib/states"
-import { convertToBase64, srcToFile } from "@/lib/utils"
+import { buildDownloadName, convertToBase64, srcToFile } from "@/lib/utils"
 import {
   HD_STRATEGY,
   HD_STRATEGY_CROP_MARGIN,
@@ -192,7 +192,10 @@ export async function downloadToOutput(
   filename: string,
   mimeType: string
 ) {
-  const file = await srcToFile(image.src, filename, mimeType)
+  // 服务端原样写盘（api_save_image 直接按 filename 落地），扩展名必须与
+  // 实际字节一致，否则落盘文件名不副实（CONS-3）
+  const safeName = buildDownloadName(filename, "", mimeType)
+  const file = await srcToFile(image.src, safeName, mimeType)
   const fd = new FormData()
   fd.append("file", file)
   try {

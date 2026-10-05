@@ -1,10 +1,11 @@
 import os
 from io import BytesIO
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from PIL import Image, ImageOps, PngImagePlugin
 from fastapi import FastAPI, HTTPException
+from loguru import logger
 from starlette.responses import FileResponse
 
 from ..schema import MediasResponse, MediaTab
@@ -12,7 +13,7 @@ from ..schema import MediasResponse, MediaTab
 LARGE_ENOUGH_NUMBER = 10
 PngImagePlugin.MAX_TEXT_CHUNK = LARGE_ENOUGH_NUMBER * (1024**2)
 from .storage_backends import FilesystemStorageBackend
-from .utils import aspect_to_string, generate_filename, glob_img
+from .utils import aspect_to_string, generate_filename, glob_img, sniff_media_type
 
 
 class FileManager:
@@ -41,27 +42,26 @@ class FileManager:
 
     def api_media_file(self, tab: MediaTab, filename: str) -> FileResponse:
         file_path = self._get_file(tab, filename)
-        return FileResponse(file_path, media_type="image/png")
+        return FileResponse(file_path, media_type=sniff_media_type(file_path))
 
     # tab=${tab}?filename=${filename.name}?width=${width}&height=${height}
     def api_media_thumbnail_file(
         self, tab: MediaTab, filename: str, width: int, height: int
     ) -> FileResponse:
         img_dir = self._get_dir(tab)
-        thumb_filename, (width, height) = self.get_thumbnail(
+        thumb_filepath, (width, height) = self.get_thumbnail(
             img_dir, filename, width=width, height=height
         )
-        thumbnail_filepath = self.thumbnail_directory / thumb_filename
         return FileResponse(
-            thumbnail_filepath,
+            thumb_filepath,
             headers={
                 "X-Width": str(width),
                 "X-Height": str(height),
             },
-            media_type="image/jpeg",
+            media_type=sniff_media_type(thumb_filepath),
         )
 
-    def _get_dir(self, tab: MediaTab) -> Path:
+    def _get_dir(self, tab: MediaTab) -> Optional[Path]:
         if tab == "input":
             return self.input_dir
         elif tab == "output":
@@ -72,9 +72,33 @@ class FileManager:
             raise HTTPException(status_code=422, detail=f"tab not found: {tab}")
 
     def _get_file(self, tab: MediaTab, filename: str) -> Path:
-        file_path = self._get_dir(tab) / filename
+        directory = self._get_dir(tab)
+        file_path = self._safe_join(directory, filename, tab)
         if not file_path.exists():
-            raise HTTPException(status_code=422, detail=f"file not found: {file_path}")
+            raise HTTPException(status_code=422, detail=f"file not found: {filename}")
+        return file_path
+
+    @staticmethod
+    def _safe_join(directory: Optional[Path], filename: str, tab: str) -> Path:
+        """Resolve `filename` under `directory`, rejecting path traversal.
+
+        `filename` 是用户可控的查询参数，直接 `dir / filename` 会允许
+        `filename=../../../etc/passwd` 逃出托管目录（SEC-1/SEC-2）。这里先
+        resolve 两侧再做相对性判断；resolve 同时展开符号链接，避免软链逃逸。
+        `directory is None`（如未配置 --mask-dir）原来会抛 TypeError 变 500，改 422。
+        """
+        if directory is None:
+            raise HTTPException(
+                status_code=422, detail=f"{tab} directory is not configured"
+            )
+        base = directory.resolve()
+        try:
+            file_path = (base / filename).resolve()
+            file_path.relative_to(base)
+        except (ValueError, OSError):  # 不在 base 之下 / 非法路径
+            raise HTTPException(
+                status_code=422, detail=f"invalid filename: {filename}"
+            )
         return file_path
 
     @property
@@ -119,6 +143,8 @@ class FileManager:
     def get_thumbnail(
         self, directory: Path, original_filename: str, width, height, **options
     ):
+        if directory is None:
+            raise HTTPException(status_code=422, detail="directory is not configured")
         directory = Path(directory)
         storage = FilesystemStorageBackend(self.app)
         crop = options.get("crop", "fit")
@@ -126,9 +152,29 @@ class FileManager:
         quality = options.get("quality", 90)
 
         original_path, original_filename = os.path.split(original_filename)
-        original_filepath = os.path.join(directory, original_path, original_filename)
+        # SEC-2: original_filename 拼进读取路径，必须先做路径遍历校验
+        original_filepath = self._safe_join(
+            directory, os.path.join(original_path, original_filename), "tab"
+        )
+        if not original_filepath.exists():
+            raise HTTPException(
+                status_code=422, detail=f"file not found: {original_filename}"
+            )
         image = Image.open(BytesIO(storage.read(original_filepath)))
         try:
+            # get original image format（必须在 load()/convert 之前读，见 helper 同类注释）
+            options["format"] = options.get("format", image.format) or "JPEG"
+            # 缩略图文件名后缀必须与实际写出的字节一致（CONS-3）
+            format_ext = {
+                "JPEG": "jpg",
+                "JPG": "jpg",
+                "PNG": "png",
+                "GIF": "gif",
+                "WEBP": "webp",
+                "BMP": "bmp",
+                "TIFF": "tiff",
+            }.get(str(options["format"]).upper(), "jpg")
+
             # keep ratio resize
             if not width and not height:
                 width = 256
@@ -147,6 +193,7 @@ class FileManager:
                 crop,
                 background,
                 quality,
+                ext=format_ext,
             )
 
             thumbnail_filepath = os.path.join(
@@ -159,11 +206,8 @@ class FileManager:
             try:
                 image.load()
             except (IOError, OSError):
-                self.app.logger.warning("Thumbnail not load image: %s", original_filepath)
+                logger.warning(f"Thumbnail cannot load image: {original_filepath}")
                 return thumbnail_filepath, (width, height)
-
-            # get original image format
-            options["format"] = options.get("format", image.format)
 
             image = self._create_thumbnail(
                 image, thumbnail_size, crop, background=background

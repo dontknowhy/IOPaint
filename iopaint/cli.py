@@ -36,8 +36,13 @@ def download(
     ),
 ):
     from iopaint.download import cli_download_model
+    from iopaint.exceptions import ModelLoadError
 
-    cli_download_model(model)
+    try:
+        cli_download_model(model)
+    except ModelLoadError as e:
+        logger.error(f"Failed to download model {model}: {e}")
+        raise SystemExit(1)
 
 
 @typer_app.command(name="list", help="List downloaded models")
@@ -83,11 +88,16 @@ def run(
     ),
 ):
     from iopaint.download import cli_download_model, scan_models
+    from iopaint.exceptions import ModelLoadError
 
     scanned_models = scan_models()
     if model not in [it.name for it in scanned_models]:
         logger.info(f"{model} not found in {model_dir}, try to downloading")
-        cli_download_model(model)
+        try:
+            cli_download_model(model)
+        except ModelLoadError as e:
+            logger.error(f"Failed to download model {model}: {e}")
+            raise SystemExit(1)
 
     from iopaint.batch_processing import batch_inpaint
 
@@ -126,7 +136,8 @@ def start(
     output_dir: Optional[Path] = Option(
         None, help=OUTPUT_DIR_HELP, dir_okay=True, file_okay=False
     ),
-    quality: int = Option(100, help=QUALITY_HELP),
+    # 默认 95 与 const.QUALITY_HELP、helper.pil_to_bytes 的默认值保持一致
+    quality: int = Option(95, help=QUALITY_HELP),
     empty_cache_after_inpaint: bool = Option(
         False,
         help="Call torch.cuda.empty_cache() after each inpainting. "
@@ -183,11 +194,17 @@ def start(
         os.environ["HF_HUB_OFFLINE"] = "1"
 
     from iopaint.download import cli_download_model, scan_models
+    from iopaint.exceptions import ModelLoadError
 
     scanned_models = scan_models()
     if model not in [it.name for it in scanned_models]:
         logger.info(f"{model} not found in {model_dir}, try to downloading")
-        cli_download_model(model)
+        try:
+            cli_download_model(model)
+        except ModelLoadError as e:
+            # 启动期下载失败：打印错误并退出，语义与原 SystemExit(1) 一致
+            logger.error(f"Failed to download model {model}: {e}")
+            raise SystemExit(1)
 
     from iopaint.api import Api
     from iopaint.schema import ApiConfig
@@ -233,7 +250,12 @@ def start(
         restoreformer_device=restoreformer_device,
     )
     print(api_config.model_dump_json(indent=4))
-    api = Api(app, api_config)
+    try:
+        api = Api(app, api_config)
+    except ModelLoadError as e:
+        # 插件依赖缺失 / 模型加载失败：启动期语义保持“打印错误并退出”
+        logger.error(f"Failed to start IOPaint: {e}")
+        raise SystemExit(1)
     api.launch()
 
 
