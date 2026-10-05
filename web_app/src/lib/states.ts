@@ -353,6 +353,11 @@ const defaultValues: AppState = {
   },
 }
 
+// FE-3/D-19：showPrevMask 里有 await（canvasToImage），鼠标快速进/出时旧请求
+// 可能晚于 hidePrevMask 落地，把刚藏掉的预览又"变出来"。用递增序号让过期响应
+// 自己作废，hide 与新的一次 show 都会把序号推走。
+let prevMaskSeq = 0
+
 export const useStore = createWithEqualityFn<AppState & AppAction>()(
   persist(
     immer((set, get) => ({
@@ -368,6 +373,8 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           return
         }
         const { imageWidth, imageHeight } = get()
+        const file = get().file
+        const seq = ++prevMaskSeq
 
         const maskCanvas = generateMask(
           imageWidth,
@@ -378,6 +385,12 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         )
         try {
           const maskImage = await canvasToImage(maskCanvas)
+          // 过期响应丢弃：期间发生过 hidePrevMask / 新一次 showPrevMask / 切图
+          // （切图会把 editorState 连同 temporaryMasks 一起重置，再 push 就是
+          // 用旧图尺寸算出来的预览）
+          if (seq !== prevMaskSeq || get().file !== file) {
+            return
+          }
           set((state) => {
             state.editorState.temporaryMasks.push(castDraft(maskImage))
           })
@@ -387,6 +400,8 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         }
       },
       hidePrevMask: () => {
+        // 作废在途的 showPrevMask（FE-3/D-19）
+        prevMaskSeq++
         set((state) => {
           state.editorState.temporaryMasks = []
         })

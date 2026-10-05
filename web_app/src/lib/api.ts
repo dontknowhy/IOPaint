@@ -217,8 +217,12 @@ export async function getMediaBlob(tab: string, filename: string) {
   return getMedia(tab, filename)
 }
 
-export async function getMedias(tab: string): Promise<Filename[]> {
-  const res = await api.get(`medias`, { params: { tab } })
+// FE-3/D-19：signal 供调用方取消（tab 快速切换时丢弃过期响应）
+export async function getMedias(
+  tab: string,
+  signal?: AbortSignal
+): Promise<Filename[]> {
+  const res = await api.get(`medias`, { params: { tab }, signal })
   return res.data
 }
 

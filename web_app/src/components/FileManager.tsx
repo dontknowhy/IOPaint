@@ -81,9 +81,16 @@ export default function FileManager(props: Props) {
   const ref = useRef(null)
   const debouncedSearchText = useDebounce(fileManagerState.searchText, 300)
   const [tab, setTab] = useState(IMAGE_TAB)
-  const [filenames, setFilenames] = useState<Filename[]>([])
+  // 文件名和它所属的 tab 绑在一起存：tab 切换后 Effect 里拿到的 filenames
+  // 还是上一个 tab 的，直接用会渲染出 404 缩略图、还能点到新目录里不存在的文件
+  const [fileList, setFileList] = useState<{ tab: string; items: Filename[] }>({
+    tab: IMAGE_TAB,
+    items: [],
+  })
   const [photos, setPhotos] = useState<Photo[]>([])
   const [photoIndex, setPhotoIndex] = useState(0)
+  // FE-3/D-19：列表拉取的请求序号，只认最新一次
+  const listReqSeqRef = useRef(0)
 
   useHotKey("f", () => {
     toggleOpen()
@@ -142,11 +149,22 @@ export default function FileManager(props: Props) {
   )
 
   useEffect(() => {
+    // FE-3/D-19：快速切换 tab 时旧请求可能晚到，会把上一个 tab 的列表盖上去。
+    // 双保险：AbortController 直接取消在途请求，请求序号兜底丢弃过期响应。
+    const controller = new AbortController()
+    const seq = ++listReqSeqRef.current
     const fetchData = async () => {
       try {
-        const filenames = await getMedias(tab)
-        setFilenames(filenames)
+        const items = await getMedias(tab, controller.signal)
+        if (seq !== listReqSeqRef.current) {
+          return // 过期响应，丢弃
+        }
+        setFileList({ tab, items })
       } catch (e) {
+        // 主动 abort 不是错误，别弹 toast（拦截器会把它包成普通 Error）
+        if (controller.signal.aborted) {
+          return
+        }
         toast({
           variant: "destructive",
           title: "Uh oh! Something went wrong.",
@@ -155,6 +173,7 @@ export default function FileManager(props: Props) {
       }
     }
     fetchData()
+    return () => controller.abort()
   }, [tab, toast])
 
   useEffect(() => {
@@ -163,7 +182,10 @@ export default function FileManager(props: Props) {
     }
     const fetchData = async () => {
       try {
-        let filteredFilenames = filenames
+        // 上一个 tab 的名单还没到（或已作废）时按空列表处理，不拿旧 tab 的
+        // 文件名去拼新 tab 的缩略图 URL
+        let filteredFilenames =
+          fileList.tab === tab ? fileList.items : []
         if (debouncedSearchText) {
           const fuse = new Fuse(filteredFilenames, {
             keys: ["name"],
@@ -198,7 +220,7 @@ export default function FileManager(props: Props) {
       }
     }
     fetchData()
-  }, [filenames, debouncedSearchText, fileManagerState, photoWidth, open, tab, toast])
+  }, [fileList, debouncedSearchText, fileManagerState, photoWidth, open, tab, toast])
 
   const onScroll = (event: SyntheticEvent) => {
     setScrollTop(event.currentTarget.scrollTop)
