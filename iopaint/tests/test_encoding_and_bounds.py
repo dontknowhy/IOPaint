@@ -1,6 +1,4 @@
 """编码参数与输入边界（PERF-2、DOS-1、REL-1）。
-
-对应 decision.md D-2、D-5、D-7。
 """
 import base64
 import io

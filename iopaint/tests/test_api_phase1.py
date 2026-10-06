@@ -1,6 +1,4 @@
 """api 层 Phase 1 行为：CORS、请求体上限、image/mask 缺省、事件循环不被阻塞。
-
-对应 decision.md D-2、D-3、D-4。
 """
 import base64
 import io

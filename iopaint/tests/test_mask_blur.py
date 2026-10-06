@@ -1,6 +1,6 @@
-"""D-17：sd_mask_blur 参数已删除，但合成羽化必须固定保留。
+"""sd_mask_blur 参数已删除，但合成羽化必须固定保留。
 
-decision 里原本写的是"删除不改变模型输出"，实测是错的：被模糊的 mask 会一路传到
+早期方案原本写的是"删除不改变模型输出"，实测是错的：被模糊的 mask 会一路传到
 base.py 的 sd_keep_unmasked_area 合成（该字段默认 True），直接删掉会让 SD inpaint
 的边缘从羽化变成硬边（默认配置实测 4660px 差异 / 单通道最大 140）。所以最终做法是
 **删参数、留固定羽化**（DiffusionInpaintModel.COMPOSITE_MASK_BLUR），本文件守这条线。
@@ -64,7 +64,7 @@ class TestSchemaFieldRemoved:
         assert "sd_mask_blur" not in InpaintRequest.model_fields
 
     def test_old_client_payload_still_accepted(self):
-        # D-17 承诺的兼容性：改之前前端提交的就是 sd_mask_blur，
+        # 兼容性承诺：改之前前端提交的就是 sd_mask_blur，
         # pydantic v2 默认忽略未知字段，不能因此 422
         cfg = InpaintRequest(sd_mask_blur=11)
         assert not hasattr(cfg, "sd_mask_blur")
@@ -87,7 +87,7 @@ class TestFeatherKept:
         assert set(np.unique(out_mask).tolist()) - {0, 255}
 
     def test_extender_does_not_blur_twice(self):
-        # D-17 删掉了 use_extender 时的第二次模糊，outpainting 与普通路径口径一致
+        # use_extender 时不再做第二次模糊，outpainting 与普通路径口径一致
         model = make_model()
         image, mask = make_case()
         result = np.full_like(image, 200)
@@ -108,7 +108,7 @@ class TestFeatherKept:
 
         out = model(image.copy(), mask.copy(), cfg)
 
-        # 参考实现：羽化 mask + 纯色结果合成（float32，见 D-18）
+        # 参考实现：羽化 mask + 纯色结果合成（float32）
         feathered = cv2.GaussianBlur(mask, (KERNEL, KERNEL), 0)
         alpha = feathered[:, :, np.newaxis].astype(np.float32) / 255.0
         expected = 200 * alpha + image[:, :, ::-1] * (1.0 - alpha)
@@ -116,7 +116,7 @@ class TestFeatherKept:
         assert np.allclose(got, np.clip(expected, 0, 255), atol=1)
 
     def test_hard_edge_would_differ(self):
-        # 反证：如果不羽化（decision 字面的"直接删"），输出会明显不同
+        # 反证：如果不羽化（早期方案字面的"直接删"），输出会明显不同
         model, cfg = make_model(), make_cfg()
         image, mask = make_case()
 

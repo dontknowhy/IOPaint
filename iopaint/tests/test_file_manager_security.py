@@ -1,6 +1,4 @@
-"""路径遍历 / 未配置目录 / Content-Type 一致性（SEC-1、SEC-2、CONS-3、D-6）。
-
-对应 decision.md D-1、D-6。
+"""路径遍历 / 未配置目录 / Content-Type 一致性（SEC-1、SEC-2、CONS-3）。
 """
 import io
 
