@@ -78,6 +78,13 @@ def make_depth_control_image(image: np.ndarray) -> Image:
     origin_height, origin_width = image.shape[:2]
     pad_image = pad_img_to_modulo(image, mod=64, square=False, min_size=512)
     depth_image = midas(pad_image)
+    # controlnet-aux 0.0.10 的 MidasDetector 内部走 HWC3()，返回 (H, W, 3)（通道互相
+    # 复制），老版本才是单通道 (H, W)。不先取单通道的话，下面 [:, :, None] + concat
+    # 会拼出 (H, W, 3, 3)，PIL.Image.fromarray 直接抛
+    # TypeError: Cannot handle this data type: (1, 1, 3, 3), |u1。
+    depth_image = np.asarray(depth_image)
+    if depth_image.ndim == 3:
+        depth_image = depth_image[:, :, 0]
     depth_image = depth_image[0:origin_height, 0:origin_width]
     depth_image = depth_image[:, :, None]
     depth_image = np.concatenate([depth_image, depth_image, depth_image], axis=2)
