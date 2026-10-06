@@ -68,6 +68,50 @@ rm -rf iopaint/web_app && cp -r web_app/dist iopaint/web_app
   drives the real built frontend), so a fresh clone without Node still passes. The `webui` CI job installs chromium and
   builds the frontend first, so it actually runs there — and it fails for real if the frontend regresses (verified).
 
+### Slow tests (run locally — CI only spot-checks)
+
+`pytest -m slow` pulls tens of GB of weights (SD1.5, ControlNet, erase models) and is only practical on a GPU box.
+GitHub-hosted runners (16GB RAM, CPU-only, no persistent weight cache — 10GB cap / 7-day expiry, so ~20GB would be
+re-downloaded every run) cannot carry the SD-level set: four runs died of memory exhaustion and one hard-crashed the
+runner so badly that no logs were uploaded at all. `.github/workflows/slow-smoke.yml` is therefore a **manual
+clean-room spot check** (install → `iopaint download` → erase-model inference, ~19 cases); the full set belongs on
+this machine.
+
+One-time downloads:
+
+```bash
+for m in lama ldm zits mat fcf manga migan; do python -m iopaint download --model "$m"; done
+python -m iopaint download --model runwayml/stable-diffusion-v1-5
+python -m iopaint download --model runwayml/stable-diffusion-inpainting
+# ControlNet / plugin weights download lazily inside the tests (nothing to run)
+```
+
+Then run — full slow set, or the curated set CI used before narrowing:
+
+```bash
+python -m pytest -m slow -v --tb=short --durations=10
+```
+
+```bash
+python -m pytest -m slow -v --tb=short \
+  --ignore=iopaint/tests/test_instruct_pix2pix.py \
+  --ignore=iopaint/tests/test_sdxl.py \
+  --ignore=iopaint/tests/test_paint_by_example.py \
+  --ignore=iopaint/tests/test_brushnet.py \
+  --deselect=iopaint/tests/test_sd_model.py::test_local_file_path \
+  --deselect=iopaint/tests/test_controlnet.py::test_local_file_path
+```
+
+- The `--ignore`d files need single-file ckpts / repos the repo has no download entry for (5-21GB each; 19.4GB for
+  the two deselected `test_local_file_path` params).
+- Don't add `--forked` on this GPU box: pytest-forked forks the runtest protocol, torch then raises
+  `Cannot re-initialize CUDA in forked subprocess` (measured locally). CI has no GPU, so it *does* pass `--forked`
+  to bound memory; if you ever need forked locally, set `CUDA_VISIBLE_DEVICES=""`.
+- Tests never bind ports (in-process `TestClient` / `ModelManager`), but the single GPU is shared with the production
+  service on :8080 — run when it is idle.
+- Fast regression point for the depth-controlnet fix (controlnet-aux 0.0.10 returns a 3-channel depth map):
+  `python -m pytest iopaint/tests/test_controlnet.py::test_controlnet_switch -v`.
+
 ## Architecture
 
 - Entry: `iopaint/__init__.py:entry_point` → `iopaint/cli.py:typer_app` (typer). `cli.py:start` validates paths, dumps the
