@@ -10,7 +10,9 @@ Backend (conda env `iopaint`, or `pip install -r requirements.txt`):
   same typer app). Use `--model cv2` for a weightless, instant model.
 - `iopaint run --model lama --device cpu --image DIR --mask DIR --output OUT` for batch mode; `--mask` may be a single file
   applied to every image.
-- Others: `iopaint list`, `iopaint download <hf-id>`, `iopaint start-web-config`, `iopaint install-plugins-packages`.
+- Others: `iopaint list`, `iopaint download --model <hf-id>` (the id is a **required option**, not a positional arg —
+  bare `iopaint download <hf-id>` dies with `Missing option '--model'`), `iopaint start-web-config`,
+  `iopaint install-plugins-packages`.
 - Model cache = `XDG_CACHE_HOME` (default `~/.cache`). `--model-dir` is a typer callback (`setup_model_dir`) that also sets
   `U2NET_HOME`; it must stay a directory.
 - `bash publish.sh [upload]` = build frontend, copy `web_app/dist` → `iopaint/web_app`, `python3 -m build`, optional twine.
@@ -27,6 +29,10 @@ Frontend (`cd web_app`):
 `bash scripts/check.sh` = `pytest -m "not slow"` + `npm run lint` + `npm run build` + copy `web_app/dist` into
 `iopaint/web_app`. Runs the same commands as `.github/workflows/ci.yml`; keep them in sync. Three CI jobs: `backend`
 (`pytest -m "not slow"`), `frontend` (lint + build), `webui` (playwright against the built UI).
+
+A **fourth workflow** `.github/workflows/slow-smoke.yml` runs `pytest -m slow` on `schedule` (weekly) +
+`workflow_dispatch` only — it is deliberately **not** wired to push/PR, so the PR-required set stays fast and offline.
+It caches `~/.cache` (HF/torch weights, ~7GB) and takes ~40min+ on first run; `check.sh` does **not** cover it.
 
 ## The backend serves the built frontend
 
