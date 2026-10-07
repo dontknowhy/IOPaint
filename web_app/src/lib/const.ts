@@ -24,6 +24,9 @@ export const DEFAULT_NEGATIVE_PROMPT =
 
 export const SHORTCUT_KEY_CHANGE_BRUSH_SIZE = "Alt"
 
+/** FileManager 对话框里「掩膜目录」这个 tab 的标识，Header 选文件时要认它 */
+export const MASK_TAB = "mask"
+
 export const HD_STRATEGY = "Crop"
 export const HD_STRATEGY_CROP_TRIGGER_SIZE = 640
 export const HD_STRATEGY_CROP_MARGIN = 128

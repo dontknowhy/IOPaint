@@ -9,6 +9,8 @@ skips (see ``WEB_APP_DIR``) — the ``webui`` CI job builds it first.
 """
 import base64
 import io
+import json
+import time
 from pathlib import Path
 
 import pytest
@@ -187,4 +189,124 @@ class TestResponsive:
         prompt = pg.get_by_text("Click here or drag an image file")
         prompt2 = pg.get_by_text("Tap here to load your picture")
         assert prompt.count() > 0 or prompt2.count() > 0
+        ctx.close()
+
+
+# ── 之前没被覆盖的几处契约 ─────────────────────────────────────────────
+
+class TestSetFileTiming:
+    """setFile 的时序契约：抽 prompt 不能挡在「打开图片」前面。
+
+    gen-info 要把整张图上传一次（实测 230~290ms），它必须在后台跑。
+    这里把 gen-info 整个挂死（永远不返回），画布仍然必须出现 ——
+    串行版本会一直等它，直接超时。
+    """
+
+    def test_gen_info_delay_does_not_block_opening_image(
+        self, browser_instance, iopaint_server, tmp_path
+    ):
+        from PIL import Image
+
+        ctx = browser_instance.new_context(viewport={"width": 1280, "height": 720})
+        pg = ctx.new_page()
+        pg.goto(iopaint_server, wait_until="load", timeout=30000)
+        pg.wait_for_timeout(2000)
+
+        hits = []
+
+        def hang_gen_info(route):
+            # 故意既不 continue 也不 fulfill，让 gen-info 永远挂着。
+            # 注意不能在 handler 里 time.sleep：sync API 会连带阻塞事件循环，
+            # wait_for_timeout 也一起停摆，测出来的是 sleep 的时长而不是页面的。
+            hits.append(1)
+
+        pg.route("**/gen-info", hang_gen_info)
+
+        test_img = tmp_path / "timing.png"
+        Image.new("RGB", (256, 256), (10, 120, 200)).save(str(test_img))
+
+        t0 = time.time()
+        pg.locator('input[type="file"]').first.set_input_files(str(test_img))
+        # gen-info 永远不返回时画布仍然要出现；串行版本会一直等在这里直到超时
+        pg.locator("canvas").first.wait_for(state="visible", timeout=6000)
+        canvas_after = time.time() - t0
+
+        assert hits, "gen-info 根本没被调用，这条测试是空转的"
+        assert canvas_after < 3.0, f"画布等了 {canvas_after:.2f}s 才出来"
+
+        pg.unroute("**/gen-info")
+        ctx.close()
+
+
+class TestMaskContract:
+    """掩膜从 canvas 一路到后端的契约：PNG / 全尺寸 / 笔画真的在上面。
+
+    generateMask → canvasToBlob 是异步的（原来用同步的 toDataURL），
+    这条测试卡住「异步化之后拿到的东西还是不是那张掩膜」。
+    """
+
+    def test_mask_sent_to_backend_is_full_size_png(self, page, tmp_path):
+        from PIL import Image
+
+        _upload_image(page, tmp_path)
+        captured = {}
+
+        def capture(route):
+            # post_data_buffer 是属性（bytes），不是方法
+            captured["body"] = route.request.post_data_buffer
+            route.abort()
+
+        page.route("**/inpaint", capture)
+
+        bb = page.locator("canvas").first.bounding_box()
+        cx, cy = bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2
+        page.mouse.move(cx - 30, cy - 30)
+        page.mouse.down()
+        page.mouse.move(cx + 30, cy + 30, steps=10)
+        page.mouse.up()
+
+        deadline = time.time() + 8
+        while time.time() < deadline and "body" not in captured:
+            page.wait_for_timeout(200)
+        page.unroute("**/inpaint")
+
+        assert "body" in captured, "画完一笔却没有发出 /inpaint 请求"
+
+        payload = json.loads(captured["body"].decode("utf-8"))
+        mask = payload["mask"]
+        assert mask.startswith("data:image/png;base64,"), mask[:80]
+
+        raw = base64.b64decode(mask.split(",", 1)[1])
+        im = Image.open(io.BytesIO(raw))
+        assert im.size == (256, 256), f"掩膜是 {im.size}，应该是原图的 (256, 256)"
+
+        # 笔画必须真的落到掩膜上（背景是透明的）
+        _lo, alpha_max = im.convert("RGBA").split()[-1].getextrema()
+        assert alpha_max > 0, "掩膜全透明 —— 笔画没画进去"
+
+
+class TestDeviceNoticeToast:
+    """显存回退提示：server-config.deviceNotice → WebUI toast，且同一条只弹一次。"""
+
+    NOTICE = "cuda:0 out of VRAM, switched to cuda:1"
+
+    def test_notice_toast_shown_exactly_once(self, browser_instance, iopaint_server):
+        def inject(route):
+            data = route.fetch().json()
+            data["deviceNotice"] = self.NOTICE
+            route.fulfill(json=data)
+
+        ctx = browser_instance.new_context(viewport={"width": 1280, "height": 720})
+        pg = ctx.new_page()
+        pg.route("**/server-config", inject)
+        pg.goto(iopaint_server, wait_until="load", timeout=30000)
+
+        expect(pg.get_by_text(self.NOTICE)).to_be_visible(timeout=8000)
+
+        # 页面加载会拉两次 server-config（App 的 getServerConfig + Settings 的
+        # react-query），第二趟必须被 setServerConfig 里的 shownDeviceNotice 挡掉
+        pg.wait_for_timeout(1500)
+        count = pg.get_by_text(self.NOTICE).count()
+        assert count == 1, f"同一条 deviceNotice 弹了 {count} 次"
+
         ctx.close()

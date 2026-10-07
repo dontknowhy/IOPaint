@@ -15,6 +15,7 @@ from torch.hub import download_url_to_file, get_dir
 import hashlib
 
 from iopaint.exceptions import ModelLoadError
+from iopaint.runtime import device_str
 
 
 def md5sum(filename):
@@ -26,7 +27,7 @@ def md5sum(filename):
 
 
 def switch_mps_device(model_name, device):
-    if model_name in MPS_UNSUPPORT_MODELS and str(device) == "mps":
+    if model_name in MPS_UNSUPPORT_MODELS and device_str(device) == "mps":
         logger.info(f"{model_name} not support mps, switch to cpu")
         return torch.device("cpu")
     return device

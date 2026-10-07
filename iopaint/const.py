@@ -56,6 +56,13 @@ CPU_TEXTENCODER_HELP = """
 Run diffusion models text encoder on CPU to reduce vRAM usage.
 """
 
+GPU_ID_HELP = """
+Which GPU to use when device=cuda (0-based index). Same as `--device cuda:N`.
+Defaults to the first visible GPU, or the value of the IOPaint_GPU env var.
+If loading runs out of VRAM, IOPaint automatically retries on a GPU with more
+headroom, then falls back to CPU, and reports it in terminal and WebUI.
+"""
+
 SD_CONTROLNET_CHOICES: List[str] = [
     "lllyasviel/control_v11p_sd15_canny",
     # "lllyasviel/control_v11p_sd15_seg",

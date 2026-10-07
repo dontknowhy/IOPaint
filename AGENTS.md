@@ -111,6 +111,13 @@ python -m pytest -m slow -v --tb=short \
   service on :8080 — run when it is idle.
 - Fast regression point for the depth-controlnet fix (controlnet-aux 0.0.10 returns a 3-channel depth map):
   `python -m pytest iopaint/tests/test_controlnet.py::test_controlnet_switch -v`.
+- `iopaint/tests/test_gpu_fallback_slow.py` 是**本地才跑得动**的 slow smoke（真实 CUDA OOM → 自动回退 → 失败那块卡
+  必须归零）。它只在 `pytest -m slow` 下收集，需要 ≥2 块可见 CUDA；CI 的 `slow-smoke.yml` 没 GPU，拿到的是 skip
+  而不是失败，所以**永远红不了，也永远跑不到** —— 要验就得在这台机器上：
+  `python -m pytest iopaint/tests/test_gpu_fallback_slow.py -m slow -v`（~1.5s，不下载权重）。
+  OOM 是靠 `set_per_process_memory_fraction` 把本进程预算压到 2% 造出来的，**不会真占卡**，桌面卡上也安全。
+- `iopaint/tests/test_webui.py` 属于**快**测试（不在 `-m slow` 里），`scripts/check.sh` 会跑它；没有 playwright 或
+  没构建前端时它自己 skip。
 
 ## Architecture
 

@@ -1,5 +1,6 @@
 import { IconButton } from "@/components/ui/button"
 import { useToggle } from "@uidotdev/usehooks"
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "./ui/dialog"
 import { Settings } from "lucide-react"
 import { zodResolver } from "@hookform/resolvers/zod"
@@ -68,7 +69,20 @@ const TAB_PLUGINS = "Plugins"
 
 const TAB_NAMES = [TAB_MODEL, TAB_GENERAL, TAB_PLUGINS]
 
+// react-query 只有这里用（拉一次 serverConfig）。原来 Provider 挂在 main.tsx，
+// 导致 @tanstack/query-core 无条件进首屏 chunk；Settings 是按需加载的，把
+// Provider 一起收进来，这块就只在真正打开设置面板时才下载。
+const queryClient = new QueryClient()
+
 export function SettingsDialog() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <SettingsDialogContent />
+    </QueryClientProvider>
+  )
+}
+
+function SettingsDialogContent() {
   const [open, toggleOpen] = useToggle(false)
   const [tab, setTab] = useState(TAB_MODEL)
   const [

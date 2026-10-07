@@ -27,6 +27,7 @@ from loguru import logger
 
 from iopaint.schema import SDSampler
 from iopaint.exceptions import ModelLoadError
+from iopaint.runtime import device_str, cuda_device_index
 from torch import conv2d, conv_transpose2d
 
 
@@ -1007,13 +1008,15 @@ def handle_from_pretrained_exceptions(func, **kwargs):
 
 
 def get_torch_dtype(device, no_half: bool):
-    device = str(device)
+    # device 可能是 torch.device("cuda:1")、"cuda" 或 Device 枚举
+    # （Python 3.11+ 里 str(Device.cuda) 是 "Device.cuda"，直接比 "cuda" 会永远 False）
+    kind = device_str(device).split(":")[0]
     use_fp16 = not no_half
-    use_gpu = device == "cuda"
+    use_gpu = kind == "cuda"
     # https://github.com/huggingface/diffusers/issues/4480
     # pipe.enable_attention_slicing and float16 will cause black output on mps
     # if device in ["cuda", "mps"] and use_fp16:
-    if device in ["cuda"] and use_fp16:
+    if kind == "cuda" and use_fp16:
         return use_gpu, torch.float16
     return use_gpu, torch.float32
 

@@ -20,6 +20,7 @@ import { useDebounce } from "@uidotdev/usehooks"
 import Fuse from "fuse.js"
 import { useToast } from "@/components/ui/use-toast"
 import { API_ENDPOINT, getMedias } from "@/lib/api"
+import { MASK_TAB } from "@/lib/const"
 import { getErrorMessage } from "@/lib/utils"
 import { IconButton } from "./ui/button"
 import { Input } from "./ui/input"
@@ -52,7 +53,6 @@ const SORT_BY_MODIFIED_TIME = "Modified time"
 
 const IMAGE_TAB = "input"
 const OUTPUT_TAB = "output"
-export const MASK_TAB = "mask"
 
 const SortByMap = {
   [SortBy.NAME]: SORT_BY_NAME,

@@ -43,6 +43,7 @@ default_configs = dict(
     local_files_only=False,
     cpu_textencoder=False,
     device=Device.cuda,
+    gpu_id=None,
     input=None,
     mask_dir=None,
     output_dir=None,
@@ -93,6 +94,7 @@ def save_config(
     local_files_only,
     cpu_textencoder,
     device,
+    gpu_id,
     input,
     mask_dir,
     output_dir,
@@ -180,6 +182,12 @@ def main(config_file: Path):
 
                 device = gr.Radio(
                     Device.values(), label="Device", value=init_config.device
+                )
+                gpu_id = gr.Number(
+                    value=init_config.gpu_id,
+                    precision=0,
+                    minimum=0,
+                    label=f"GPU index {GPU_ID_HELP}",
                 )
                 quality = gr.Slider(
                     value=95,
@@ -311,6 +319,7 @@ def main(config_file: Path):
                 local_files_only,
                 cpu_textencoder,
                 device,
+                gpu_id,
                 input,
                 mask_dir,
                 output_dir,

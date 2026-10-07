@@ -6,7 +6,7 @@ from loguru import logger
 from iopaint.const import INSTRUCT_PIX2PIX_NAME
 from .base import DiffusionInpaintModel
 from iopaint.schema import InpaintRequest
-from .utils import get_torch_dtype, enable_low_mem, is_local_files_only
+from .utils import get_torch_dtype, enable_low_mem, is_local_files_only, cuda_device_index
 
 
 class InstructPix2Pix(DiffusionInpaintModel):
@@ -37,7 +37,7 @@ class InstructPix2Pix(DiffusionInpaintModel):
 
         if kwargs.get("cpu_offload", False) and use_gpu:
             logger.info("Enable sequential cpu offload")
-            self.model.enable_sequential_cpu_offload(gpu_id=0)
+            self.model.enable_sequential_cpu_offload(gpu_id=cuda_device_index(device))
         else:
             self.model = self.model.to(device)
 

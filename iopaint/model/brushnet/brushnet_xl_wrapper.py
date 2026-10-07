@@ -8,6 +8,7 @@ from ..base import DiffusionInpaintModel
 from ..helper.cpu_text_encoder import CPUTextEncoderWrapper
 from ..original_sd_configs import get_config_files
 from ..utils import (
+    cuda_device_index,
     handle_from_pretrained_exceptions,
     get_torch_dtype,
     enable_low_mem,
@@ -93,7 +94,7 @@ class BrushNetXLWrapper(DiffusionInpaintModel):
 
         if kwargs.get("cpu_offload", False) and use_gpu:
             logger.info("Enable sequential cpu offload")
-            self.model.enable_sequential_cpu_offload(gpu_id=0)
+            self.model.enable_sequential_cpu_offload(gpu_id=cuda_device_index(device))
         else:
             self.model = self.model.to(device)
             if kwargs["sd_cpu_textencoder"]:

@@ -7,7 +7,7 @@ from loguru import logger
 from iopaint.helper import decode_base64_to_image
 from .base import DiffusionInpaintModel
 from iopaint.schema import InpaintRequest
-from .utils import get_torch_dtype, enable_low_mem, is_local_files_only
+from .utils import get_torch_dtype, enable_low_mem, is_local_files_only, cuda_device_index
 
 
 class PaintByExample(DiffusionInpaintModel):
@@ -37,7 +37,7 @@ class PaintByExample(DiffusionInpaintModel):
         # TODO: gpu_id
         if kwargs.get("cpu_offload", False) and use_gpu:
             self.model.image_encoder = self.model.image_encoder.to(device)
-            self.model.enable_sequential_cpu_offload(gpu_id=0)
+            self.model.enable_sequential_cpu_offload(gpu_id=cuda_device_index(device))
         else:
             self.model = self.model.to(device)
 

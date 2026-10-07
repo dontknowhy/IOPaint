@@ -43,6 +43,7 @@ from iopaint.helper import (
 )
 from iopaint.model.utils import torch_gc
 from iopaint.model_manager import ModelManager
+from iopaint.runtime import to_torch_device
 from iopaint.plugins import build_plugins, RealESRGANUpscaler, InteractiveSeg
 from iopaint.plugins.base_plugin import BasePlugin
 from iopaint.plugins.remove_bg import RemoveBG
@@ -357,6 +358,7 @@ class Api:
             disableModelSwitch=False,
             isDesktop=False,
             samplers=self.api_samplers(),
+            deviceNotice=self.model_manager.device_notice,
         )
 
     def api_input_image(self) -> FileResponse:
@@ -584,7 +586,7 @@ class Api:
     def _build_model_manager(self):
         return ModelManager(
             name=self.config.model,
-            device=torch.device(self.config.device),
+            device=to_torch_device(self.config.device, self.config.gpu_id),
             no_half=self.config.no_half,
             low_mem=self.config.low_mem,
             disable_nsfw=self.config.disable_nsfw_checker,

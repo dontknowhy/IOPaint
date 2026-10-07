@@ -358,6 +358,11 @@ const defaultValues: AppState = {
 // 自己作废，hide 与新的一次 show 都会把序号推走。
 let prevMaskSeq = 0
 
+// 显存不足触发自动回退时，后端会把提示塞进 server-config。App 首次拉取、
+// Settings 里切模型后 refetch 都会走到 setServerConfig，这里记一条已弹过的，
+// 免得同一条提示被反复刷屏；出现新内容（比如又回退到别的卡）仍然会再弹一次。
+let shownDeviceNotice = ""
+
 export const useStore = createWithEqualityFn<AppState & AppAction>()(
   persist(
     immer((set, get) => ({
@@ -375,6 +380,11 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         const { imageWidth, imageHeight } = get()
         const file = get().file
         const seq = ++prevMaskSeq
+        // 刚切过图、新图还没 onload：setFile 把尺寸归零了，此时用旧图尺寸算预览
+        // 正是 setFile 里那条「新 file 但旧尺寸」的窗口期，直接跳过。
+        if (imageWidth === 0 || imageHeight === 0 || !file) {
+          return
+        }
 
         const maskCanvas = generateMask(
           imageWidth,
@@ -842,6 +852,14 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           state.settings.enableControlnet = newValue.enableControlnet
           state.settings.controlnetMethod = newValue.controlnetMethod
         })
+        const notice = newValue.deviceNotice?.trim()
+        if (notice && notice !== shownDeviceNotice) {
+          shownDeviceNotice = notice
+          toast({
+            variant: "destructive",
+            description: notice,
+          })
+        }
       },
 
       updateSettings: (newSettings: Partial<Settings>) => {
@@ -966,41 +984,65 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         }),
 
       setFile: async (file: File) => {
-        if (get().settings.enableAutoExtractPrompt) {
-          try {
-            const res = await getGenInfo(file)
-            if (res.prompt) {
-              set((state) => {
-                state.settings.prompt = res.prompt
-              })
-            }
-            if (res.negative_prompt) {
-              set((state) => {
-                state.settings.negativePrompt = res.negative_prompt
-              })
-            }
-          } catch (e) {
-            toast({
-              variant: "destructive",
-              description: getErrorMessage(e),
-            })
-          }
-        }
-        for (const url of _activeBlobUrls) {
-          URL.revokeObjectURL(url)
-        }
-        _activeBlobUrls.clear()
+        // 三步的顺序是有意的，别调换：
+        //
+        // 1) 先在同一 tick 里把「新图 + 所有由上一张图派生的状态」一起落下去。
+        //    此前 imageWidth/imageHeight、extenderState、isCropperExtenderResizing
+        //    都留在上一张图的值上，直到新图 onload 后 Editor 才 setImageSize，
+        //    这中间 store 里是「新 file 但旧尺寸」：showPrevMask 会拿旧尺寸去
+        //    generateMask（它的过期判断只比 file，挡不住这个），掩膜画布尺寸
+        //    也还是旧图的。顺带把拖拽进行中的 isCropperExtenderResizing 兜底，
+        //    否则拖到一半切图会永久卡在 true。
+        // 2) 再回收旧 blob URL：此时 store 里已经没有指向它们的状态了，
+        //    不会出现「活状态 + 已失效 URL」的中间态。
+        // 3) 最后才把 prompt 抽取丢到后台。gen-info 要把整张图上传一次
+        //    （实测 230~290ms），绝不能挡在「打开图片」前面；晚到的结果只在
+        //    图片没被切走时才写回。
         set((state) => {
           state.file = file
+          state.imageWidth = 0
+          state.imageHeight = 0
           state.isInpainting = false
           state.isPluginRunning = false
           state.isAdjustingMask = false
+          state.isCropperExtenderResizing = false
           state.interactiveSegState = castDraft(
             defaultValues.interactiveSegState
           )
           state.editorState = castDraft(defaultValues.editorState)
           state.cropperState = defaultValues.cropperState
+          state.extenderState = defaultValues.extenderState
         })
+        for (const url of _activeBlobUrls) {
+          URL.revokeObjectURL(url)
+        }
+        _activeBlobUrls.clear()
+
+        if (get().settings.enableAutoExtractPrompt) {
+          getGenInfo(file)
+            .then((res) => {
+              if (get().file !== file) {
+                return
+              }
+              set((state) => {
+                if (res.prompt) {
+                  state.settings.prompt = res.prompt
+                }
+                if (res.negative_prompt) {
+                  state.settings.negativePrompt = res.negative_prompt
+                }
+              })
+            })
+            .catch((e) => {
+              if (get().file !== file) {
+                return
+              }
+              toast({
+                variant: "destructive",
+                description: getErrorMessage(e),
+              })
+            })
+        }
       },
 
       setBaseBrushSize: (newValue: number) =>

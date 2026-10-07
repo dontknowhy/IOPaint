@@ -141,6 +141,8 @@ class TestApiServerConfig:
         assert "modelInfos" in body
         assert "samplers" in body
         assert isinstance(body["samplers"], list)
+        # 没触发显存回退时必须是 null，WebUI 才不会弹 toast
+        assert body["deviceNotice"] is None
 
     def test_samplers(self, tmp_path):
         cfg = _minimal_config(tmp_path)

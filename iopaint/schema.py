@@ -262,6 +262,8 @@ class ApiConfig(BaseModel):
     local_files_only: bool
     cpu_textencoder: bool
     device: Device
+    # 指定用哪块 GPU（仅 device=cuda 时有效）。None = 默认卡
+    gpu_id: Optional[int] = None
     input: Optional[Path]
     mask_dir: Optional[Path]
     output_dir: Optional[Path]
@@ -505,6 +507,8 @@ class ServerConfigResponse(BaseModel):
     disableModelSwitch: bool
     isDesktop: bool
     samplers: List[str]
+    # 显存不足触发自动回退时的提示，WebUI 拿到后 toast 给用户
+    deviceNotice: Optional[str] = None
 
 
 class SwitchModelRequest(BaseModel):

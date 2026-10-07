@@ -10,8 +10,31 @@ from typer import Option
 from typer_config import use_json_config
 
 from iopaint.const import *
-from iopaint.runtime import setup_model_dir, dump_environment_info, check_device
+from iopaint.runtime import (
+    setup_model_dir,
+    dump_environment_info,
+    dump_gpu_info,
+    check_device,
+    parse_device_spec,
+    resolve_gpu_id,
+    to_torch_device,
+    DEVICE_SPEC_HELP,
+)
 from iopaint.schema import InteractiveSegModel, Device, RealESRGANModel, RemoveBGModel
+
+
+def _resolve_cli_device(device: str, gpu_id: Optional[int]):
+    """`--device`(支持 cuda:N) + `--gpu-id` → (Device, GPU序号)，失败直接退出。"""
+    try:
+        parsed_device, parsed_gpu_id = parse_device_spec(device, gpu_id)
+        parsed_device = check_device(parsed_device)
+        parsed_gpu_id = resolve_gpu_id(parsed_device, parsed_gpu_id)
+    except ValueError as e:
+        logger.error(str(e))
+        raise SystemExit(1)
+    if parsed_gpu_id is not None:
+        logger.info(f"Using GPU {parsed_gpu_id}")
+    return parsed_device, parsed_gpu_id
 
 typer_app = typer.Typer(pretty_exceptions_show_locals=False, add_completion=False)
 
@@ -64,7 +87,8 @@ def list_model(
 @typer_app.command(help="Batch processing images")
 def run(
     model: str = Option("lama"),
-    device: Device = Option(Device.cpu),
+    device: str = Option("cpu", help=f"Device. One of: {DEVICE_SPEC_HELP}"),
+    gpu_id: Optional[int] = Option(None, help=GPU_ID_HELP),
     image: Path = Option(..., help="Image folders or file path"),
     mask: Path = Option(
         ...,
@@ -90,6 +114,11 @@ def run(
     from iopaint.download import cli_download_model, scan_models
     from iopaint.exceptions import ModelLoadError
 
+    dump_environment_info()
+    device, gpu_id = _resolve_cli_device(device, gpu_id)
+    # 放在 resolve 之后：这时才知道目标卡，才能只给它查空闲显存（少建上下文）
+    dump_gpu_info(device, gpu_id)
+
     scanned_models = scan_models()
     if model not in [it.name for it in scanned_models]:
         logger.info(f"{model} not found in {model_dir}, try to downloading")
@@ -101,7 +130,9 @@ def run(
 
     from iopaint.batch_processing import batch_inpaint
 
-    batch_inpaint(model, device, image, mask, output, config, concat)
+    batch_inpaint(
+        model, to_torch_device(device, gpu_id), image, mask, output, config, concat
+    )
 
 
 @typer_app.command(help="Start IOPaint server")
@@ -128,7 +159,8 @@ def start(
     disable_nsfw_checker: bool = Option(False, help=DISABLE_NSFW_HELP),
     cpu_textencoder: bool = Option(False, help=CPU_TEXTENCODER_HELP),
     local_files_only: bool = Option(False, help=LOCAL_FILES_ONLY_HELP),
-    device: Device = Option(Device.cpu),
+    device: str = Option("cpu", help=f"Device. One of: {DEVICE_SPEC_HELP}"),
+    gpu_id: Optional[int] = Option(None, help=GPU_ID_HELP),
     input: Optional[Path] = Option(None, help=INPUT_HELP),
     mask_dir: Optional[Path] = Option(
         None, help=MASK_DIR_HELP, dir_okay=True, file_okay=False
@@ -162,7 +194,8 @@ def start(
     restoreformer_device: Device = Option(Device.cpu),
 ):
     dump_environment_info()
-    device = check_device(device)
+    device, gpu_id = _resolve_cli_device(device, gpu_id)
+    dump_gpu_info(device, gpu_id)
     remove_bg_device = check_device(remove_bg_device)
     realesrgan_device = check_device(realesrgan_device)
     gfpgan_device = check_device(gfpgan_device)
@@ -229,6 +262,7 @@ def start(
         local_files_only=local_files_only,
         cpu_textencoder=cpu_textencoder if device == Device.cuda else False,
         device=device,
+        gpu_id=gpu_id,
         input=input,
         mask_dir=mask_dir,
         output_dir=output_dir,
@@ -264,6 +298,7 @@ def start_web_config(
     config_file: Path = Option("config.json"),
 ):
     dump_environment_info()
+    dump_gpu_info()
     from iopaint.web_config import main
 
     main(config_file)

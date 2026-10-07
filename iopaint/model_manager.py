@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List, Dict, Optional
 import threading
 
 import torch
@@ -13,6 +13,7 @@ from iopaint.model.brushnet.brushnet_wrapper import BrushNetWrapper
 from iopaint.model.brushnet.brushnet_xl_wrapper import BrushNetXLWrapper
 from iopaint.model.power_paint.power_paint_v2 import PowerPaintV2
 from iopaint.model.utils import torch_gc, is_local_files_only
+from iopaint.runtime import load_with_fallback, device_str
 from iopaint.schema import InpaintRequest, ModelInfo, ModelType
 
 
@@ -20,6 +21,8 @@ class ModelManager:
     def __init__(self, name: str, device: torch.device, **kwargs):
         self.name = name
         self.device = device
+        # 显存不足触发的自动回退提示，去重后通过 /api/v1/server-config 下发给 WebUI
+        self.device_notices: List[str] = []
         self.kwargs = kwargs
         self.lock = threading.Lock()
         self.available_models: Dict[str, ModelInfo] = {}
@@ -39,7 +42,30 @@ class ModelManager:
 
         self.enable_powerpaint_v2 = kwargs.get("enable_powerpaint_v2", False)
 
-        self.model = self.init_model(name, device, **kwargs)
+        self.model, self.device = self._load(name, self.device)
+
+    @property
+    def device_notice(self) -> Optional[str]:
+        """去重后的回退提示，空列表返回 None。"""
+        return "; ".join(dict.fromkeys(self.device_notices)) or None
+
+    def _load(self, name: str, device, **extra_kwargs):
+        """加载模型；显存不足时自动换到更有富余的 GPU，最后回退 CPU。
+
+        返回 (model, 实际生效的 device)。非 OOM 异常原样抛出。
+        """
+        model, effective_device, notices = load_with_fallback(
+            lambda dev: self.init_model(
+                name, dev, **{**self.kwargs, **extra_kwargs}
+            ),
+            device,
+        )
+        for it in notices:
+            if it not in self.device_notices:
+                self.device_notices.append(it)
+        # 终端里明确写出「模型最终跑在哪」，和启动时打印的 GPU 清单对得上
+        logger.info(f"Model {name} loaded on {device_str(effective_device)}")
+        return model, effective_device
 
     @property
     def current_model(self) -> ModelInfo:
@@ -167,8 +193,8 @@ class ModelManager:
 
             try:
                 # TODO: enable/disable controlnet without reload model
-                model = self.init_model(
-                    new_name, switch_mps_device(new_name, self.device), **self.kwargs
+                model, effective_device = self._load(
+                    new_name, switch_mps_device(new_name, self.device)
                 )
             except Exception as e:
                 self.controlnet_method = old_controlnet_method
@@ -187,6 +213,7 @@ class ModelManager:
                 raise
             self.name = new_name
             self.model = model
+            self.device = effective_device
 
     def switch_brushnet_method(self, config):
         if not self.available_models[self.name].support_brushnet:
@@ -224,11 +251,10 @@ class ModelManager:
                 pipe_components["tokenizer_2"] = self.model.model.tokenizer_2
 
             try:
-                model = self.init_model(
+                model, effective_device = self._load(
                     self.name,
                     switch_mps_device(self.name, self.device),
                     pipe_components=pipe_components,
-                    **self.kwargs,
                 )
             except Exception as e:
                 self.enable_brushnet = old_enable_brushnet
@@ -236,6 +262,7 @@ class ModelManager:
                 logger.error(f"Switch Brushnet enable/disable failed: {e}")
                 raise
             self.model = model
+            self.device = effective_device
 
             if not config.enable_brushnet:
                 logger.info("BrushNet Disabled")
@@ -273,11 +300,10 @@ class ModelManager:
                 pipe_components["text_encoder_2"] = self.model.model.text_encoder_2
 
             try:
-                model = self.init_model(
+                model, effective_device = self._load(
                     self.name,
                     switch_mps_device(self.name, self.device),
                     pipe_components=pipe_components,
-                    **self.kwargs,
                 )
             except Exception as e:
                 # init_model 失败时旧模型还在，只需把状态改回去（REL-2/D-9）
@@ -286,6 +312,7 @@ class ModelManager:
                 logger.error(f"Switch controlnet enable/disable failed: {e}")
                 raise
             self.model = model
+            self.device = effective_device
             if not config.enable_controlnet:
                 logger.info("Disable controlnet")
             else:
@@ -301,17 +328,17 @@ class ModelManager:
             pipe_components = {"vae": self.model.model.vae}
 
             try:
-                model = self.init_model(
+                model, effective_device = self._load(
                     self.name,
                     switch_mps_device(self.name, self.device),
                     pipe_components=pipe_components,
-                    **self.kwargs,
                 )
             except Exception as e:
                 self.enable_powerpaint_v2 = old_enable_powerpaint_v2
                 logger.error(f"Switch PowerPaintV2 enable/disable failed: {e}")
                 raise
             self.model = model
+            self.device = effective_device
             if config.enable_powerpaint_v2:
                 logger.info("Enable PowerPaintV2")
             else:

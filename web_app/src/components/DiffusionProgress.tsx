@@ -9,8 +9,10 @@ export const API_ENDPOINT = import.meta.env.DEV
   : ""
 
 const DiffusionProgress = () => {
-  const [settings, isInpainting, isSD] = useStore((state) => [
-    state.settings,
+  // 只订阅用到的字段：settings 每变一次（哪怕只是提示词多打一个字母）
+  // 都会生成新对象，订阅整个对象会让这个常驻组件陪着重绘
+  const [sdSteps, isInpainting, isSD] = useStore((state) => [
+    state.settings.sdSteps,
     state.isInpainting,
     state.isSD(),
   ])
@@ -19,7 +21,7 @@ const DiffusionProgress = () => {
   const [step, setStep] = React.useState(0)
   const socketRef = React.useRef<Socket | null>(null)
 
-  const progress = Math.min(Math.round((step / settings.sdSteps) * 100), 100)
+  const progress = Math.min(Math.round((step / sdSteps) * 100), 100)
 
   React.useEffect(() => {
     const socket = io(API_ENDPOINT, { path: "/ws/socket.io" })

@@ -21,6 +21,7 @@ import {
   buildDownloadName,
   cn,
   copyCanvasImage,
+  canvasToBlob,
   downloadImage,
   drawLines,
   generateMask,
@@ -103,7 +104,11 @@ export default function Editor(props: EditorProps) {
     isInpainting,
     imageWidth,
     imageHeight,
-    settings,
+    showCropper,
+    showExtender,
+    enableManualInpainting,
+    modelType,
+    enableDownloadMask,
     enableAutoSaving,
     setImageSize,
     setBaseBrushSize,
@@ -128,7 +133,14 @@ export default function Editor(props: EditorProps) {
     state.isInpainting,
     state.imageWidth,
     state.imageHeight,
-    state.settings,
+    // 只订阅 Editor 真正读的那几个 settings 字段，而不是整个 settings 对象：
+    // 侧栏滑块/提示词输入每敲一下都会生成新的 settings，订阅整个对象会让
+    // Editor（TransformWrapper + 两块画布 + Cropper/Extender）陪着重绘一次。
+    state.settings.showCropper,
+    state.settings.showExtender,
+    state.settings.enableManualInpainting,
+    state.settings.model.model_type,
+    state.settings.enableDownloadMask,
     state.serverConfig.enableAutoSaving,
     state.setImageSize,
     state.setBaseBrushSize,
@@ -1071,28 +1083,35 @@ export default function Editor(props: EditorProps) {
       )
       setTimeout(() => URL.revokeObjectURL(originalUrl), 10_000)
     }
-    if (settings.enableDownloadMask) {
+    if (enableDownloadMask) {
       // mask 是 0/255 二值图，JPEG 的有损压缩会污染边缘 → 恒定 PNG（CONS-3）
       const maskFileName = buildDownloadName(file.name, "_mask", "image/png")
 
       const maskCanvas = generateMask(imageWidth, imageHeight, lineGroups)
+      // 同样走 toBlob：同步的 toDataURL 要在主线程上把整张全分辨率掩膜
+      // 编码成 PNG（实测 66ms / 952ms），Ctrl+S 会明显卡一下
+      const maskBlob = await canvasToBlob(maskCanvas, "image/png")
+      const maskUrl = URL.createObjectURL(maskBlob)
       // Create a link
       const aDownloadLink = document.createElement("a")
       // Add the name of the file to the link
       aDownloadLink.download = maskFileName
       // Attach the data to the link
-      aDownloadLink.href = maskCanvas.toDataURL("image/png")
+      aDownloadLink.href = maskUrl
       aDownloadLink.style.display = "none"
       // 需先挂载再 click，否则部分浏览器不会触发下载
       document.body.appendChild(aDownloadLink)
       aDownloadLink.click()
-      setTimeout(() => aDownloadLink.remove(), 1000)
+      setTimeout(() => {
+        aDownloadLink.remove()
+        URL.revokeObjectURL(maskUrl)
+      }, 10_000)
     }
   }, [
     file,
     enableAutoSaving,
     renders,
-    settings,
+    enableDownloadMask,
     imageHeight,
     imageWidth,
     lineGroups,
@@ -1405,14 +1424,14 @@ export default function Editor(props: EditorProps) {
             minHeight={Math.min(512, imageHeight)}
             minWidth={Math.min(512, imageWidth)}
             scale={getCurScale()}
-            show={settings.showCropper}
+            show={showCropper}
           />
 
           <Extender
             minHeight={Math.min(512, imageHeight)}
             minWidth={Math.min(512, imageWidth)}
             scale={getCurScale()}
-            show={settings.showExtender}
+            show={showExtender}
           />
 
           {interactiveSegState.isInteractiveSeg ? (
@@ -1895,8 +1914,7 @@ export default function Editor(props: EditorProps) {
             <Download />
           </IconButton>
 
-          {settings.enableManualInpainting &&
-          settings.model.model_type === "inpaint" ? (
+          {enableManualInpainting && modelType === "inpaint" ? (
             <IconButton
               tooltip="Run Inpainting"
               disabled={

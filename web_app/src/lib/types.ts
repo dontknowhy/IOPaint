@@ -28,6 +28,8 @@ export interface ServerConfig {
   disableModelSwitch: boolean
   isDesktop: boolean
   samplers: string[]
+  // 显存不足触发自动回退时后端给的提示，非空则 toast 给用户
+  deviceNotice?: string | null
 }
 
 export interface GenInfo {

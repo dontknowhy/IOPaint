@@ -2,11 +2,14 @@
 @tailwind components;
 @tailwind utilities;
 
-html { font-family: "Inter", "system-ui"; overflow: hidden; }
+/* 字体：globals.css 原来还有一段 `@supports (font-variation-settings: normal)
+   把 html 的 font-family 覆盖成 "Inter var"，但 inter-ui 的 inter.css 里
+   只声明了 "Inter"（变量字体那套叫 "InterVariable"），"Inter var" 谁都没定义 ——
+   于是浏览器一路回落到 system-ui，18 个 @font-face 全是死代码，
+   实测三个内核的 font_bytes 都是 0（一个字节都没下载过）。
+   连同 `import "inter-ui/inter.css"` 一起删掉，渲染结果不变，dist 少 2.1MB。 */
 
-@supports (font-variation-settings: normal) {
-  html { font-family: "Inter var", "system-ui"; }
-}
+html { font-family: "Inter", "system-ui"; overflow: hidden; }
 
 .react-transform-wrapper {
   display: grid !important;
