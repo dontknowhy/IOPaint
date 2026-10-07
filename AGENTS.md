@@ -3,6 +3,18 @@
 IOPaint = Python backend (`iopaint/`, FastAPI + socket.io, packaged as the `iopaint` CLI) + React/Vite/TS
 frontend (`web_app/`) that is compiled into the Python package and served by the backend.
 
+## TOC
+
+- [Commands](#commands)
+- [Health check](#health-check)
+- [The backend serves the built frontend](#the-backend-serves-the-built-frontend)
+- [Tests](#tests)
+  - [Slow tests (run locally — CI only spot-checks)](#slow-tests-run-locally--ci-only-spot-checks)
+- [Architecture](#architecture)
+- [Frontend notes](#frontend-notes)
+- [Commit messages](#commit-messages)
+- [Other gotchas](#other-gotchas)
+
 ## Commands
 
 Backend (conda env `iopaint`, or `pip install -r requirements.txt`):
@@ -30,9 +42,11 @@ Frontend (`cd web_app`):
 `iopaint/web_app`. Runs the same commands as `.github/workflows/ci.yml`; keep them in sync. Three CI jobs: `backend`
 (`pytest -m "not slow"`), `frontend` (lint + build), `webui` (playwright against the built UI).
 
-A **fourth workflow** `.github/workflows/slow-smoke.yml` runs `pytest -m slow` on `schedule` (weekly) +
-`workflow_dispatch` only — it is deliberately **not** wired to push/PR, so the PR-required set stays fast and offline.
-It caches `~/.cache` (HF/torch weights, ~7GB) and takes ~40min+ on first run; `check.sh` does **not** cover it.
+A **separate dispatch-only workflow**, `.github/workflows/slow-smoke.yml`, is deliberately **not** wired to push/PR, so
+the PR-required set stays fast and offline. It triggers only on `workflow_dispatch` (no weekly schedule): a clean-room
+`pip install` → `iopaint download` → erase-model inference spot check that pre-downloads only lama/fcf and runs
+`iopaint/tests/test_local_models.py` (~19 cases) under a 60-minute job timeout. There is **no** persistent weight cache
+(GitHub's 10GB / 7-day cap cannot hold the SD-level assets), so `check.sh` does **not** cover it.
 
 ## The backend serves the built frontend
 
@@ -67,15 +81,14 @@ rm -rf iopaint/web_app && cp -r web_app/dist iopaint/web_app
   `pip install playwright && playwright install chromium`. It also skips itself when `iopaint/web_app` is missing (it
   drives the real built frontend), so a fresh clone without Node still passes. The `webui` CI job installs chromium and
   builds the frontend first, so it actually runs there — and it fails for real if the frontend regresses (verified).
+  It is a **fast** test (not under `-m slow`), and `scripts/check.sh` runs it too.
 
 ### Slow tests (run locally — CI only spot-checks)
 
 `pytest -m slow` pulls tens of GB of weights (SD1.5, ControlNet, erase models) and is only practical on a GPU box.
 GitHub-hosted runners (16GB RAM, CPU-only, no persistent weight cache — 10GB cap / 7-day expiry, so ~20GB would be
-re-downloaded every run) cannot carry the SD-level set: four runs died of memory exhaustion and one hard-crashed the
-runner so badly that no logs were uploaded at all. `.github/workflows/slow-smoke.yml` is therefore a **manual
-clean-room spot check** (install → `iopaint download` → erase-model inference, ~19 cases); the full set belongs on
-this machine.
+re-downloaded every run) cannot carry the SD-level set, so CI only spot-checks erase models (see **Health check**) and
+the full set belongs on this machine.
 
 One-time downloads:
 
@@ -86,7 +99,7 @@ python -m iopaint download --model runwayml/stable-diffusion-inpainting
 # ControlNet / plugin weights download lazily inside the tests (nothing to run)
 ```
 
-Then run — full slow set, or the curated set CI used before narrowing:
+Then run — the full slow set, or this subset, which drops the tests whose weights the repo has no download entry for:
 
 ```bash
 python -m pytest -m slow -v --tb=short --durations=10
@@ -111,13 +124,12 @@ python -m pytest -m slow -v --tb=short \
   service on :8080 — run when it is idle.
 - Fast regression point for the depth-controlnet fix (controlnet-aux 0.0.10 returns a 3-channel depth map):
   `python -m pytest iopaint/tests/test_controlnet.py::test_controlnet_switch -v`.
-- `iopaint/tests/test_gpu_fallback_slow.py` 是**本地才跑得动**的 slow smoke（真实 CUDA OOM → 自动回退 → 失败那块卡
-  必须归零）。它只在 `pytest -m slow` 下收集，需要 ≥2 块可见 CUDA；CI 的 `slow-smoke.yml` 没 GPU，拿到的是 skip
-  而不是失败，所以**永远红不了，也永远跑不到** —— 要验就得在这台机器上：
-  `python -m pytest iopaint/tests/test_gpu_fallback_slow.py -m slow -v`（~1.5s，不下载权重）。
-  OOM 是靠 `set_per_process_memory_fraction` 把本进程预算压到 2% 造出来的，**不会真占卡**，桌面卡上也安全。
-- `iopaint/tests/test_webui.py` 属于**快**测试（不在 `-m slow` 里），`scripts/check.sh` 会跑它；没有 playwright 或
-  没构建前端时它自己 skip。
+- `iopaint/tests/test_gpu_fallback_slow.py` is a **local-only** slow smoke test (real CUDA OOM → automatic fallback →
+  the failed card's memory must be back to zero). It is only collected under `pytest -m slow` and needs ≥2 visible CUDA
+  devices; CI's `slow-smoke.yml` has no GPU, so it gets a skip instead of a failure — it **can never go red and never
+  actually runs**. To verify it, do it on this machine: `python -m pytest iopaint/tests/test_gpu_fallback_slow.py -m slow
+  -v` (~1.5s, no weight downloads). The OOM is produced by squeezing this process's budget to 2% via
+  `set_per_process_memory_fraction`, so it **does not really occupy the GPU** and is safe even on a desktop card.
 
 ## Architecture
 
@@ -146,7 +158,7 @@ python -m pytest -m slow -v --tb=short \
 - `web_app/src/lib/api.ts` is a single axios instance whose response interceptor converts errors into the user-facing
   message (`getErrorMessage`). `API_ENDPOINT` is `VITE_BACKEND + "/api/v1"` in dev and `/api/v1` in production builds.
 - socket.io: the server mounts `/ws` **before** the `/` static mount and requires `socketio_path="/ws/socket.io"`
-  (`api.py:210-218`); the client hardcodes the same path in `components/DiffusionProgress.tsx`. The `/ws` mount must stay
+  (`api.py:Api.__init__`); the client hardcodes the same path in `components/DiffusionProgress.tsx`. The `/ws` mount must stay
   ahead of `/`, or the static mount shadows it and progress events 404.
 - `components/Editor.tsx` (~1900 lines) paints the mask into a separate offscreen canvas: committed strokes live in
   `lineGroups` while the in-progress stroke is in `strokeRef`, and the canvas is only redrawn as "committed + current
@@ -155,24 +167,51 @@ python -m pytest -m slow -v --tb=short \
 - Shared hooks: `useDragResize`, `useImage`, `useInputImage`, `useHotkey`, `useResolution` (viewport breakpoints, not
   model resolution).
 
+## Commit messages
+
+House rule: **statement, not changelog** — a commit message states what *is*, not what *changed*. The diff already records
+the change; the message should read like a small piece of documentation that stays true forever, in the same
+statement-of-current-state voice as "Other gotchas" below. Never write it as a changelog or a debug diary.
+
+- Subject: `[<model>老师]主题` — the bracketed tag is the writing model's own name plus 老师; MiMo wrote
+  `[MiMo老师]...` and a DeepSeek-written commit uses `[DeepSeek老师]`. When more than one model contributes, join
+  the tags with `&` (e.g. `[MiMo老师&DeepSeek老师]`). The tag marks AI-authored subjects so they stay
+  distinguishable from human ones. Keep the repo's CN/EN mix.
+- Body = evidence-first facts a future reader needs. Two shapes:
+  - fix → root cause (`file:line`) → impact (who hits it, what symptom) → fix (why it is equivalent/safe) →
+    measurement (numbers + a re-runnable regression command);
+  - feature / CI / docs → current behavior, key trade-offs and supporting evidence (measured numbers, test counts,
+    time/memory), and the pitfalls not to undo.
+- Every claim is measured: cite the real numbers and their scope (e.g. "fast test suite: 256 passed"); anything not
+  verified is marked `待验证` — never fabricate a result.
+- Cut session narrative: CI run IDs, "grabbed a failure / checked frame by frame / walked the call stack", "compared
+  with the previous version" phrasing. Those describe the working session, not the code, and go stale the moment they
+  are written.
+- The message must match the tree: `git show --stat HEAD` before pushing — a multi-path `git add` aborts wholesale
+  when one pathspec matches nothing, and that once shipped a message describing files the commit didn't contain.
+- Cite only documents the tree actually carries; deleting a doc takes its explicit references with it (decision.md,
+  `37f3b22`). Commits written while a doc existed keep their historical references — but rewriting already-pushed
+  history (rebase reword + `--force-with-lease`, with `git diff <old> HEAD` empty) only ever happens on explicit
+  request.
+- The same rule governs comments: yaml/code comments describe current state too, not the debugging history.
+
 ## Other gotchas
 
-- `scripts/environment.yaml` is a stale lama-cleaner leftover and is not the env for this project. The real, complete env
-  file is the repo-root `environment.yml` (python 3.12, cu121 torch, pytest) — `scripts/setup_conda.sh` uses that one.
-- `requirements.txt` pins `torch==2.3.1+cu121` / `torchvision==0.18.1+cu121` (that's what this machine was built with, and
-  the `+cu121` local version is not on PyPI so it needs a CUDA index — see the comment at the top of the file). The code
-  itself is not CUDA-version sensitive; other CUDA builds (e.g. cu129) run fine. Don't add version gates, don't
-  "fix" these pins, and don't reinstall a working env unprompted. CI filters those two lines out and installs CPU wheels.
-- `iopaint/__init__.py` sets `PYTORCH_ENABLE_MPS_FALLBACK` and torch cache env vars, and `api.py` disables the torch JIT
-  fusers at import. Keep those statements above `import torch`.
-- `iopaint/web_config.py:save_config` builds the pydantic model from `locals()` and is wired to a long positional list of
-  Gradio components — adding a config field means editing the signature, the `save_btn.click` input list, and
-  `default_configs` together.
-- `web_config.py` is a standalone Gradio config editor behind `iopaint start-web-config`; it shares nothing with the
-  `web_app/` frontend, which is the UI actually served at `/`.
-- Ruff is deliberately **not** a dependency any more (it was in `environment.yml` with no config committed, and a
-  repo-wide `ruff check` reports ~1700 pre-existing findings). Don't reintroduce it as a gate; if you want it locally,
-  scope checks to the files you touched and never mass-fix.
-- Chinese + English mixed text is the house style, not a defect: code comments, UI strings and commit subjects are all
-  mixed, and commit subjects are often prefixed `[作者]主题`. When you edit a file, keep the surrounding style, and don't
-  translate, delete, or "normalize" existing Chinese text. Commit subjects follow the same convention.
+`scripts/environment.yaml` is a stale lama-cleaner leftover and is not the env for this project; the real, complete env
+file is the repo-root `environment.yml` (python 3.12, cu121 torch, pytest), which `scripts/setup_conda.sh` uses.
+`requirements.txt` pins `torch==2.3.1+cu121` / `torchvision==0.18.1+cu121` (that's what this machine was built with, and
+the `+cu121` local version is not on PyPI so it needs a CUDA index — see the comment at the top of the file); the code
+itself is not CUDA-version sensitive and other CUDA builds (e.g. cu129) run fine, so don't add version gates, don't
+"fix" these pins, and don't reinstall a working env unprompted — CI filters those two lines out and installs CPU wheels.
+`iopaint/__init__.py` sets `PYTORCH_ENABLE_MPS_FALLBACK` and torch cache env vars, and `api.py` disables the torch JIT
+fusers at import, so keep those statements above `import torch`. `iopaint/web_config.py:save_config` builds the pydantic
+model from `locals()` and is wired to a long positional list of Gradio components, so adding a config field means editing
+the signature, the `save_btn.click` input list, and `default_configs` together; `web_config.py` itself is a standalone
+Gradio config editor behind `iopaint start-web-config` that shares nothing with the `web_app/` frontend, which is the UI
+actually served at `/`. Ruff is deliberately **not** a dependency any more (it was in `environment.yml` with no config
+committed, and a repo-wide `ruff check` reports ~1700 pre-existing findings), so don't reintroduce it as a gate; if you
+want it locally, scope checks to the files you touched and never mass-fix. On language: code comments, UI strings and
+commit subjects are deliberately CN/EN mixed (subjects are prefixed `[<model>老师]`, e.g. `[MiMo老师]`), so when you edit a file
+keep the surrounding style and never translate, delete, or "normalize" existing Chinese text — the mix rule is scoped to
+code / UI / commit text, while AGENTS.md itself stays English because agents read it and it descends from the
+English-speaking upstream.
