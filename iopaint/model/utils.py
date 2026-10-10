@@ -1007,6 +1007,25 @@ def handle_from_pretrained_exceptions(func, **kwargs):
         raise e
 
 
+# fp16 只有带 tensor core 的 Volta(7.0) 及以后才比 fp32 快；Pascal（sm_6x）的
+# fp16 ALU 只有 fp32 的 1/64，用它做推理反而慢好几倍。本机 P104-100(sm_6.1) 实测
+# SD1.5 inpainting：512x512 2.9s/step(fp16) 对 0.6s/step(fp32)、768x1024 27.5s
+# 对 3.8s。所以计算能力 < 7.0 的卡走 fp32。
+FP16_MIN_COMPUTE_CAPABILITY = 7
+
+
+def cuda_supports_fp16(device) -> bool:
+    """该 CUDA 设备是否有硬件加速的 fp16（Volta 及以后带 tensor core）。
+
+    查询失败（无 CUDA、设备号越界）时返回 True，保持「cuda 默认 fp16」的旧行为。
+    """
+    try:
+        major, _minor = torch.cuda.get_device_capability(cuda_device_index(device))
+        return major >= FP16_MIN_COMPUTE_CAPABILITY
+    except Exception:
+        return True
+
+
 def get_torch_dtype(device, no_half: bool):
     # device 可能是 torch.device("cuda:1")、"cuda" 或 Device 枚举
     # （Python 3.11+ 里 str(Device.cuda) 是 "Device.cuda"，直接比 "cuda" 会永远 False）
@@ -1016,7 +1035,7 @@ def get_torch_dtype(device, no_half: bool):
     # https://github.com/huggingface/diffusers/issues/4480
     # pipe.enable_attention_slicing and float16 will cause black output on mps
     # if device in ["cuda", "mps"] and use_fp16:
-    if kind == "cuda" and use_fp16:
+    if kind == "cuda" and use_fp16 and cuda_supports_fp16(device):
         return use_gpu, torch.float16
     return use_gpu, torch.float32
 

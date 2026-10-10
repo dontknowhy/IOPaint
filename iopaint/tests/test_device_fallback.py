@@ -160,28 +160,26 @@ class TestDeviceStr:
         assert cuda_device_index(value) == expected
 
 
-class TestGetTorchDtype:
-    @pytest.mark.parametrize(
-        "device,use_gpu",
-        [
-            (torch.device("cuda"), True),
-            (torch.device("cuda:1"), True),
-            (Device.cuda, True),
-            (torch.device("cpu"), False),
-            (Device.cpu, False),
-            (torch.device("mps"), False),
-        ],
-    )
-    def test_default_is_fp16_on_cuda(self, device, use_gpu):
-        use_fp16, dtype = get_torch_dtype(device, no_half=False)
-        assert use_fp16 is use_gpu
-        assert dtype == (torch.float16 if use_gpu else torch.float32)
+class TestCudaSupportsFp16:
+    def test_matches_compute_capability(self):
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA is not available")
+        from iopaint.model.utils import FP16_MIN_COMPUTE_CAPABILITY, cuda_supports_fp16
 
-    @pytest.mark.parametrize("device", [torch.device("cuda:1"), Device.cuda])
-    def test_no_half_forces_fp32(self, device):
-        use_fp16, dtype = get_torch_dtype(device, no_half=True)
-        assert use_fp16 is True
-        assert dtype == torch.float32
+        for i in range(torch.cuda.device_count()):
+            major, _ = torch.cuda.get_device_capability(i)
+            assert cuda_supports_fp16(torch.device(f"cuda:{i}")) is (
+                major >= FP16_MIN_COMPUTE_CAPABILITY
+            )
+
+    def test_query_failure_defaults_to_true(self, monkeypatch):
+        from iopaint.model.utils import cuda_supports_fp16
+
+        monkeypatch.setattr(
+            "iopaint.model.utils.cuda_device_index",
+            lambda d: (_ for _ in ()).throw(RuntimeError("no cuda")),
+        )
+        assert cuda_supports_fp16(torch.device("cuda")) is True
 
 
 # ---------------------------------------------------------------------------
@@ -443,20 +441,34 @@ class TestGpuEnumeration:
 
 
 class TestGetTorchDtype:
-    """get_torch_dtype 的 device 判定。
+    """get_torch_dtype 的 device / 硬件判定。
 
-    这里改过一个真 bug：原来拿 `str(device)` 去比 `"cuda"`，Python 3.11+ 里
-    `str(Device.cuda) == "Device.cuda"`、`str(torch.device("cuda:1")) == "cuda:1"`，
-    两个都永远不等于 `"cuda"` —— 枚举和 `cuda:N` 会静默退回 fp32（更慢、更吃显存）。
+    这里改过两个真 bug：
+    1. 原来拿 `str(device)` 去比 `"cuda"`，Python 3.11+ 里
+       `str(Device.cuda) == "Device.cuda"`、`str(torch.device("cuda:1")) == "cuda:1"`，
+       两个都永远不等于 `"cuda"` —— 枚举和 `cuda:N` 会静默退回 fp32（更慢、更吃显存）。
+    2. 原来只要 cuda 就选 fp16。Pascal（sm_6x）没有 tensor core，fp16 ALU 只有 fp32 的
+       1/64，fp16 反而不如 fp32：本机 P104-100 实测 SD1.5 512x512 2.9s/step(fp16) 对
+       0.6s/step(fp32)、768x1024 27.5s 对 3.8s。现在按 compute capability 判定。
     """
 
     @pytest.mark.parametrize(
         "device", [torch.device("cuda"), torch.device("cuda:1"), Device.cuda]
     )
-    def test_cuda_defaults_to_fp16(self, device):
+    def test_cuda_with_fast_fp16_uses_fp16(self, device, monkeypatch):
+        monkeypatch.setattr("iopaint.model.utils.cuda_supports_fp16", lambda d: True)
         use_gpu, dtype = get_torch_dtype(device, no_half=False)
         assert use_gpu is True
         assert dtype == torch.float16
+
+    @pytest.mark.parametrize(
+        "device", [torch.device("cuda"), torch.device("cuda:1"), Device.cuda]
+    )
+    def test_cuda_without_fast_fp16_uses_fp32(self, device, monkeypatch):
+        monkeypatch.setattr("iopaint.model.utils.cuda_supports_fp16", lambda d: False)
+        use_gpu, dtype = get_torch_dtype(device, no_half=False)
+        assert use_gpu is True
+        assert dtype == torch.float32
 
     @pytest.mark.parametrize(
         "device", [torch.device("cpu"), Device.cpu, torch.device("mps"), Device.mps]
