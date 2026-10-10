@@ -37,6 +37,7 @@ default_configs = dict(
     model=DEFAULT_MODEL,
     model_dir=DEFAULT_MODEL_DIR,
     no_half=False,
+    force_fp16=False,
     low_mem=False,
     cpu_offload=False,
     disable_nsfw_checker=False,
@@ -89,6 +90,7 @@ def save_config(
     model,
     model_dir,
     no_half,
+    force_fp16,
     low_mem,
     cpu_offload,
     disable_nsfw_checker,
@@ -212,6 +214,9 @@ def main(config_file: Path):
                 )
 
                 no_half = gr.Checkbox(init_config.no_half, label=f"{NO_HALF_HELP}")
+                force_fp16 = gr.Checkbox(
+                    init_config.force_fp16, label=f"{FORCE_FP16_HELP}"
+                )
                 cpu_offload = gr.Checkbox(
                     init_config.cpu_offload, label=f"{CPU_OFFLOAD_HELP}"
                 )
@@ -321,6 +326,7 @@ def main(config_file: Path):
                 model,
                 model_dir,
                 no_half,
+                force_fp16,
                 low_mem,
                 cpu_offload,
                 disable_nsfw_checker,

@@ -157,6 +157,31 @@ class TestApiServerConfig:
 
 
 # ---------------------------------------------------------------------------
+# Api._build_model_manager：force_fp16 透传
+# ---------------------------------------------------------------------------
+
+
+class TestBuildModelManager:
+    def test_force_fp16_is_passed_through(self, tmp_path, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            "iopaint.api.ModelManager",
+            lambda **kwargs: (captured.update(kwargs), object())[1],
+        )
+        cfg = _minimal_config(tmp_path)
+        cfg.force_fp16 = True
+        api = Api.__new__(Api)
+        api.config = cfg
+        api._build_model_manager()
+
+        assert captured["force_fp16"] is True
+        assert captured["no_half"] == cfg.no_half
+
+    def test_force_fp16_defaults_off(self, tmp_path):
+        assert _minimal_config(tmp_path).force_fp16 is False
+
+
+# ---------------------------------------------------------------------------
 # Api.api_current_model
 # ---------------------------------------------------------------------------
 

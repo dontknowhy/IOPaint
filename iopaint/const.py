@@ -42,6 +42,12 @@ Using full precision(fp32) model.
 If your diffusion model generate result is always black or green, use this argument.
 """
 
+FORCE_FP16_HELP = """
+Load diffusion models in half precision(fp16) even on GPUs where fp16 is slower
+(e.g. Pascal). Useful to fit large models (SDXL, PowerPaint V2) that do not fit in
+fp32 on a small card. `--no-half` wins if both are set.
+"""
+
 CPU_OFFLOAD_HELP = """
 Offloads diffusion model's weight to CPU RAM, significantly reducing vRAM usage.
 """

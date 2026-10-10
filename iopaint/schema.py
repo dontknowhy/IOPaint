@@ -256,6 +256,8 @@ class ApiConfig(BaseModel):
     inbrowser: bool
     model: str
     no_half: bool
+    # 强制 diffusion 权重用 fp16 加载（Pascal 上 fp16 更慢，但大模型 fp32 装不下）
+    force_fp16: bool = False
     low_mem: bool
     cpu_offload: bool
     disable_nsfw_checker: bool

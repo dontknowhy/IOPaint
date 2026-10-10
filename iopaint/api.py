@@ -590,6 +590,7 @@ class Api:
             name=self.config.model,
             device=to_torch_device(self.config.device, self.config.gpu_id),
             no_half=self.config.no_half,
+            force_fp16=self.config.force_fp16,
             low_mem=self.config.low_mem,
             disable_nsfw=self.config.disable_nsfw_checker,
             sd_cpu_textencoder=self.config.cpu_textencoder,

@@ -156,6 +156,7 @@ def start(
     ),
     low_mem: bool = Option(False, help=LOW_MEM_HELP),
     no_half: bool = Option(False, help=NO_HALF_HELP),
+    force_fp16: bool = Option(False, help=FORCE_FP16_HELP),
     cpu_offload: bool = Option(False, help=CPU_OFFLOAD_HELP),
     disable_nsfw_checker: bool = Option(False, help=DISABLE_NSFW_HELP),
     cpu_textencoder: bool = Option(False, help=CPU_TEXTENCODER_HELP),
@@ -197,6 +198,8 @@ def start(
 ):
     dump_environment_info()
     device, gpu_id = _resolve_cli_device(device, gpu_id)
+    if force_fp16 and no_half:
+        logger.warning("--force-fp16 is ignored because --no-half (fp32) is set")
     dump_gpu_info(device, gpu_id)
     remove_bg_device = check_device(remove_bg_device)
     realesrgan_device = check_device(realesrgan_device)
@@ -266,6 +269,7 @@ def start(
         inbrowser=inbrowser,
         model=model,
         no_half=no_half,
+        force_fp16=force_fp16,
         low_mem=low_mem,
         cpu_offload=cpu_offload,
         disable_nsfw_checker=disable_nsfw_checker,
