@@ -69,7 +69,7 @@ class ControlNet(DiffusionInpaintModel):
                 )
             )
 
-        use_gpu, torch_dtype = get_torch_dtype(device, kwargs.get("no_half", False))
+        use_gpu, torch_dtype = get_torch_dtype(device, kwargs.get("no_half", False), kwargs.get("force_fp16", False))
         self.torch_dtype = torch_dtype
 
         original_config_file_name = "v1"

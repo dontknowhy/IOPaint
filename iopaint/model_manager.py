@@ -13,7 +13,12 @@ from iopaint.model.brushnet.brushnet_wrapper import BrushNetWrapper
 from iopaint.model.brushnet.brushnet_xl_wrapper import BrushNetXLWrapper
 from iopaint.model.power_paint.power_paint_v2 import PowerPaintV2
 from iopaint.model.utils import torch_gc, is_local_files_only
-from iopaint.runtime import load_with_fallback, device_str
+from iopaint.runtime import (
+    load_with_fallback,
+    device_str,
+    is_out_of_memory,
+    _release_memory,
+)
 from iopaint.schema import InpaintRequest, ModelInfo, ModelType
 
 
@@ -54,18 +59,54 @@ class ModelManager:
 
         返回 (model, 实际生效的 device)。非 OOM 异常原样抛出。
         """
-        model, effective_device, notices = load_with_fallback(
-            lambda dev: self.init_model(
-                name, dev, **{**self.kwargs, **extra_kwargs}
-            ),
-            device,
-        )
-        for it in notices:
+        base_kwargs = {**self.kwargs, **extra_kwargs}
+        notices: List[str] = []
+
+        def loader(dev):
+            try:
+                return self.init_model(name, dev, **base_kwargs)
+            except Exception as e:
+                if not self._should_retry_fp16(dev, e, base_kwargs):
+                    raise
+                err = str(e).splitlines()[0]
+                # 必须在 e 还活着时切断 traceback 链：它挂着 loader → init_model →
+                # 只装了一半的 pipeline（模块间互相引用成环），不清就回收不掉
+                e.__traceback__ = None
+                e.__context__ = None
+                e.__cause__ = None
+                failed = device_str(dev)
+                _release_memory(dev)
+                # 同一张卡退 fp16：大模型（PowerPaint V2/SDXL）fp32 装不下但 fp16 能装；
+                # 这排在 load_with_fallback 换卡/回退 CPU 之前。fp16 也失败就交给外层换卡，
+                # 不额外记提示，免得和换卡提示重复。
+                model = self.init_model(
+                    name, dev, **{**base_kwargs, "force_fp16": True}
+                )
+                msg = f"{failed} out of VRAM with fp32, retried with fp16"
+                logger.warning(f"{msg} (cause: {err})")
+                notices.append(msg)
+                return model
+
+        model, effective_device, runtime_notices = load_with_fallback(loader, device)
+        for it in [*notices, *runtime_notices]:
             if it not in self.device_notices:
                 self.device_notices.append(it)
         # 终端里明确写出「模型最终跑在哪」，和启动时打印的 GPU 清单对得上
         logger.info(f"Model {name} loaded on {device_str(effective_device)}")
         return model, effective_device
+
+    @staticmethod
+    def _should_retry_fp16(dev, e: BaseException, kwargs: dict) -> bool:
+        """fp32 装不下时，是否在同一张卡上退到 fp16。
+
+        只在 cuda + OOM + 用户没显式要 fp32(`no_half`) + 还没退过(`force_fp16`) 时重试。
+        """
+        return (
+            device_str(dev).split(":")[0] == "cuda"
+            and is_out_of_memory(e)
+            and not kwargs.get("no_half", False)
+            and not kwargs.get("force_fp16", False)
+        )
 
     @property
     def current_model(self) -> ModelInfo:
@@ -325,17 +366,29 @@ class ModelManager:
         if self.enable_powerpaint_v2 != config.enable_powerpaint_v2:
             old_enable_powerpaint_v2 = self.enable_powerpaint_v2
             self.enable_powerpaint_v2 = config.enable_powerpaint_v2
-            pipe_components = {"vae": self.model.model.vae}
+
+            # PowerPaintV2 会重新加载全部权重，不像 brushnet/controlnet 复用 pipe_components；
+            # 旧模型留在显存里会让新模型装不下（切 V2 时 OOM→回退 CPU）。先释放再加载，
+            # 失败再回滚重载旧模型。
+            self.model = None
+            torch_gc()
 
             try:
                 model, effective_device = self._load(
-                    self.name,
-                    switch_mps_device(self.name, self.device),
-                    pipe_components=pipe_components,
+                    self.name, switch_mps_device(self.name, self.device)
                 )
             except Exception as e:
                 self.enable_powerpaint_v2 = old_enable_powerpaint_v2
                 logger.error(f"Switch PowerPaintV2 enable/disable failed: {e}")
+                try:
+                    self.model = self.init_model(
+                        self.name,
+                        switch_mps_device(self.name, self.device),
+                        **self.kwargs,
+                    )
+                except Exception as rollback_err:
+                    logger.error(f"Rollback PowerPaintV2 failed too: {rollback_err}")
+                    self.model = None
                 raise
             self.model = model
             self.device = effective_device

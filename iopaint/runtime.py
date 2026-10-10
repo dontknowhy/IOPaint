@@ -81,6 +81,28 @@ def dump_gpu_info(device=None, gpu_id: Optional[int] = None) -> None:
     print("\n".join([f"- {it.describe()}" for it in gpus]) + "\n")
 
 
+def hub_is_reachable(timeout: float = 3.0) -> bool:
+    """探测 HuggingFace endpoint 的 TCP 端口是否可达（带硬超时，绝不会挂死）。
+
+    断网 / DNS 污染时 `huggingface.co` 会在 TCP connect 上无限挂住：diffusers 的
+    `from_pretrained` 会先调 `huggingface_hub.model_info`，而那个 GET **没有超时**
+    （HF_HUB_ETAG_TIMEOUT 只作用于取文件元数据，管不到它），于是整个模型加载卡死。
+    这里只用带超时的 socket 探一下，探不到就让调用方改用本地缓存。
+    """
+    import socket
+    from urllib.parse import urlparse
+
+    endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
+    parsed = urlparse(endpoint)
+    host = parsed.hostname or "huggingface.co"
+    port = parsed.port or (80 if parsed.scheme == "http" else 443)
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def check_device(device: Device) -> Device:
     if device == Device.cuda:
         import platform

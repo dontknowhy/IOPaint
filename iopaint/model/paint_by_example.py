@@ -18,7 +18,7 @@ class PaintByExample(DiffusionInpaintModel):
     def init_model(self, device: torch.device, **kwargs):
         from diffusers import DiffusionPipeline
 
-        use_gpu, torch_dtype = get_torch_dtype(device, kwargs.get("no_half", False))
+        use_gpu, torch_dtype = get_torch_dtype(device, kwargs.get("no_half", False), kwargs.get("force_fp16", False))
         model_kwargs = {
             "local_files_only": is_local_files_only(**kwargs),
         }

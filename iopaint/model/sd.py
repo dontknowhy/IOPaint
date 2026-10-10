@@ -24,7 +24,7 @@ class SD(DiffusionInpaintModel):
     def init_model(self, device: torch.device, **kwargs):
         from diffusers.pipelines.stable_diffusion import StableDiffusionInpaintPipeline
 
-        use_gpu, torch_dtype = get_torch_dtype(device, kwargs.get("no_half", False))
+        use_gpu, torch_dtype = get_torch_dtype(device, kwargs.get("no_half", False), kwargs.get("force_fp16", False))
 
         model_kwargs = {
             **kwargs.get("pipe_components", {}),

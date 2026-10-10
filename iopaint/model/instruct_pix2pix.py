@@ -17,7 +17,7 @@ class InstructPix2Pix(DiffusionInpaintModel):
     def init_model(self, device: torch.device, **kwargs):
         from diffusers import StableDiffusionInstructPix2PixPipeline
 
-        use_gpu, torch_dtype = get_torch_dtype(device, kwargs.get("no_half", False))
+        use_gpu, torch_dtype = get_torch_dtype(device, kwargs.get("no_half", False), kwargs.get("force_fp16", False))
 
         model_kwargs = {"local_files_only": is_local_files_only(**kwargs)}
         if kwargs["disable_nsfw"] or kwargs.get("cpu_offload", False):

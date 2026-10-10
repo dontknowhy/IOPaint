@@ -30,7 +30,7 @@ class SDXL(DiffusionInpaintModel):
     def init_model(self, device: torch.device, **kwargs):
         from diffusers.pipelines import StableDiffusionXLInpaintPipeline
 
-        use_gpu, torch_dtype = get_torch_dtype(device, kwargs.get("no_half", False))
+        use_gpu, torch_dtype = get_torch_dtype(device, kwargs.get("no_half", False), kwargs.get("force_fp16", False))
 
         if self.model_info.model_type == ModelType.DIFFUSERS_SDXL:
             num_in_channels = 4

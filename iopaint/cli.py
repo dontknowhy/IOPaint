@@ -18,6 +18,7 @@ from iopaint.runtime import (
     parse_device_spec,
     resolve_gpu_id,
     to_torch_device,
+    hub_is_reachable,
     DEVICE_SPEC_HELP,
 )
 from iopaint.schema import InteractiveSegModel, Device, RealESRGANModel, RemoveBGModel
@@ -223,6 +224,14 @@ def start(
 
     model_dir = model_dir.expanduser().absolute()
 
+    if not local_files_only and not hub_is_reachable():
+        # 断网 / DNS 污染时 huggingface_hub.model_info 会在 TCP connect 上挂死
+        # （它那个 GET 没有超时），from_pretrained 就永远卡住。探不到就用本地缓存。
+        logger.warning(
+            "HuggingFace hub is unreachable (offline / DNS blocked?), "
+            "use local model cache only"
+        )
+        local_files_only = True
     if local_files_only:
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         os.environ["HF_HUB_OFFLINE"] = "1"

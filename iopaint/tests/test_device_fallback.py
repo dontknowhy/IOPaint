@@ -11,6 +11,7 @@ from iopaint.runtime import (
     GpuInfo,
     cuda_device_index,
     device_str,
+    hub_is_reachable,
     is_out_of_memory,
     load_with_fallback,
     next_bigger_gpu,
@@ -18,7 +19,7 @@ from iopaint.runtime import (
     resolve_gpu_id,
     to_torch_device,
 )
-from iopaint.schema import Device
+from iopaint.schema import Device, InpaintRequest
 
 
 def _gpus(*specs):
@@ -185,6 +186,54 @@ class TestCudaSupportsFp16:
 # ---------------------------------------------------------------------------
 # 显存不足的判定与选卡
 # ---------------------------------------------------------------------------
+class TestHubIsReachable:
+    """启动时用带硬超时的 socket 探测 hub，避免 model_info 无超时挂死。"""
+
+    def test_true_when_connect_succeeds(self, monkeypatch):
+        import contextlib
+
+        monkeypatch.setattr(
+            "socket.create_connection",
+            lambda addr, timeout=None: contextlib.nullcontext(),
+        )
+        assert hub_is_reachable() is True
+
+    def test_false_when_connect_fails(self, monkeypatch):
+        monkeypatch.setattr(
+            "socket.create_connection",
+            lambda addr, timeout=None: (_ for _ in ()).throw(OSError("timeout")),
+        )
+        assert hub_is_reachable() is False
+
+    def test_probes_hf_endpoint_host_and_port(self, monkeypatch):
+        import contextlib
+
+        monkeypatch.setenv("HF_ENDPOINT", "https://hf-mirror.com")
+        seen = {}
+
+        def fake(addr, timeout=None):
+            seen["addr"] = addr
+            return contextlib.nullcontext()
+
+        monkeypatch.setattr("socket.create_connection", fake)
+        hub_is_reachable()
+        assert seen["addr"] == ("hf-mirror.com", 443)
+
+    def test_defaults_to_huggingface(self, monkeypatch):
+        import contextlib
+
+        monkeypatch.delenv("HF_ENDPOINT", raising=False)
+        seen = {}
+
+        def fake(addr, timeout=None):
+            seen["addr"] = addr
+            return contextlib.nullcontext()
+
+        monkeypatch.setattr("socket.create_connection", fake)
+        hub_is_reachable()
+        assert seen["addr"] == ("huggingface.co", 443)
+
+
 class TestIsOutOfMemory:
     def test_message_matched(self):
         assert is_out_of_memory(
@@ -470,6 +519,22 @@ class TestGetTorchDtype:
         assert use_gpu is True
         assert dtype == torch.float32
 
+    @pytest.mark.parametrize("device", [torch.device("cuda"), torch.device("cuda:1")])
+    def test_force_fp16_bypasses_capability(self, device, monkeypatch):
+        # 模型 fp32 装不下时的回退：Pascal 也要能拿到 fp16
+        monkeypatch.setattr("iopaint.model.utils.cuda_supports_fp16", lambda d: False)
+        use_gpu, dtype = get_torch_dtype(device, no_half=False, force_fp16=True)
+        assert use_gpu is True
+        assert dtype == torch.float16
+
+    def test_no_half_beats_force_fp16(self, monkeypatch):
+        # 用户显式 --no-half 时，即便回退请求 fp16 也必须是 fp32
+        monkeypatch.setattr("iopaint.model.utils.cuda_supports_fp16", lambda d: True)
+        _, dtype = get_torch_dtype(
+            torch.device("cuda:1"), no_half=True, force_fp16=True
+        )
+        assert dtype == torch.float32
+
     @pytest.mark.parametrize(
         "device", [torch.device("cpu"), Device.cpu, torch.device("mps"), Device.mps]
     )
@@ -610,3 +675,103 @@ class TestModelManagerFallback:
         with pytest.raises(ValueError):
             mm._load("cv2", torch.device("cuda"))
         assert mm.device_notices == []
+
+    def test_load_retries_fp16_on_the_same_card(self, monkeypatch):
+        # fp32 装不下但 fp16 能装：不换卡、不落 CPU，直接原地退 fp16（PowerPaint V2/SDXL）
+        mm = _bare_manager(torch.device("cuda:1"))
+        monkeypatch.setattr("iopaint.model_manager._release_memory", lambda dev: None)
+        calls = []
+
+        def fake_init(name, device, **kwargs):
+            calls.append(kwargs.get("force_fp16", False))
+            if not kwargs.get("force_fp16"):
+                raise RuntimeError("CUDA out of memory. Tried to allocate 20 MiB")
+            return "model@fp16"
+
+        mm.init_model = fake_init
+        model, device = mm._load("cv2", torch.device("cuda:1"))
+
+        assert model == "model@fp16"
+        assert str(device) == "cuda:1", "退 fp16 成功就不该换卡"
+        assert calls == [False, True]
+        assert mm.device_notice is not None and "fp16" in mm.device_notice
+
+    def test_fp16_retry_only_once_then_switches_device(self, monkeypatch):
+        # 若 fp16 也 OOM，交给 load_with_fallback 换卡，且不重复记 fp16 提示
+        _fake_gpus(monkeypatch, (1989, 1383), (8109, 8018))
+        mm = _bare_manager(torch.device("cuda"))
+        monkeypatch.setattr("iopaint.model_manager._release_memory", lambda dev: None)
+        seen = []
+
+        def fake_init(name, device, **kwargs):
+            seen.append((device_str(device), kwargs.get("force_fp16", False)))
+            if (device.index or 0) == 0:
+                raise RuntimeError("CUDA out of memory")
+            return f"model@{device}"
+
+        mm.init_model = fake_init
+        model, device = mm._load("cv2", torch.device("cuda"))
+
+        assert model == "model@cuda:1"
+        assert seen == [("cuda", False), ("cuda", True), ("cuda:1", False)]
+        assert mm.device_notice is not None
+        assert "fp16" not in mm.device_notice  # 退 fp16 没成功，不该留这条提示
+
+    def test_no_half_disables_fp16_retry(self, monkeypatch):
+        _fake_gpus(monkeypatch, (8109, 8018))
+        mm = _bare_manager(torch.device("cuda"))
+        mm.kwargs = {"no_half": True}
+        monkeypatch.setattr("iopaint.model_manager._release_memory", lambda dev: None)
+        calls = []
+
+        def fake_init(name, device, **kwargs):
+            calls.append(kwargs.get("force_fp16", False))
+            raise RuntimeError("CUDA out of memory")
+
+        mm.init_model = fake_init
+        with pytest.raises(RuntimeError):
+            mm._load("cv2", torch.device("cuda"))
+        assert calls == [False, False], "no_half 下不该带 force_fp16 重试"
+
+    def test_powerpaint_v2_switch_frees_model_before_load(self, monkeypatch):
+        # 切 V2 前必须先释放旧模型，否则「旧模型 + V2」叠加会 OOM 回退 CPU
+        mm = _bare_manager(torch.device("cuda:1"))
+        mm.name = "runwayml/stable-diffusion-v1-5"
+        mm.enable_powerpaint_v2 = False
+        mm.available_models = {
+            mm.name: type("I", (), {"support_powerpaint_v2": True})()
+        }
+        mm.model = "OLD_MODEL"
+        monkeypatch.setattr("iopaint.model_manager.torch_gc", lambda: None)
+        seen = {}
+
+        def fake_load(name, device, **kwargs):
+            seen["model_is_none"] = mm.model is None
+            return "NEW_MODEL", device
+
+        mm._load = fake_load
+        mm.enable_disable_powerpaint_v2(InpaintRequest(enable_powerpaint_v2=True))
+
+        assert seen["model_is_none"] is True, "加载新模型前必须先释放旧模型"
+        assert mm.model == "NEW_MODEL"
+        assert mm.enable_powerpaint_v2 is True
+
+    def test_powerpaint_v2_switch_rolls_back_on_failure(self, monkeypatch):
+        mm = _bare_manager(torch.device("cuda:1"))
+        mm.name = "runwayml/stable-diffusion-v1-5"
+        mm.enable_powerpaint_v2 = False
+        mm.available_models = {
+            mm.name: type("I", (), {"support_powerpaint_v2": True})()
+        }
+        mm.model = "OLD_MODEL"
+        monkeypatch.setattr("iopaint.model_manager.torch_gc", lambda: None)
+        mm._load = lambda name, device, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("load failed")
+        )
+        mm.init_model = lambda name, device, **kwargs: "RELOADED_OLD"
+
+        with pytest.raises(RuntimeError):
+            mm.enable_disable_powerpaint_v2(InpaintRequest(enable_powerpaint_v2=True))
+
+        assert mm.enable_powerpaint_v2 is False  # flag 回滚
+        assert mm.model == "RELOADED_OLD"  # 旧模型重载回来

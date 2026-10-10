@@ -16,7 +16,7 @@ class Kandinsky(DiffusionInpaintModel):
     def init_model(self, device: torch.device, **kwargs):
         from diffusers import AutoPipelineForInpainting
 
-        use_gpu, torch_dtype = get_torch_dtype(device, kwargs.get("no_half", False))
+        use_gpu, torch_dtype = get_torch_dtype(device, kwargs.get("no_half", False), kwargs.get("force_fp16", False))
 
         model_kwargs = {
             "torch_dtype": torch_dtype,

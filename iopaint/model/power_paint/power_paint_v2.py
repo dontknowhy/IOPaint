@@ -41,7 +41,7 @@ class PowerPaintV2(DiffusionInpaintModel):
         )
         from .powerpaint_tokenizer import PowerPaintTokenizer
 
-        use_gpu, torch_dtype = get_torch_dtype(device, kwargs.get("no_half", False))
+        use_gpu, torch_dtype = get_torch_dtype(device, kwargs.get("no_half", False), kwargs.get("force_fp16", False))
         model_kwargs = {"local_files_only": is_local_files_only(**kwargs)}
         if kwargs["disable_nsfw"] or kwargs.get("cpu_offload", False):
             logger.info("Disable Stable Diffusion Model NSFW checker")

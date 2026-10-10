@@ -39,7 +39,7 @@ class BrushNetXLWrapper(DiffusionInpaintModel):
         self.brushnet_xl_method = SDXL_BRUSHNET_CHOICES[0]
         # self.brushnet_xl_method = kwargs["brushnet_xl_method"]
 
-        use_gpu, torch_dtype = get_torch_dtype(device, kwargs.get("no_half", False))
+        use_gpu, torch_dtype = get_torch_dtype(device, kwargs.get("no_half", False), kwargs.get("force_fp16", False))
         self.torch_dtype = torch_dtype
 
         model_kwargs = {

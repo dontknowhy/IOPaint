@@ -35,7 +35,7 @@ class AnyText(DiffusionInpaintModel):
     def init_model(self, device, **kwargs):
         local_files_only = is_local_files_only(**kwargs)
         ckpt_path, font_path = self.download(local_files_only)
-        use_gpu, torch_dtype = get_torch_dtype(device, kwargs.get("no_half", False))
+        use_gpu, torch_dtype = get_torch_dtype(device, kwargs.get("no_half", False), kwargs.get("force_fp16", False))
         self.model = AnyTextPipeline(
             ckpt_path=ckpt_path,
             font_path=font_path,
