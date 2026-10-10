@@ -87,6 +87,14 @@ class InpaintModel:
     def forward_post_process(self, result, image, mask, config):
         return result, image, mask
 
+    def _forward_region(self, image, mask, config: InpaintRequest):
+        """对一块区域做推理。
+
+        erase 模型直接 padding；diffusion 模型覆盖本方法，先按 sd_scale 缩放，
+        这样 hd_strategy 的 crop/resize 对两类模型都成立。
+        """
+        return self._pad_forward(image, mask, config)
+
     @torch.no_grad()
     def __call__(self, image, mask, config: InpaintRequest):
         """
@@ -124,7 +132,7 @@ class InpaintModel:
                 logger.info(
                     f"Run resize strategy, origin size: {image.shape} forward size: {downsize_image.shape}"
                 )
-                inpaint_result = self._pad_forward(
+                inpaint_result = self._forward_region(
                     downsize_image, downsize_mask, config
                 )
 
@@ -141,7 +149,7 @@ class InpaintModel:
                 )
 
         if inpaint_result is None:
-            inpaint_result = self._pad_forward(image, mask, config)
+            inpaint_result = self._forward_region(image, mask, config)
 
         return inpaint_result
 
@@ -277,7 +285,7 @@ class InpaintModel:
         """
         crop_img, crop_mask, [l, t, r, b] = self._crop_box(image, mask, box, config)
 
-        return self._pad_forward(crop_img, crop_mask, config), [l, t, r, b]
+        return self._forward_region(crop_img, crop_mask, config), [l, t, r, b]
 
 
 class DiffusionInpaintModel(InpaintModel):
@@ -304,9 +312,15 @@ class DiffusionInpaintModel(InpaintModel):
         elif config.use_extender:
             inpaint_result = self._do_outpainting(image, config)
         else:
-            inpaint_result = self._scaled_pad_forward(image, mask, config)
+            # diffusion 模型此前直接整图 _scaled_pad_forward；现在和 erase 模型一样走
+            # hd_strategy 的 crop/resize，避免大图全分辨率入网（8G 卡上会 OOM）
+            return super().__call__(image, mask, config)
 
         return inpaint_result
+
+    def _forward_region(self, image, mask, config: InpaintRequest):
+        # hd_strategy 的 crop/resize 只负责圈定区域；这里再按 sd_scale 缩放
+        return self._scaled_pad_forward(image, mask, config)
 
     def _do_outpainting(self, image, config: InpaintRequest):
         # cropper 和 image 在同一个坐标系下，croper_x/y 可能为负数

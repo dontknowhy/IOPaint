@@ -176,6 +176,7 @@ def start(
         "Disabled by default for faster repeated inference, "
         "enable it if you run into CUDA out of memory errors.",
     ),
+    hd_strategy_crop_margin: int = Option(128, help=HD_STRATEGY_CROP_MARGIN_HELP),
     enable_interactive_seg: bool = Option(False, help=INTERACTIVE_SEG_HELP),
     interactive_seg_model: InteractiveSegModel = Option(
         InteractiveSegModel.sam2_1_tiny, help=INTERACTIVE_SEG_MODEL_HELP
@@ -268,6 +269,7 @@ def start(
         output_dir=output_dir,
         quality=quality,
         empty_cache_after_inpaint=empty_cache_after_inpaint,
+        hd_strategy_crop_margin=hd_strategy_crop_margin,
         enable_interactive_seg=enable_interactive_seg,
         interactive_seg_model=interactive_seg_model,
         interactive_seg_device=interactive_seg_device,

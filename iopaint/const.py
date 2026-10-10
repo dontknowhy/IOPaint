@@ -63,6 +63,12 @@ If loading runs out of VRAM, IOPaint automatically retries on a GPU with more
 headroom, then falls back to CPU, and reports it in terminal and WebUI.
 """
 
+HD_STRATEGY_CROP_MARGIN_HELP = """
+Pixel margin added around the mask bounding box when hd_strategy=Crop. Applies to
+both erase models (lama/mat/...) and diffusion models (SD/SDXL/...). Larger gives
+more surrounding context to the model at the cost of more VRAM/time.
+"""
+
 SD_CONTROLNET_CHOICES: List[str] = [
     "lllyasviel/control_v11p_sd15_canny",
     # "lllyasviel/control_v11p_sd15_seg",

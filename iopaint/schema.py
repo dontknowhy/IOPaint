@@ -269,6 +269,8 @@ class ApiConfig(BaseModel):
     output_dir: Optional[Path]
     quality: int
     empty_cache_after_inpaint: bool = False
+    # hd_strategy=Crop 时掩膜外扩的边距；同时作用于 erase 与 diffusion 模型
+    hd_strategy_crop_margin: int = 128
     enable_interactive_seg: bool
     interactive_seg_model: InteractiveSegModel
     interactive_seg_device: Device
@@ -299,7 +301,7 @@ class InpaintRequest(BaseModel):
 
     hd_strategy: str = Field(
         HDStrategy.CROP,
-        description="Different way to preprocess image, only used by erase models(e.g. lama/mat)",
+        description="Different way to preprocess image, used by erase models(e.g. lama/mat) and diffusion models(e.g. SD/SDXL)",
     )
     hd_strategy_crop_trigger_size: int = Field(
         800,

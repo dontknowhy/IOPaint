@@ -49,6 +49,7 @@ default_configs = dict(
     output_dir=None,
     quality=95,
     empty_cache_after_inpaint=False,
+    hd_strategy_crop_margin=128,
     enable_interactive_seg=False,
     interactive_seg_model=InteractiveSegModel.sam2_1_tiny,
     interactive_seg_device=Device.cpu,
@@ -100,6 +101,7 @@ def save_config(
     output_dir,
     quality,
     empty_cache_after_inpaint,
+    hd_strategy_crop_margin,
     enable_interactive_seg,
     interactive_seg_model,
     interactive_seg_device,
@@ -201,6 +203,12 @@ def main(config_file: Path):
                     init_config.empty_cache_after_inpaint,
                     label="Empty CUDA cache after each inpainting. "
                     "Disabled by default for faster repeated inference.",
+                )
+                hd_strategy_crop_margin = gr.Number(
+                    value=init_config.hd_strategy_crop_margin,
+                    precision=0,
+                    minimum=0,
+                    label="Crop margin (px) for hd_strategy=Crop. Applies to erase and diffusion models.",
                 )
 
                 no_half = gr.Checkbox(init_config.no_half, label=f"{NO_HALF_HELP}")
@@ -325,6 +333,7 @@ def main(config_file: Path):
                 output_dir,
                 quality,
                 empty_cache_after_inpaint,
+                hd_strategy_crop_margin,
                 enable_interactive_seg,
                 interactive_seg_model,
                 interactive_seg_device,

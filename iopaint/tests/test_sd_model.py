@@ -148,6 +148,39 @@ def test_runway_sd_cpu_textencoder(device, strategy, sampler):
     )
 
 
+@pytest.mark.parametrize("device", ["cuda"])
+@pytest.mark.parametrize("strategy", [HDStrategy.CROP, HDStrategy.RESIZE])
+def test_runway_sd_hd_strategy(device, strategy):
+    """diffusion 也要走 hd_strategy：CROP 在掩膜附近裁剪、RESIZE 缩小长边。
+
+    测试图放大 1.5x(=768) 后超过 get_config 的 trigger/limit(200)，两条分支都会命中；
+    大图在 8G 卡上不再整图全分辨率入网。
+    """
+    sd_steps = check_device(device)
+    model = ModelManager(
+        name="runwayml/stable-diffusion-inpainting",
+        device=torch.device(device),
+        disable_nsfw=True,
+        sd_cpu_textencoder=False,
+    )
+    cfg = get_config(
+        strategy=strategy,
+        prompt="a fox sitting on a bench",
+        sd_steps=sd_steps,
+    )
+    cfg.sd_sampler = SDSampler.ddim
+
+    assert_equal(
+        model,
+        cfg,
+        f"runway_sd_{strategy.capitalize()}_device_{device}.png",
+        img_p=current_dir / "overture-creations-5sI6fQgYIuo.png",
+        mask_p=current_dir / "overture-creations-5sI6fQgYIuo_mask.png",
+        fx=1.5,
+        fy=1.5,
+    )
+
+
 @pytest.mark.parametrize("device", ["cuda", "mps", "cpu"])
 @pytest.mark.parametrize("strategy", [HDStrategy.ORIGINAL])
 @pytest.mark.parametrize("sampler", [SDSampler.ddim])

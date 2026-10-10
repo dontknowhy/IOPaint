@@ -422,6 +422,8 @@ class Api:
 
     def _inpaint_blocking(self, req: InpaintRequest) -> tuple:
         """同步版 inpaint：decode → inference → encode。跑在线程池里。"""
+        # 裁剪边距以服务端 config.json 为准（前端下发的是常量，不暴露给用户）
+        req.hd_strategy_crop_margin = self.config.hd_strategy_crop_margin
         image, alpha_channel, infos, ext = decode_base64_to_image(req.image)
         mask, _, _, _ = decode_base64_to_image(req.mask, gray=True)
         logger.debug(f"image ext: {ext}")
