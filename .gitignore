@@ -10,3 +10,5 @@ IOPaint.egg-info/
 venv/
 tmp/
 iopaint/web_app/
+# coverage.py 运行数据（`coverage run -m pytest` 每次重建，report 的输入）
+.coverage
