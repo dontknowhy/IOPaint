@@ -34,13 +34,17 @@ Frontend (`cd web_app`):
   **no** Vite proxy, so dev requests are cross-origin to the backend (CORS is `*`). Production builds ignore it
   (`api.ts` uses `/api/v1` unless `import.meta.env.DEV`).
 - `npm run build` = `tsc && vite build`; `npm run lint` = ESLint 9 flat config with `--max-warnings 0` (warnings fail).
+- `npm run test` = `vitest run` (jsdom; `src/**/*.test.ts`, config in `web_app/vitest.config.ts`); `npm run test:watch`
+  for watch mode. Vitest lives in `web_app/node_modules` like every other dev dep; its coverage output dir
+  (`web_app/coverage`) is gitignored.
 - `npm run preview`. Node version pinned in `web_app/.nvmrc` (Vite 7 needs >=22.12).
 
 ## Health check
 
-`bash scripts/check.sh` = `pytest -m "not slow"` + `npm run lint` + `npm run build` + copy `web_app/dist` into
-`iopaint/web_app`. Runs the same commands as `.github/workflows/ci.yml`; keep them in sync. Three CI jobs: `backend`
-(`pytest -m "not slow"`), `frontend` (lint + build), `webui` (playwright against the built UI).
+`bash scripts/check.sh` = `pytest -m "not slow"` + `npm run lint` + `npm run test` + `npm run build` + copy
+`web_app/dist` into `iopaint/web_app`. Runs the same commands as `.github/workflows/ci.yml`; keep them in sync. Three
+CI jobs: `backend`
+(`pytest -m "not slow"`), `frontend` (lint + test + build), `webui` (playwright against the built UI).
 
 A **separate dispatch-only workflow**, `.github/workflows/slow-smoke.yml`, is deliberately **not** wired to push/PR, so
 the PR-required set stays fast and offline. It triggers only on `workflow_dispatch` (no weekly schedule): a clean-room

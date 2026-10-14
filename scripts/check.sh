@@ -15,6 +15,10 @@ echo "=== frontend: npm run lint ==="
 (cd web_app && npm run lint)
 
 echo ""
+echo "=== frontend: npm run test (vitest) ==="
+(cd web_app && npm run test)
+
+echo ""
 echo "=== frontend: npm run build ==="
 (cd web_app && npm run build)
 
