@@ -464,8 +464,6 @@ class InpaintRequest(BaseModel):
 
         if self.enable_controlnet:
             logger.info("ControlNet is enabled, set enable_brushnet=False")
-            if self.enable_brushnet:
-                self.enable_brushnet = False
 
         return self
 

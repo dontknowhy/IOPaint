@@ -250,7 +250,8 @@ class FileManager:
         image = Image.new("L", size, color)
         image.paste(
             original_image,
-            tuple(map(lambda x: (x[0] - x[1]) / 2, zip(size, original_image.size))),
+            # 整数除法：Pillow>=10 的 paste 拒绝浮点坐标（旧版 /2 会算出 .5 直接 TypeError）
+            tuple((a - b) // 2 for a, b in zip(size, original_image.size)),
         )
 
         return image
@@ -264,10 +265,7 @@ class FileManager:
         return "JPEG"
 
     def _create_thumbnail(self, image, size, crop="fit", background=None):
-        try:
-            resample = Image.Resampling.LANCZOS
-        except AttributeError:  # pylint: disable=raise-missing-from
-            resample = Image.ANTIALIAS
+        resample = Image.Resampling.LANCZOS
 
         if crop == "fit":
             image = ImageOps.fit(image, size, resample)

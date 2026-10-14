@@ -1,11 +1,11 @@
 # https://github.com/huggingface/huggingface_hub/blob/5a12851f54bf614be39614034ed3a9031922d297/src/huggingface_hub/utils/_runtime.py
+import importlib.metadata as importlib_metadata
 import os
 import platform
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-import packaging.version
 from iopaint.schema import Device
 from loguru import logger
 from rich import print
@@ -15,13 +15,6 @@ from typing import Dict, Any, List, Optional, Tuple
 DEVICE_SPEC_HELP = "cpu | cuda | cuda:N (使用第 N 块 GPU) | mps"
 GPU_ENV_VAR = "IOPaint_GPU"
 
-
-_PY_VERSION: str = sys.version.split()[0].rstrip("+")
-
-if packaging.version.Version(_PY_VERSION) < packaging.version.Version("3.8.0"):
-    import importlib_metadata  # type: ignore
-else:
-    import importlib.metadata as importlib_metadata  # type: ignore
 
 _package_versions = {}
 
