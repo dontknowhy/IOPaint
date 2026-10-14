@@ -1,6 +1,6 @@
 // utils.ts 纯逻辑单测（vitest + jsdom）。只测不依赖真实 canvas/网络的部分：
 // 错误消息格式化、保存文件名、包围盒、笔迹绘制（fake ctx）、点击类型判定、坐标换算。
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
   buildDownloadName,
   drawLines,
@@ -176,7 +176,19 @@ describe("mouseXY", () => {
 
 describe("generateMask guard", () => {
   it("throws when 2d context is unavailable", () => {
-    // jsdom 没装 canvas 后端 → getContext 返回 null，走防御分支
-    expect(() => generateMask(10, 10, [])).toThrow("could not retrieve mask canvas")
+    // jsdom 没装 canvas 后端时，getContext 会走 notImplemented：先往 virtual console
+    // 打一条带调用栈的 "Not implemented" 错误（vitest 转发到 stderr，形似测试崩溃）
+    // 再返回 null。这里显式 stub 成 null：既消掉这段误导性输出，也把「取不到 2d ctx」
+    // 这个前置条件钉死，测试断言的仍是 generateMask 的空 ctx 防御分支。
+    const spy = vi
+      .spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockReturnValue(null)
+    try {
+      expect(() => generateMask(10, 10, [])).toThrow(
+        "could not retrieve mask canvas"
+      )
+    } finally {
+      spy.mockRestore()
+    }
   })
 })
