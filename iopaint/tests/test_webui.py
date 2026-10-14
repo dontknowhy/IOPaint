@@ -56,6 +56,40 @@ def _upload_image(page_obj, tmp_path):
     page_obj.locator("canvas").first.wait_for(state="visible", timeout=10000)
 
 
+def _fresh_page(browser_instance, iopaint_server):
+    """独立 context 的干净页面：settings 存在 localStorage 里，
+    新 context 才能保证「默认设置」的断言不被共享 page 的历史污染。"""
+    ctx = browser_instance.new_context(viewport={"width": 1280, "height": 720})
+    pg = ctx.new_page()
+    pg.goto(iopaint_server, wait_until="load", timeout=30000)
+    pg.wait_for_timeout(2000)
+    return ctx, pg
+
+
+def _draw_stroke(page_obj, dx=40):
+    """在画布中心横着划一笔并松手（auto 模式下松手即触发 /inpaint）。"""
+    bb = page_obj.locator("canvas").first.bounding_box()
+    cx, cy = bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2
+    page_obj.mouse.move(cx - dx, cy)
+    page_obj.mouse.down()
+    page_obj.mouse.move(cx + dx, cy, steps=10)
+    page_obj.mouse.up()
+
+
+def _save_button(page_obj):
+    """Save Image 按钮：IconButton 没有可访问名字，靠 lucide-download 图标定位，
+    全仓库只有 Editor 的保存按钮用这个图标。renders.length 决定它的 disabled。"""
+    return page_obj.locator("button:has(svg.lucide-download)")
+
+
+def _wait_interactive(page_obj):
+    """Radix Select/Dialog 关闭动画期间会给 body 挂 pointer-events:none，
+    此时画布上的鼠标事件全部落空（实测约 300ms）。等它复位再画。"""
+    page_obj.wait_for_function(
+        "() => document.body.style.pointerEvents !== 'none'", timeout=5000
+    )
+
+
 # ── Tests ─────────────────────────────────────────────────────────────
 
 class TestPageLoad:
@@ -308,5 +342,199 @@ class TestDeviceNoticeToast:
         pg.wait_for_timeout(1500)
         count = pg.get_by_text(self.NOTICE).count()
         assert count == 1, f"同一条 deviceNotice 弹了 {count} 次"
+
+        ctx.close()
+
+
+# ── 第二轮扩充：对话框热键、笔刷热键、cv2 整链路、错误 toast、开关契约 ──
+
+class TestDialogHotkeys:
+    """h / s 两个对话框热键在真实浏览器里的开关契约。"""
+
+    def test_h_toggles_hotkeys_dialog(self, page):
+        page.keyboard.press("h")
+        expect(page.get_by_text("Toggle Hotkeys Dialog")).to_be_visible(timeout=3000)
+        # 第二次按 h 必须关掉：useToggle + useHotKey 的 enabled 状态不能把自己卡死
+        page.keyboard.press("h")
+        expect(page.get_by_text("Toggle Hotkeys Dialog")).to_be_hidden(timeout=3000)
+
+    def test_s_opens_settings_dialog_and_escape_closes(self, page):
+        page.keyboard.press("s")
+        heading = page.get_by_role("heading", name="Settings")
+        expect(heading).to_be_visible(timeout=3000)
+        # General 页里的开关文案在场，说明 tab 内容真的渲染了（不是空壳对话框）
+        page.get_by_role("button", name="General").click()
+        expect(page.get_by_text("Enable manual inpainting")).to_be_visible(timeout=3000)
+        page.keyboard.press("Escape")
+        expect(heading).to_be_hidden(timeout=3000)
+
+
+class TestBrushSizeHotkeys:
+    """[ / ] 必须真的改到底部笔刷滑块的值（role=slider, max=200 是笔刷那根；
+    cv2 面板的 radius 滑块是 max=100，用 aria-valuemax 区分）。"""
+
+    def test_bracket_keys_adjust_brush_slider(self, page, tmp_path):
+        # 底部笔刷滑块随 Editor 一起挂载，没有图片时不渲染，先上传
+        _upload_image(page, tmp_path)
+        slider = page.locator('[role="slider"][aria-valuemax="200"]')
+        expect(slider).to_be_visible(timeout=3000)
+
+        before = int(slider.get_attribute("aria-valuenow"))
+        page.keyboard.press("]")
+        # not_to_have_attribute 会轮询到超时：等 React 把新值刷进 aria-valuenow
+        expect(slider).not_to_have_attribute("aria-valuenow", str(before), timeout=3000)
+        after_inc = int(slider.get_attribute("aria-valuenow"))
+        assert after_inc > before, f"']' 没有增大笔刷: {before} -> {after_inc}"
+
+        page.keyboard.press("[")
+        expect(slider).not_to_have_attribute("aria-valuenow", str(after_inc), timeout=3000)
+        after_dec = int(slider.get_attribute("aria-valuenow"))
+        assert after_dec < after_inc, f"'[' 没有减小笔刷: {after_inc} -> {after_dec}"
+
+
+class TestInpaintRoundTrip:
+    """cv2 真后端整链路：画一笔 → /inpaint 200 → 渲染进 renders →
+    Save 解禁；Ctrl+Z 撤掉渲染（renders 弹栈）、Ctrl+Shift+Z 恢复。"""
+
+    def test_stroke_to_render_and_undo_redo(
+        self, browser_instance, iopaint_server, tmp_path
+    ):
+        ctx, pg = _fresh_page(browser_instance, iopaint_server)
+        _upload_image(pg, tmp_path)
+
+        save_btn = _save_button(pg)
+        expect(save_btn).to_be_disabled(timeout=3000)
+
+        with pg.expect_response("**/inpaint", timeout=20000) as resp_info:
+            _draw_stroke(pg)
+        resp = resp_info.value
+        assert resp.status == 200, f"/inpaint 返回 {resp.status}"
+        assert len(resp.body()) > 0, "/inpaint 返回了空 body"
+
+        expect(save_btn).to_be_enabled(timeout=10000)
+        # 成功路径不应出现拦截器给错误加的截图提示
+        assert pg.get_by_text("Please take a screenshot", exact=False).count() == 0
+
+        pg.keyboard.press("Control+z")
+        expect(save_btn).to_be_disabled(timeout=3000)
+        pg.keyboard.press("Control+Shift+z")
+        expect(save_btn).to_be_enabled(timeout=3000)
+
+        ctx.close()
+
+
+class TestInpaintErrorToast:
+    """后端 500 → axios 拦截器把 detail 拍平成一行 + 追加截图提示 → destructive
+    toast；且失败不会产生 render（Save 保持 disabled）。"""
+
+    DETAIL = "boom from webui test"
+
+    def test_error_detail_reaches_toast(self, browser_instance, iopaint_server, tmp_path):
+        ctx, pg = _fresh_page(browser_instance, iopaint_server)
+
+        def fail(route):
+            route.fulfill(
+                status=500,
+                content_type="application/json",
+                body=json.dumps({"detail": self.DETAIL}),
+            )
+
+        pg.route("**/inpaint", fail)
+        _upload_image(pg, tmp_path)
+        _draw_stroke(pg)
+
+        expect(pg.get_by_text(self.DETAIL)).to_be_visible(timeout=8000)
+        expect(
+            pg.get_by_text(
+                "Please take a screenshot of the detailed error message in your terminal"
+            )
+        ).to_be_visible(timeout=3000)
+        expect(_save_button(pg)).to_be_disabled(timeout=3000)
+
+        ctx.close()
+
+
+class TestCv2FlagRequest:
+    """设置面板里换 CV2 Flag → 后续 /inpaint 请求体里的 cv2_flag 必须跟着变
+    （设置 → axios payload 的贯通契约）。"""
+
+    def test_selecting_telea_changes_payload(
+        self, browser_instance, iopaint_server, tmp_path
+    ):
+        ctx, pg = _fresh_page(browser_instance, iopaint_server)
+
+        trigger = pg.locator("button").filter(has_text="INPAINT_NS")
+        expect(trigger).to_be_visible(timeout=3000)
+        trigger.click()
+        pg.get_by_role("option", name="INPAINT_TELEA").click()
+        expect(
+            pg.locator("button").filter(has_text="INPAINT_TELEA")
+        ).to_be_visible(timeout=3000)
+        _wait_interactive(pg)
+
+        captured = {}
+
+        def capture(route):
+            captured["body"] = route.request.post_data_buffer
+            route.abort()
+
+        pg.route("**/inpaint", capture)
+        _upload_image(pg, tmp_path)
+        _draw_stroke(pg)
+
+        deadline = time.time() + 8
+        while time.time() < deadline and "body" not in captured:
+            pg.wait_for_timeout(200)
+        pg.unroute("**/inpaint")
+
+        assert "body" in captured, "画完一笔却没有发出 /inpaint 请求"
+        payload = json.loads(captured["body"].decode("utf-8"))
+        assert payload["cv2_flag"] == "INPAINT_TELEA", payload["cv2_flag"]
+
+        ctx.close()
+
+
+class TestManualInpainting:
+    """General 页的 Enable manual inpainting 开关：打开后画笔不再自动打
+    /inpaint，Shift+R 才触发（编辑器里的手动模式热键契约）。"""
+
+    def test_manual_mode_defers_run_until_shift_r(
+        self, browser_instance, iopaint_server, tmp_path
+    ):
+        ctx, pg = _fresh_page(browser_instance, iopaint_server)
+
+        # s 开对话框 → General → 拨开关 → 再按 s（Settings 的热键 handler 里
+        # toggleOpen 后用闭包里的 open==true 显式调 onSubmit，落库不依赖 DOM 提交）
+        pg.keyboard.press("s")
+        expect(pg.get_by_role("heading", name="Settings")).to_be_visible(timeout=3000)
+        pg.get_by_role("button", name="General").click()
+        manual_switch = pg.get_by_role("switch").first
+        manual_switch.click()
+        expect(manual_switch).to_have_attribute("aria-checked", "true", timeout=3000)
+        pg.keyboard.press("s")
+        expect(pg.get_by_role("heading", name="Settings")).to_be_hidden(timeout=3000)
+        # 模态 Dialog 关闭动画同样会短暂锁住 body 的 pointer-events
+        _wait_interactive(pg)
+
+        _upload_image(pg, tmp_path)
+
+        captured = []
+
+        def capture(route):
+            captured.append(route.request.post_data_buffer)
+            route.abort()
+
+        pg.route("**/inpaint", capture)
+
+        _draw_stroke(pg)
+        pg.wait_for_timeout(1500)
+        assert not captured, "手动模式下画完一笔不该自动打 /inpaint"
+
+        pg.keyboard.press("Shift+R")
+        deadline = time.time() + 8
+        while time.time() < deadline and not captured:
+            pg.wait_for_timeout(200)
+        pg.unroute("**/inpaint")
+        assert captured, "Shift+R 没有触发 /inpaint"
 
         ctx.close()
