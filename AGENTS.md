@@ -9,11 +9,11 @@ frontend (`web_app/`) that is compiled into the Python package and served by the
 - [Health check](#health-check)
 - [The backend serves the built frontend](#the-backend-serves-the-built-frontend)
 - [Tests](#tests)
-  - [Slow tests (run locally — CI only spot-checks)](#slow-tests-run-locally--ci-only-spot-checks)
 - [Architecture](#architecture)
-- [Frontend notes](#frontend-notes)
 - [Commit messages](#commit-messages)
 - [Other gotchas](#other-gotchas)
+- [Agent docs index](#agent-docs-index)
+- [Multi-batch agent tasks](#multi-batch-agent-tasks)
 
 ## Commands
 
@@ -89,51 +89,9 @@ rm -rf iopaint/web_app && cp -r web_app/dist iopaint/web_app
 
 ### Slow tests (run locally — CI only spot-checks)
 
-`pytest -m slow` pulls tens of GB of weights (SD1.5, ControlNet, erase models) and is only practical on a GPU box.
-GitHub-hosted runners (16GB RAM, CPU-only, no persistent weight cache — 10GB cap / 7-day expiry, so ~20GB would be
-re-downloaded every run) cannot carry the SD-level set, so CI only spot-checks erase models (see **Health check**) and
-the full set belongs on this machine.
-
-One-time downloads:
-
-```bash
-for m in lama ldm zits mat fcf manga migan; do python -m iopaint download --model "$m"; done
-python -m iopaint download --model runwayml/stable-diffusion-v1-5
-python -m iopaint download --model runwayml/stable-diffusion-inpainting
-# ControlNet / plugin weights download lazily inside the tests (nothing to run)
-```
-
-Then run — the full slow set, or this subset, which drops the tests whose weights the repo has no download entry for:
-
-```bash
-python -m pytest -m slow -v --tb=short --durations=10
-```
-
-```bash
-python -m pytest -m slow -v --tb=short \
-  --ignore=iopaint/tests/test_instruct_pix2pix.py \
-  --ignore=iopaint/tests/test_sdxl.py \
-  --ignore=iopaint/tests/test_paint_by_example.py \
-  --ignore=iopaint/tests/test_brushnet.py \
-  --deselect=iopaint/tests/test_sd_model.py::test_local_file_path \
-  --deselect=iopaint/tests/test_controlnet.py::test_local_file_path
-```
-
-- The `--ignore`d files need single-file ckpts / repos the repo has no download entry for (5-21GB each; 19.4GB for
-  the two deselected `test_local_file_path` params).
-- Don't add `--forked` on this GPU box: pytest-forked forks the runtest protocol, torch then raises
-  `Cannot re-initialize CUDA in forked subprocess` (measured locally). CI has no GPU, so it *does* pass `--forked`
-  to bound memory; if you ever need forked locally, set `CUDA_VISIBLE_DEVICES=""`.
-- Tests never bind ports (in-process `TestClient` / `ModelManager`), but the single GPU is shared with the production
-  service on :8080 — run when it is idle.
-- Fast regression point for the depth-controlnet fix (controlnet-aux 0.0.10 returns a 3-channel depth map):
-  `python -m pytest iopaint/tests/test_controlnet.py::test_controlnet_switch -v`.
-- `iopaint/tests/test_gpu_fallback_slow.py` is a **local-only** slow smoke test (real CUDA OOM → automatic fallback →
-  the failed card's memory must be back to zero). It is only collected under `pytest -m slow` and needs ≥2 visible CUDA
-  devices; CI's `slow-smoke.yml` has no GPU, so it gets a skip instead of a failure — it **can never go red and never
-  actually runs**. To verify it, do it on this machine: `python -m pytest iopaint/tests/test_gpu_fallback_slow.py -m slow
-  -v` (~1.5s, no weight downloads). The OOM is produced by squeezing this process's budget to 2% via
-  `set_per_process_memory_fraction`, so it **does not really occupy the GPU** and is safe even on a desktop card.
+Slow tests: see docs/agents/slow-tests.md (trigger: running or extending the weight-heavy `pytest -m slow` suite, or
+downloading model weights). CI only spot-checks erase models via the dispatch-only `slow-smoke.yml`; the full set
+belongs on a local GPU box.
 
 ## Architecture
 
@@ -157,19 +115,8 @@ python -m pytest -m slow -v --tb=short \
 
 ## Frontend notes
 
-- One zustand store in `web_app/src/lib/states.ts` (`persist` + `immer` + `createWithEqualityFn`); the `Settings` type
-  lives there too, magic numbers in `web_app/src/lib/const.ts`. `model` is deliberately not persisted.
-- `web_app/src/lib/api.ts` is a single axios instance whose response interceptor converts errors into the user-facing
-  message (`getErrorMessage`). `API_ENDPOINT` is `VITE_BACKEND + "/api/v1"` in dev and `/api/v1` in production builds.
-- socket.io: the server mounts `/ws` **before** the `/` static mount and requires `socketio_path="/ws/socket.io"`
-  (`api.py:Api.__init__`); the client hardcodes the same path in `components/DiffusionProgress.tsx`. The `/ws` mount must stay
-  ahead of `/`, or the static mount shadows it and progress events 404.
-- `components/Editor.tsx` (~1900 lines) paints the mask into a separate offscreen canvas: committed strokes live in
-  `lineGroups` while the in-progress stroke is in `strokeRef`, and the canvas is only redrawn as "committed + current
-  stroke". The mask is scaled by `maskScale`, re-expanded to full image size in `generateMask` (`lib/utils.ts`) and
-  encoded with `canvasToBlob` (not `toDataURL`). Backend `gen_frontend_mask` mirrors the `ffcc00bb` brush color.
-- Shared hooks: `useDragResize`, `useImage`, `useInputImage`, `useHotkey`, `useResolution` (viewport breakpoints, not
-  model resolution).
+Frontend details (zustand store, api.ts, socket.io `/ws` mount order, Editor mask canvas, shared hooks): see
+docs/agents/frontend.md (trigger: working in `web_app/src/`, or touching the backend's static/socket.io mounts).
 
 ## Commit messages
 
@@ -198,21 +145,21 @@ statement-of-current-state voice as "Other gotchas" below. Never write it as a c
   history (rebase reword + `--force-with-lease`, with `git diff <old> HEAD` empty) only ever happens on explicit
   request.
 - The same rule governs comments: yaml/code comments describe current state too, not the debugging history.
+- Executable criterion for the subject: it must name at least one concrete symbol (class / method / file, e.g.
+  `ModelManager`, `_wait_interactive`, `Editor.tsx`) **and** one concrete mechanism noun (e.g. `threading.Lock`,
+  `run_in_executor`, `pointer-events`); a subject failing either half is rewritten before committing. Two
+  negative → positive pairs:
+  - ✗ `[X老师]ModelManager 通过锁机制保证了并发安全性` → ✓ `[X老师]ModelManager 用 threading.Lock 序列化推理，消除共享 scheduler 状态竞态`
+  - ✗ `[X老师]修复了 webui 测试不稳定的问题` → ✓ `[X老师]test_webui 在 Radix 关闭动画后等 pointerEvents 恢复再绘图，消除偶发丢笔画`
 
 ## Other gotchas
 
-`scripts/environment.yaml` is a stale lama-cleaner leftover and is not the env for this project; the real, complete env
-file is the repo-root `environment.yml` (python 3.12, cu121 torch, pytest), which `scripts/setup_conda.sh` uses.
-`requirements.txt` pins `torch==2.3.1+cu121` / `torchvision==0.18.1+cu121` (that's what this machine was built with, and
-the `+cu121` local version is not on PyPI so it needs a CUDA index — see the comment at the top of the file); the code
-itself is not CUDA-version sensitive and other CUDA builds (e.g. cu129) run fine, so don't add version gates, don't
-"fix" these pins, and don't reinstall a working env unprompted — CI filters those two lines out and installs CPU wheels.
-`iopaint/__init__.py` sets `PYTORCH_ENABLE_MPS_FALLBACK` and torch cache env vars, and `api.py` disables the torch JIT
-fusers at import, so keep those statements above `import torch`. `iopaint/web_config.py:save_config` builds the pydantic
-model from `locals()` and is wired to a long positional list of Gradio components, so adding a config field means editing
-the signature, the `save_btn.click` input list, and `default_configs` together; `web_config.py` itself is a standalone
-Gradio config editor behind `iopaint start-web-config` that shares nothing with the `web_app/` frontend, which is the UI
-actually served at `/`. Ruff is deliberately **not** a dependency any more (it was in `environment.yml` with no config
+Torch pins, env files (`environment.yml` vs the stale `scripts/environment.yaml`), and the MPS-fallback / JIT-fuser
+import order: see docs/agents/torch-and-env.md (trigger: touching `requirements.txt` / `environment.yml`, setting up an
+env, or moving statements around `import torch`).
+`web_config.py` (the standalone Gradio config editor behind `iopaint start-web-config`, unrelated to the `web_app/`
+frontend): see docs/agents/web-config.md (trigger: adding a config field or editing `iopaint/web_config.py`).
+Ruff is deliberately **not** a dependency any more (it was in `environment.yml` with no config
 committed, and a repo-wide `ruff check` reports ~1700 pre-existing findings), so don't reintroduce it as a gate; if you
 want it locally, scope checks to the files you touched and never mass-fix. On language: code comments, UI strings and
 commit subjects are deliberately CN/EN mixed (subjects are prefixed `[<model>老师]`, e.g. `[MiMo老师]`), so when you edit a file
@@ -220,11 +167,43 @@ keep the surrounding style and never translate, delete, or "normalize" existing 
 code / UI / commit text, while AGENTS.md itself stays English because agents read it and it descends from the
 English-speaking upstream.
 
-Playwright webui tests must not draw on the canvas right after closing a Radix Select popup or a modal Dialog: both
-leave `pointer-events: none` on `<body>` for the duration of their close animation (measured ~300ms), so every mouse
-event falls through to `<html>` (`elementFromPoint` at the canvas centre returns `HTML`), the stroke is silently lost
-and no `/inpaint` request ever fires — the symptom looks like the app is broken but a plain page draws fine.
-`iopaint/tests/test_webui.py:_wait_interactive()` waits for `document.body.style.pointerEvents !== 'none'` before
-interacting; call it after any Select/Dialog interaction that precedes drawing. Related: the Editor's bottom brush
-slider only mounts once an image is loaded, so a test asserting on it must upload a picture first, and the brush
-slider is told apart from the cv2 radius slider by `aria-valuemax` (200 vs 100).
+Playwright webui test details (Radix Select/Dialog `pointer-events: none` close animation, `_wait_interactive()`,
+brush-slider `aria-valuemax`): see docs/agents/playwright.md (trigger: writing or debugging `iopaint/tests/test_webui.py`
+cases that draw on the canvas or assert on UI controls).
+
+## Agent docs index
+
+Long-form topics live in `docs/agents/*.md` (all English, like this file). Each entry has the condition for when to
+read it:
+
+- `docs/agents/slow-tests.md` — running/extending the weight-heavy `pytest -m slow` suite; one-time weight downloads;
+  `--forked`/GPU/shared-:8080 gotchas (trigger: about to run or modify slow tests).
+- `docs/agents/playwright.md` — webui test details: Radix close-animation `pointer-events`, `_wait_interactive()`,
+  brush-slider `aria-valuemax` (trigger: writing or debugging `test_webui.py`).
+- `docs/agents/torch-and-env.md` — torch cu121 pins, `environment.yml` vs stale `scripts/environment.yaml`, MPS
+  fallback / JIT fuser import order (trigger: touching `requirements.txt`/`environment.yml` or `import torch` order).
+- `docs/agents/web-config.md` — `web_config.py` Gradio wiring: `save_config`'s positional component list,
+  `save_btn.click` inputs, `default_configs` move together (trigger: adding a config field or editing web_config.py).
+- `docs/agents/frontend.md` — zustand store, `api.ts`, socket.io `/ws`-before-`/` mount order, Editor mask canvas,
+  shared hooks (trigger: working in `web_app/src/` or the backend static/socket.io mounts).
+- `docs/agents/type-check.md` — new-code-only mypy gate: `python scripts/check_types.py` runs mypy on
+  `iopaint/**/*.py` changed vs `origin/main` and fails only on errors anchored to newly added lines (trigger: before
+  committing backend Python changes; mypy is local-only and must never be wired into CI).
+- `docs/agents/perf-guards.md` — benchmark designs for the four perf regressions listed under Architecture (trigger:
+  before implementing a perf benchmark or touching `scan_models` / schedulers / ControlNet preprocessors /
+  `--empty-cache-after-inpaint`).
+- `docs/agents/review-prompts.md` — adversarial-review, test-quality-review, and mutation-testing prompt templates
+  (trigger: preparing a code review session or judging test suite quality).
+
+## Multi-batch agent tasks
+
+Any task that spans more than one batch/phase must keep a plan file at `<harness-tmp-dir>/<task>-plan.md` (e.g.
+`/tmp/opencode/<task>-plan.md`) tracking status, goals, todo, done, open questions, and pitfalls hit. It must **never**
+be committed to the repo and must **never** be mentioned in commit messages. Minimal template:
+
+```markdown
+# <task> — plan
+- Status / goal: <one line each>
+- Done / Todo: <bullets>
+- Open questions / pitfalls: <bullets> (每项改动的自验证命令与结果附在其下)
+```
