@@ -7,20 +7,18 @@ build-backend = "setuptools.build_meta"
 # -m "not slow" 保证权重/GPU 用例不进基线。only_mutate 必须选"未被装饰器包住的函数所在的
 # 文件"：mutmut 3.8 跳过一切带装饰器的函数（file_mutation.py 的 FunctionDef 分支），schema.py
 # 因此产出 0 个可用变异体，helper.py 的裸函数则能正常生成。
+# 不需要 deselect 任何用例：test_runtime_gaps 的 reload 污染已由该文件的
+# _restore_runtime_module fixture 在每个测试结束时把 iopaint.runtime 的 module dict
+# 还原成进测试时的快照修复，mutmut 按 set 顺序乱序跑子集同样安全。
 [tool.mutmut]
 source_paths = ["iopaint"]
 only_mutate = ["iopaint/helper.py"]
-# deselect：test_runtime_gaps 的 reload 测试会重建 runtime.GpuInfo 类对象，此后
-# 任何 GpuInfo 判等都因类身份不同而失败；正常 pytest 里它排在文件末尾不发作，
-# mutmut 按 set 顺序跑子集会把它排到前面，故在配置里隔离掉（不动测试代码）。
 pytest_add_cli_args = [
     "-m",
     "not slow",
-    "--deselect=iopaint/tests/test_runtime_gaps.py::test_missing_package_version_recorded_as_na",
 ]
 pytest_add_cli_args_test_selection = [
     "-m",
     "not slow",
     "--ignore=iopaint/tests/test_webui.py",
-    "--deselect=iopaint/tests/test_runtime_gaps.py::test_missing_package_version_recorded_as_na",
 ]

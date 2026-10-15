@@ -3,11 +3,14 @@ next_bigger_gpu 边界、setup_model_dir 建目录，以及 import 期包版本�
 PackageNotFoundError 分支（用 reload + 临时打桩 importlib.metadata 覆盖）。
 
 所有测试都不碰真实 CUDA：torch.cuda.* 一律 monkeypatch 打桩。
+reload 类测试对模块状态的改动由 _restore_runtime_module 快照还原，
+所以本文件任何测试都不依赖执行顺序。
 """
 import importlib
 import importlib.metadata as md
 import os
 from types import SimpleNamespace
+from typing import Iterator
 
 import pytest
 import torch
@@ -25,6 +28,32 @@ from iopaint.runtime import (
     setup_model_dir,
 )
 from iopaint.schema import Device
+
+
+@pytest.fixture(autouse=True)
+def _restore_runtime_module() -> Iterator[None]:
+    """进出每个测试时，把 `iopaint.runtime` 的模块状态快照并原样还原。
+
+    `importlib.reload` 复用同一个 module dict，但会**重建其中的类对象**（`GpuInfo`
+    等）；本文件顶层 `from iopaint.runtime import GpuInfo` 持有的是旧类，reload 之后
+    `list_gpus()` 产出的新类实例与旧类实例判等恒为 False（frozen dataclass 的
+    `__eq__` 先比 `other.__class__ is self.__class__`，不同类直接 NotImplemented，
+    于是两个 repr 完全相同的 `GpuInfo(0, "FakeGPU", 0)` 也不相等）。reload 还会把
+    `_package_versions` 换成新 dict。
+
+    历史上靠"该测试恰好排在文件末尾"与 pyproject 的 `--deselect` 兜底，那是顺序
+    依赖：mutmut 按 set 顺序跑子集会把它排到前面。这里在 teardown 把 module dict
+    还原成进测试时的快照（连同 key 集合一起恢复，reload 若新增了 key 也会被清掉），
+    污染不再可能逃逸到下一个测试，与顺序无关。
+
+    快照在 `yield` 之前取得：fixture setup 早于测试的 monkeypatch setup，teardown 因此
+    晚于 `monkeypatch.undo()` 执行（已用探针实测）；`monkeypatch.undo` 是把原值写回
+    （与快照同值），两种顺序结果一致，不依赖 pytest 的 fixture 排序细节。
+    """
+    snapshot = runtime.__dict__.copy()
+    yield
+    runtime.__dict__.clear()
+    runtime.__dict__.update(snapshot)
 
 
 class TestDumpGpuInfo:
