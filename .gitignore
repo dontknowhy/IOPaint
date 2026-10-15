@@ -10,5 +10,7 @@ IOPaint.egg-info/
 venv/
 tmp/
 iopaint/web_app/
+# mutmut（docs/agents/review-prompts.md）的变异体工作副本与统计缓存，只增不改源码
+mutants/
 # coverage.py 运行数据（`coverage run -m pytest` 每次重建，report 的输入）
 .coverage

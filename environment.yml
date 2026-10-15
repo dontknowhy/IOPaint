@@ -38,3 +38,5 @@ dependencies:
     - # Dev tools（和 requirements-dev.txt 是同一份，见根目录 requirements-dev.txt）
     - pytest
     - pytest-loguru
+    - mypy==2.4.0
+    - mutmut==3.8.0

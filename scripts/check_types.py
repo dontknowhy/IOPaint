@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""New-code-only type gate: run mypy on iopaint/**/*.py changed vs BASE (default origin/main).
+
+Old code is never back-ported: a mypy error only fails the gate when it is anchored on a line
+ADDED in the diff (tracked files via `git diff -U0`, untracked new files count as all-added).
+Errors on pre-existing lines are printed as info and never fail.
+
+Run it with an interpreter that has the runtime deps (pydantic, loguru, ...), e.g.:
+    python scripts/check_types.py [BASE_REF]
+Override the mypy binary with MYPY=/path/to/mypy if it is not on PATH.
+"""
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+MYPY_FLAGS = [
+    "--disallow-untyped-defs",
+    "--check-untyped-defs",
+    "--no-implicit-optional",
+    # third-party plugin deps (onnxruntime, rembg, ...) ship no stubs; requiring stubs would
+    # make the gate unsatisfiable without adding dependencies.
+    "--ignore-missing-imports",
+]
+
+HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+ERR_RE = re.compile(r"^(?P<file>[^:]+):(?P<line>\d+): error:")
+
+
+def git(*args: str) -> str:
+    return subprocess.check_output(["git", *args], text=True)
+
+
+def changed_py_files(base: str) -> list[str]:
+    tracked = git("diff", "--name-only", base, "--", "*.py").splitlines()
+    untracked = git("ls-files", "--others", "--exclude-standard", "*.py").splitlines()
+    return sorted({f for f in tracked + untracked if f.startswith("iopaint/")})
+
+
+def added_lines(base: str, path: str) -> set[int]:
+    """Line numbers (new-file coordinates) added vs base; empty set = unchanged."""
+    out: set[int] = set()
+    for line in git("diff", "-U0", base, "--", path).splitlines():
+        m = HUNK_RE.match(line)
+        if m:
+            start = int(m.group(1))
+            count = int(m.group(2)) if m.group(2) is not None else 1
+            out.update(range(start, start + count))
+    return out
+
+
+def main() -> int:
+    base = sys.argv[1] if len(sys.argv) > 1 else "origin/main"
+    files = changed_py_files(base)
+    if not files:
+        print(f"check_types: no changed iopaint/**/*.py vs {base} — nothing to check.")
+        return 0
+
+    mypy = os.environ.get("MYPY") or shutil.which("mypy")
+    if not mypy:
+        print("check_types: mypy not found (set MYPY=/path/to/mypy).", file=sys.stderr)
+        return 2
+
+    added = {f: added_lines(base, f) for f in files}
+    proc = subprocess.run(
+        [mypy, *MYPY_FLAGS, "--python-executable", sys.executable, *files],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode not in (0, 1):  # 2 = usage/runtime error, not "type errors found"
+        sys.stderr.write(proc.stdout + proc.stderr)
+        return proc.returncode
+
+    new_errors: list[str] = []
+    old_errors = 0
+    for line in proc.stdout.splitlines():
+        m = ERR_RE.match(line)
+        if not m:
+            continue
+        path, lineno = m.group("file"), int(m.group("line"))
+        if path in added and lineno in added[path]:
+            new_errors.append(line)
+        else:
+            old_errors += 1
+
+    for line in new_errors:
+        print(line)
+    if old_errors:
+        print(f"check_types: {old_errors} pre-existing error(s) on unchanged lines (ignored).")
+    if new_errors:
+        print(f"check_types: {len(new_errors)} error(s) on newly added lines — fix before committing.")
+        return 1
+    print(f"check_types: OK ({len(files)} changed file(s), no errors on added lines).")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
