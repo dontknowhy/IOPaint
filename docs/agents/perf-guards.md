@@ -1,9 +1,9 @@
-# Perf guard benchmark designs (design only — nothing implemented yet)
+# Perf guard benchmark designs (guard #1 implemented — local `pytest -m bench`, not CI)
 
-The four perf regressions listed under **Architecture** in AGENTS.md each get a minimal benchmark design here. None is
-implemented: a human picks which one to land first. Every design names: what to measure, the hook point, how to set
-the threshold, and whether it belongs in the fast suite or the slow/local set. A new agent should be able to implement
-one from this doc alone.
+The four perf regressions listed under **Architecture** in AGENTS.md each get a minimal benchmark design here.
+**#1 is implemented**, in `benchmarks/test_server_config_scan_cache.py`; 2–4 remain design only, waiting for a human
+to pick. Every design names: what to measure, the hook point, how to set the threshold, and whether it belongs in the
+fast suite or the slow/local set. A new agent should be able to implement one from this doc alone.
 
 General rules for all four:
 
@@ -12,17 +12,38 @@ General rules for all four:
 - Thresholds are set from a measured baseline on the target machine, then encoded as `baseline * 1.5` (50% headroom);
   record the measured baseline numbers in the test file's comment with the re-runnable command (house rule: every
   claim is measured).
+- The call/count assertion is the guard; the timing number is documentation with a loose backstop — wall time is
+  machine-dependent noise, a call count is not.
 
-## 1. `scan_models()` must not run per request (fast)
+## 1. `scan_models()` must not run per request — **implemented**
 
 - **What**: `GET /api/v1/server-config` must be served from the cached `ModelManager.get_available_models()`
   (`iopaint/model_manager.py`), not by re-scanning the model dir (a scan costs ~2s).
 - **How**: in-process `TestClient` (same pattern as `iopaint/tests/test_api.py`, no port bound). Monkeypatch
   `iopaint.model_manager.ModelManager.scan_models` with a counting wrapper, then hit `/api/v1/server-config` 3 times;
-  assert the counter does not increase (cache populated once at startup). Timing variant: assert wall time of the 3
-  calls < 1.5s; the counter assertion is the primary one (timing is machine-dependent noise, the call count is not).
+  assert the counter does not increase (cache is filled by `ModelManager.__init__`, before any request). Timing
+  variant: median of N rounds × 3 calls against `baseline * 1.5` (general rule below) — never a fixed generous
+  constant; the counter assertion is the primary one.
 - **Threshold**: call count == 0 after startup; wall-time guard as a loose backstop.
-- **Suite**: fast (`pytest -m "not slow"`; no weights — use `--model cv2` via the existing test fixtures).
+- **Suite**: fast (`--model cv2`, no weights) — but it lives **outside** CI, see below.
+
+**Landed** as `benchmarks/test_server_config_scan_cache.py`; run it with
+
+```bash
+python -m pytest benchmarks -m bench -s      # 2 tests, ~5s
+```
+
+- Location is deliberate: `pytest.ini` has `testpaths = iopaint/tests`, so plain `pytest`,
+  `pytest -m "not slow"` (CI and `scripts/check.sh`) never collect `benchmarks/` — the guard does not gate anything
+  until someone decides to promote it. `bench` is registered as a marker in `pytest.ini` so `-m bench` is warning-free.
+- Two tests: `test_server_config_is_served_from_cache` (primary — counting wrapper installed *after* `Api(...)`
+  construction, 0 `scan_models` calls across 3 requests, plus a non-empty `modelInfos` sanity check) and
+  `test_server_config_latency_backstop` (median of 5 rounds × 3 calls, `statistics.median`, printed with `-s`).
+- **Measured baseline** (2026-10, one 8-core machine, `--model cv2` on cpu): 10 consecutive runs of the 5×3 round
+  gave medians **5.1–5.6 ms**; the file pins `BASELINE_MEDIAN_S = 5.6e-3` (the max) → threshold **8.4 ms**.
+- **Proven to bite**: pointing `api_server_config` at `self.model_manager.scan_models()` instead of
+  `get_available_models()` fails both tests — the call-count assertion trips, and the backstop independently reports
+  `12.1 ms > 8.4 ms`. Reverting restores 2 passed.
 
 ## 2. Diffusion schedulers must not be rebuilt per call (slow)
 
@@ -60,6 +81,6 @@ General rules for all four:
 
 ## Pick order (suggestion for the human)
 
-1 wins the most (it is the only one of the four that already has a known ~2s cost attached and is fully fast/hermetic);
-4 is the cheapest to land; 2 is fast if the stubbing stays clean; 3 is the most valuable regression-wise but needs the
-GPU box, so it goes last.
+**#1 is already landed** (see its section). Of the remaining three: 4 is the cheapest to land; 2 is fast if the
+stubbing stays clean; 3 is the most valuable regression-wise but needs the GPU box, so it goes last — it is also the
+only one of the four with no known cost attached today.
