@@ -38,8 +38,26 @@ def changed_py_files(base: str) -> list[str]:
     return sorted({f for f in tracked + untracked if f.startswith("iopaint/")})
 
 
+def is_tracked(path: str) -> bool:
+    """Index/HEAD knows the file? Untracked files never show up in `git diff` output."""
+    return (
+        subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", path],
+            capture_output=True,
+        ).returncode
+        == 0
+    )
+
+
 def added_lines(base: str, path: str) -> set[int]:
-    """Line numbers (new-file coordinates) added vs base; empty set = unchanged."""
+    """Line numbers (new-file coordinates) added vs base; empty set = unchanged.
+
+    An untracked file is not in any diff, so every line of it counts as added —
+    without this branch its mypy errors would be filed under "pre-existing".
+    """
+    if not is_tracked(path):
+        with open(path, encoding="utf-8") as f:
+            return set(range(1, sum(1 for _ in f) + 1))
     out: set[int] = set()
     for line in git("diff", "-U0", base, "--", path).splitlines():
         m = HUNK_RE.match(line)

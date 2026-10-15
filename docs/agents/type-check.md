@@ -1,18 +1,38 @@
-# Type checking (new code only — local only, never in CI)
+# Type checking (new code only — wired into the CI `backend` job)
 
-Status: **local opt-in script + this doc**; a human decision fixed it as **local-only — mypy must never be wired
-into the CI environment**. No mypy/pyright *config* exists in the repo (`pyproject.toml` only declares the build
-backend), CI is unchanged, and nothing here runs automatically. `mypy==2.4.0` is pinned as a dev dependency in
-`requirements-dev.txt` / `environment.yml` (dev tools); CI's `backend` job installs only `requirements.txt`, so
-mypy stays out of CI by both decision and dependency.
+Status: **CI gate + local script + this doc**. The Phase 1 human decision ("local-only, mypy must never enter CI")
+has been overturned by the human for Phase 2: `.github/workflows/ci.yml` installs `requirements-dev.txt` (pin
+`mypy==2.4.0`) in the `backend` job and runs `scripts/check_types.py` as its own step, and `scripts/check.sh` runs
+the same command locally. No mypy/pyright *config* exists in the repo (`pyproject.toml` only declares the build
+backend), so every flag comes from the script; `mypy==2.4.0` stays pinned only in `requirements-dev.txt` /
+`environment.yml` — never in `requirements.txt`, which remains runtime-only.
 
-## Why mypy never runs in CI
+## What CI runs
 
-- Decided by the human: type checking is a local pre-commit habit, not a CI gate — do not add a mypy install or a
-  `check_types.py` step to any workflow.
-- Even setting the decision aside, the codebase carries substantial pre-existing typing debt (e.g. `iopaint/schema.py`
-  alone reports ~10 errors from `@property` decorator stacking), so a whole-tree or whole-file gate would be red on
-  day one.
+- Job `backend`, step **`Type check (new code only)`**, after the fast suite:
+  `python scripts/check_types.py ${{ github.event.pull_request.base.sha || 'origin/main' }}`
+  (`check_types.py` defaults to `origin/main` when no ref is passed).
+- **Base ref** — PR events use `pull_request.base.sha`, because a shallow PR clone fetches the merge ref and has no
+  usable `origin/main`; push / `workflow_dispatch` events fall back to `origin/main`, which equals `HEAD` there, so
+  those runs print "no changed … — nothing to check" and pass. The gate therefore bites on pull requests, which is
+  where new code enters the tree.
+- **Dependencies** — `pip install -r requirements-dev.txt` in that job; the pip cache key lists both
+  `requirements.txt` and `requirements-dev.txt`, so a pin bump invalidates it. Installing dev tools does not change
+  what the test suite itself sees.
+- **Local mirror** — `scripts/check.sh` runs the same `scripts/check_types.py` invocation after the fast suite, but
+  skips with a printed notice when mypy is not importable (same philosophy as `test_webui.py` self-skipping without
+  playwright), so a runtime-only install still gets a green `check.sh`.
+- Shape of a run: exit 0 when no `iopaint/**/*.py` changed vs the base, or when no mypy error lands on an added
+  line; exit 1 when at least one does; exit 2 when mypy is missing (CI never hits 2).
+
+## Why the whole tree is not checked
+
+The codebase carries substantial pre-existing typing debt: with the gate's own flag set, a whole-tree run reports
+**6649 errors in 179 of 225 files** (`git ls-files 'iopaint/**/*.py' | xargs mypy --disallow-untyped-defs
+--check-untyped-defs --no-implicit-optional --ignore-missing-imports`), e.g. `iopaint/schema.py` alone ~10 from
+`@property` decorator stacking. A whole-tree or whole-file gate would be red on day one. The gate's diff anchoring
+is what keeps it honest instead of vacuous: it only forgives errors on lines the diff did not touch (a single-file
+run prints the rest as "pre-existing errors on unchanged lines (ignored)" — 2178 for `test_runtime_gaps.py`).
 
 ## What exists now
 

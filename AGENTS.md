@@ -42,9 +42,10 @@ Frontend (`cd web_app`):
 ## Health check
 
 `bash scripts/check.sh` = `pytest -m "not slow"` + `npm run lint` + `npm run test` + `npm run build` + copy
-`web_app/dist` into `iopaint/web_app`. Runs the same commands as `.github/workflows/ci.yml`; keep them in sync. Three
-CI jobs: `backend`
-(`pytest -m "not slow"`), `frontend` (lint + test + build), `webui` (playwright against the built UI).
+`web_app/dist` into `iopaint/web_app` + `python scripts/check_types.py` (new-code-only mypy; skipped with a notice
+locally when mypy isn't installed, always installed in CI). Runs the same commands as `.github/workflows/ci.yml`;
+keep them in sync. Three CI jobs: `backend`
+(`pytest -m "not slow"` + "Type check (new code only)"), `frontend` (lint + test + build), `webui` (playwright against the built UI).
 
 A **separate dispatch-only workflow**, `.github/workflows/slow-smoke.yml`, is deliberately **not** wired to push/PR, so
 the PR-required set stays fast and offline. It triggers only on `workflow_dispatch` (no weekly schedule): a clean-room
@@ -188,7 +189,8 @@ read it:
   shared hooks (trigger: working in `web_app/src/` or the backend static/socket.io mounts).
 - `docs/agents/type-check.md` — new-code-only mypy gate: `python scripts/check_types.py` runs mypy on
   `iopaint/**/*.py` changed vs `origin/main` and fails only on errors anchored to newly added lines (trigger: before
-  committing backend Python changes; mypy is local-only and must never be wired into CI).
+  committing backend Python changes; it also gates CI — the `backend` job runs it as "Type check (new code only)",
+  see the doc).
 - `docs/agents/perf-guards.md` — benchmark designs for the four perf regressions listed under Architecture (trigger:
   before implementing a perf benchmark or touching `scan_models` / schedulers / ControlNet preprocessors /
   `--empty-cache-after-inpaint`).

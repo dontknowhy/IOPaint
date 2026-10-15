@@ -32,4 +32,14 @@ echo "=== backend: pytest -m 'not slow' ==="
 "${PYTHON}" -m pytest -m "not slow" -q
 
 echo ""
+echo "=== backend: 类型检查（仅新增行，mypy 见 requirements-dev.txt）==="
+# 和 ci.yml 的 "Type check (new code only)" 同一条命令。mypy 是 dev 依赖：
+# 本地没装就提示后继续（同 test_webui 缺 playwright 自跳过的处理），CI 必装所以必跑。
+if "${PYTHON}" -c "import mypy" >/dev/null 2>&1; then
+    "${PYTHON}" scripts/check_types.py
+else
+    echo "!! mypy 未安装（pip install -r requirements-dev.txt），跳过类型检查"
+fi
+
+echo ""
 echo "OK. 启动： iopaint start --model lama --port 8080"
