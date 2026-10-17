@@ -4,6 +4,7 @@
 """
 import pytest
 import torch
+import numpy as np
 
 from iopaint.model.utils import get_torch_dtype
 from iopaint.model_manager import ModelManager
@@ -775,3 +776,139 @@ class TestModelManagerFallback:
 
         assert mm.enable_powerpaint_v2 is False  # flag 回滚
         assert mm.model == "RELOADED_OLD"  # 旧模型重载回来
+
+
+# ---------------------------------------------------------------------------
+# 推理时的显存回退：模型能装下，不代表大 crop 的一次前向装得下
+# ---------------------------------------------------------------------------
+class _InferenceModel:
+    """替身模型：按构造时给的 device 决定这次前向成不成功。"""
+
+    def __init__(self, fail: bool) -> None:
+        self.fail = fail
+        self.calls = 0
+
+    def __call__(
+        self, image: np.ndarray, mask: np.ndarray, config: InpaintRequest
+    ) -> np.ndarray:
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("CUDA out of memory. Tried to allocate 574.00 MiB")
+        return np.zeros_like(image)
+
+
+def _inference_manager(
+    monkeypatch: pytest.MonkeyPatch, current_device: torch.device
+) -> tuple:
+    """装一个只管推理回退所需字段的 ModelManager。
+
+    `_load` 被打桩成「记录目标设备、返回一个必然成功的模型」。
+    """
+    mm = _bare_manager(current_device)
+    mm.model = _InferenceModel(fail=True)
+    mm.available_models = {
+        mm.name: type(
+            "I", (), {"support_powerpaint_v2": False, "support_lcm_lora": False}
+        )()
+    }
+    loaded: list = []
+
+    def fake_load(name: str, device: torch.device, **kwargs: object) -> tuple:
+        loaded.append(device_str(device))
+        return _InferenceModel(fail=False), device
+
+    mm._load = fake_load
+    monkeypatch.setattr("iopaint.model_manager._release_memory", lambda dev: None)
+    return mm, loaded
+
+
+class TestInferenceOomFallback:
+    def test_oom_switches_to_bigger_gpu_and_retries(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _fake_gpus(monkeypatch, (1989, 1383), (8109, 8018))
+        mm, loaded = _inference_manager(monkeypatch, torch.device("cuda"))
+
+        out = mm._run(
+            np.zeros((8, 8, 3), np.uint8),
+            np.zeros((8, 8), np.uint8),
+            InpaintRequest.model_validate({}),
+        )
+
+        assert out.shape == (8, 8, 3)
+        assert loaded == ["cuda:1"], "推理 OOM 后应把模型重新加载到更有富余的卡"
+        assert str(mm.device) == "cuda:1"
+        assert mm.device_notice is not None and "cuda:1" in mm.device_notice
+
+    def test_all_gpus_oom_falls_back_to_cpu(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _fake_gpus(monkeypatch, (1989, 1383))
+        mm, loaded = _inference_manager(monkeypatch, torch.device("cuda"))
+
+        mm._run(
+            np.zeros((8, 8, 3), np.uint8),
+            np.zeros((8, 8), np.uint8),
+            InpaintRequest.model_validate({}),
+        )
+
+        assert loaded == ["cpu"]
+        assert str(mm.device) == "cpu"
+        assert "CPU" in mm.device_notice
+
+    def test_cpu_inference_oom_is_not_retried(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mm, loaded = _inference_manager(monkeypatch, torch.device("cpu"))
+
+        with pytest.raises(RuntimeError, match="out of memory"):
+            mm._run(
+                np.zeros((8, 8, 3), np.uint8),
+                np.zeros((8, 8), np.uint8),
+                InpaintRequest.model_validate({}),
+            )
+        assert loaded == []
+
+    def test_non_oom_error_is_not_swallowed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _fake_gpus(monkeypatch, (1989, 1383), (8109, 8018))
+        mm, loaded = _inference_manager(monkeypatch, torch.device("cuda"))
+        mm.model = type(
+            "Bad",
+            (),
+            {
+                "__call__": lambda self, i, m, c: (_ for _ in ()).throw(
+                    ValueError("bad weights")
+                )
+            },
+        )()
+
+        with pytest.raises(ValueError, match="bad weights"):
+            mm._run(
+                np.zeros((8, 8, 3), np.uint8),
+                np.zeros((8, 8), np.uint8),
+                InpaintRequest.model_validate({}),
+            )
+        assert loaded == []
+
+    def test_fallback_model_is_reused_for_later_requests(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _fake_gpus(monkeypatch, (1989, 1383), (8109, 8018))
+        mm, loaded = _inference_manager(monkeypatch, torch.device("cuda"))
+
+        mm._run(
+            np.zeros((8, 8, 3), np.uint8),
+            np.zeros((8, 8), np.uint8),
+            InpaintRequest.model_validate({}),
+        )
+        # 第二次请求已经在 cuda:1 上，不该再触发回退
+        mm._run(
+            np.zeros((8, 8, 3), np.uint8),
+            np.zeros((8, 8), np.uint8),
+            InpaintRequest.model_validate({}),
+        )
+
+        assert loaded == ["cuda:1"]
+        assert mm.model.calls == 2

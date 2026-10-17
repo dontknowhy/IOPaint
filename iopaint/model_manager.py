@@ -17,6 +17,7 @@ from iopaint.runtime import (
     load_with_fallback,
     device_str,
     is_out_of_memory,
+    next_bigger_gpu,
     _release_memory,
 )
 from iopaint.schema import InpaintRequest, ModelInfo, ModelType
@@ -183,6 +184,11 @@ class ModelManager:
                 status_code=503,
                 detail="Model load failed, please switch model",
             )
+        self._prepare_model(config)
+        return self._infer_with_oom_fallback(image, mask, config)
+
+    def _prepare_model(self, config: InpaintRequest) -> None:
+        """按请求切换模型侧的状态（controlnet / brushnet / powerpaint / lcm lora）。"""
         if config.enable_controlnet:
             self.switch_controlnet_method(config)
         if config.enable_brushnet:
@@ -190,7 +196,63 @@ class ModelManager:
 
         self.enable_disable_powerpaint_v2(config)
         self.enable_disable_lcm_lora(config)
-        return self.model(image, mask, config).astype(np.uint8)
+
+    def _infer_with_oom_fallback(
+        self, image: np.ndarray, mask: np.ndarray, config: InpaintRequest
+    ) -> np.ndarray:
+        """跑一次推理；显存不足时换到更有富余的 GPU，最后回退 CPU 重试。
+
+        模型能装下不代表推理装得下：`load_with_fallback` 只护住加载，erase/diffusion
+        模型在大图上的一次前向仍可能 OOM（本机 P620 2G 上，90MP 图 + 较长笔画把 crop
+        裁到 2591x900，LaMa 前向要 574MB）。此前的行为是直接把 torch 的 OOM 抛成 500，
+        WebUI 只弹一条塞满 TorchScript traceback 的 toast —— 用户看到的就是「日志说
+        要处理，实际啥也没干」。这里复用加载回退的同一套选卡逻辑，在推理失败时把
+        模型重新加载到下一块卡（或 CPU）再重试，并把提示记进 device_notice。
+        """
+        tried: List = []
+        while True:
+            try:
+                return self.model(image, mask, config).astype(np.uint8)
+            except Exception as e:
+                if (
+                    device_str(self.device).split(":")[0] != "cuda"
+                    or not is_out_of_memory(e)
+                ):
+                    raise
+                tried.append(self.device)
+                failed = device_str(self.device)
+                err = str(e).splitlines()[0]
+                # 同 _load：必须在 e 还活着时切断 traceback 链，否则它挂着
+                # self.model → 失败卡上的权重，下面的回收只是空转。
+                e.__traceback__ = None
+                e.__context__ = None
+                e.__cause__ = None
+                logger.warning(f"Inference on {failed} ran out of VRAM: {err}")
+                # 丢掉模型引用才能把失败那张卡的显存还回去
+                model = self.model
+                self.model = None
+                del model
+                _release_memory(self.device)
+
+                bigger = next_bigger_gpu(tried)
+                if bigger is not None:
+                    target = torch.device(f"cuda:{bigger}")
+                    msg = f"{failed} out of VRAM during inference, switched to cuda:{bigger}"
+                else:
+                    target = torch.device("cpu")
+                    msg = (
+                        f"{failed} out of VRAM during inference and no other GPU has "
+                        f"more headroom, fell back to CPU (inference will be much slower)"
+                    )
+                logger.warning(msg)
+                if msg not in self.device_notices:
+                    self.device_notices.append(msg)
+
+                # 权重 / dtype / offload 状态都绑定在设备上，换设备只能重新加载
+                model, effective_device = self._load(self.name, target)
+                self.model = model
+                self.device = effective_device
+                self._prepare_model(config)
 
     def scan_models(self) -> List[ModelInfo]:
         available_models = scan_models()
