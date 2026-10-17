@@ -6,6 +6,11 @@ import pytest
 import torch
 import numpy as np
 
+from contextlib import contextmanager
+from collections.abc import Iterator
+
+from loguru import logger
+
 from iopaint.model.utils import get_torch_dtype
 from iopaint.model_manager import ModelManager
 from iopaint.runtime import (
@@ -35,6 +40,17 @@ def _fake_gpus(monkeypatch, *specs):
     monkeypatch.setattr(
         "iopaint.runtime.list_gpus", lambda query_free=False: _gpus(*specs)
     )
+
+
+@contextmanager
+def captured_warnings() -> Iterator[list]:
+    """loguru sink：收集 WARNING 及以上，断言「静默忽略」被说出来。"""
+    messages: list = []
+    sink = logger.add(messages.append, level="WARNING", format="{message}")
+    try:
+        yield messages
+    finally:
+        logger.remove(sink)
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +106,35 @@ class TestParseDeviceSpec:
         monkeypatch.setenv("IOPaint_GPU", "abc")
         with pytest.raises(ValueError, match="IOPaint_GPU"):
             parse_device_spec("cuda")
+
+    def test_env_var_shadowed_by_explicit_gpu_id_warns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # config.json 的 gpu_id 也是从这里进来的：`IOPaint_GPU=1 iopaint-start`
+        # 被 --config 里的 gpu_id=0 覆盖时必须说出来，不能静默跑在 0 号卡上。
+        monkeypatch.setenv("IOPaint_GPU", "1")
+        with captured_warnings() as messages:
+            assert parse_device_spec("cuda", gpu_id=0) == (Device.cuda, 0)
+        assert any(
+            "IOPaint_GPU=1" in m and "gpu_id is already set to 0" in m
+            for m in messages
+        )
+
+    def test_env_var_equal_to_explicit_gpu_id_is_quiet(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("IOPaint_GPU", "1")
+        with captured_warnings() as messages:
+            assert parse_device_spec("cuda", gpu_id=1) == (Device.cuda, 1)
+        assert not any("IOPaint_GPU" in m for m in messages)
+
+    def test_env_var_used_when_no_gpu_id_given(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("IOPaint_GPU", "1")
+        with captured_warnings() as messages:
+            assert parse_device_spec("cuda") == (Device.cuda, 1)
+        assert not any("IOPaint_GPU" in m for m in messages)
 
 
 class TestResolveGpuId:

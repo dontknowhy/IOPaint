@@ -249,6 +249,17 @@ def parse_device_spec(
 
     if parsed_id is None:
         parsed_id = _env_gpu_id()
+    else:
+        # parsed_id 来自 --device cuda:N / --gpu-id，也可能来自 --config 里的 gpu_id。
+        # 此时 IOPaint_GPU 会被忽略——以前是静默的：`IOPaint_GPU=1 iopaint-start`
+        # （wrapper 固定带 --config，而 config.json 里 gpu_id=0）会一直跑在 0 号卡上，
+        # 用户只记得自己设了 1。这里明确说出来。
+        env_id = _env_gpu_id(strict=False)
+        if env_id is not None and env_id != parsed_id:
+            logger.warning(
+                f"{GPU_ENV_VAR}={env_id} is ignored because gpu_id is already set "
+                f"to {parsed_id} (from --device / --gpu-id / the config file)"
+            )
     return device, parsed_id
 
 
