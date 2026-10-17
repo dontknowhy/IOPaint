@@ -559,16 +559,6 @@ export default function Editor(props: EditorProps) {
     minScale,
   ])
 
-  useEffect(() => {
-    const onWindowResize = () => {
-      resetZoom()
-    }
-    window.addEventListener("resize", onWindowResize)
-    return () => {
-      window.removeEventListener("resize", onWindowResize)
-    }
-  }, [resetZoom])
-
   const handleEscPressed = () => {
     if (isProcessing) {
       return
@@ -588,20 +578,42 @@ export default function Editor(props: EditorProps) {
     // drawOnCurrentRender,
   ])
 
+  // 画笔游标是否可见：与下面 JSX 的 opacity 用同一个条件，避免两处判断漂移
+  const isBrushVisible =
+    showBrush &&
+    !isInpainting &&
+    !isPanning &&
+    !interactiveSegState.isInteractiveSeg
+
+  const writeBrushCursor = useCallback((x: number, y: number) => {
+    if (brushCursorRef.current) {
+      brushCursorRef.current.style.transform = `translate(${x}px, ${y}px) translate(-50%, -50%)`
+    }
+  }, [])
+
   const updateCursorPos = (x: number, y: number) => {
     cursorPosRef.current = { x, y }
+    // 游标不可见时只记位置：每次 mousemove 都写一次 style 会白白触发样式重算
+    if (!isBrushVisible) {
+      return
+    }
     if (cursorFrameRef.current !== 0) {
       return
     }
     cursorFrameRef.current = requestAnimationFrame(() => {
       cursorFrameRef.current = 0
       const { x: posX, y: posY } = cursorPosRef.current
-      const transform = `translate(${posX}px, ${posY}px) translate(-50%, -50%)`
-      if (brushCursorRef.current) {
-        brushCursorRef.current.style.transform = transform
-      }
+      writeBrushCursor(posX, posY)
     })
   }
+
+  // 游标从不可见变回可见时补写一次位置：上面早退期间只记了位置没写样式，
+  // 不补的话游标会停在上一次可见时的位置，直到下一次移动
+  useEffect(() => {
+    if (isBrushVisible) {
+      writeBrushCursor(cursorPosRef.current.x, cursorPosRef.current.y)
+    }
+  }, [isBrushVisible, writeBrushCursor])
 
   useEffect(() => {
     // 同一个 Set 只会增删、不会重新赋值，先取出引用供 cleanup 使用
@@ -1873,13 +1885,7 @@ export default function Editor(props: EditorProps) {
           top: 0,
           width: `${brushSize * getCurScale()}px`,
           height: `${brushSize * getCurScale()}px`,
-          opacity:
-            showBrush &&
-            !isInpainting &&
-            !isPanning &&
-            !interactiveSegState.isInteractiveSeg
-              ? 1
-              : 0,
+          opacity: isBrushVisible ? 1 : 0,
           transform: "translate(-50%, -50%)",
         }}
       />
