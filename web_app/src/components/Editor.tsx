@@ -533,6 +533,26 @@ export default function Editor(props: EditorProps) {
     viewportRef?.current?.centerView(minScale, 1)
   }, [imageHeight, imageWidth, viewportRef, minScale])
 
+  // 用户自己缩放/平移过（panned：zoomAt/panBy/onPanning/onPinching 都置 true，重置按钮置回 false）
+  const viewIsDefaultRef = useRef(!panned)
+  useEffect(() => {
+    viewIsDefaultRef.current = !panned
+  }, [panned])
+
+  // 窗口尺寸变化后补一次居中。minScale 没变时上面那个 effect 不会跑（minScale 由高度决定），
+  // 视图会停在上次居中时的偏移上：实测 1024² 只拖宽 200px 偏 96px，适配比例被夹在 1 的
+  // 256² 小图任何 resize 都偏（宽高同变 30 次偏 152px）。centerView 按 wrapper 的实际尺寸
+  // 重算偏移，所以 windowSize 只当触发信号。用户动过视图就不插手。
+  useEffect(() => {
+    if (!viewIsDefaultRef.current) {
+      return
+    }
+    const viewport = viewportRef?.current
+    // animationTime=0：库在 animate() 里对 0 直接 setTransformState（同步），非 0 走 rAF，
+    // 会被同一批 commit 里的后续更新取消掉、最后一次居中落不上（实测残差 = 上一步的目标）
+    viewport?.centerView(minScale, 0)
+  }, [windowSize, minScale, viewportRef])
+
   // Zoom reset
   const resetZoom = useCallback(() => {
     if (!minScale || !windowSize) {
