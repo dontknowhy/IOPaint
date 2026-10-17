@@ -311,6 +311,64 @@ export function drawLines(
   }
 }
 
+/**
+ * 只描一条笔迹里「按笔宽外扩后与 rect 相交」的线段，其余掠过。
+ *
+ * 命中的线段全部拼进同一个 Path（多个 moveTo/lineTo 子路径）再做**一次**
+ * stroke()：Canvas2D 的一次 stroke 把整条路径当成一个图形一次性上色，自交/相邻处
+ * 只着色一次（正是 drawLines 依赖的性质），所以 rect 内的像素与「整条路径一次
+ * stroke」逐像素一致 —— 落到 rect 外面的线段本来就会被调用方 clip 掉，略过它们
+ * 不改变任何像素。
+ *
+ * 用途是绘制中的笔画（flushStroke）：脏矩形通常只盖住笔尖附近的一小段，这样每帧
+ * 的路径长度与已画点数无关，消掉“每帧重描整条笔画”的 O(n²)。
+ * pts 少于 2 个时退回 drawLines（单点靠圆头笔帽画一个圆点，是既有行为）。
+ */
+export function drawLineWithinRect(
+  ctx: CanvasRenderingContext2D,
+  line: Line,
+  rect: { x: number; y: number; w: number; h: number },
+  pad = 0,
+  color = BRUSH_COLOR
+) {
+  const pts = line.pts
+  if (!line.size || pts.length < 2) {
+    drawLines(ctx, [line], color)
+    return
+  }
+  ctx.beginPath()
+  ctx.strokeStyle = color
+  ctx.lineCap = "round"
+  ctx.lineJoin = "round"
+  ctx.lineWidth = line.size
+
+  const rx0 = rect.x
+  const ry0 = rect.y
+  const rx1 = rect.x + rect.w
+  const ry1 = rect.y + rect.h
+  let inRun = false
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1]
+    const b = pts[i]
+    // 线段外扩 pad 后仍与 rect 无交 => 在 rect 里不可能留下像素，直接跳过
+    const hit =
+      Math.min(a.x, b.x) - pad <= rx1 &&
+      Math.max(a.x, b.x) + pad >= rx0 &&
+      Math.min(a.y, b.y) - pad <= ry1 &&
+      Math.max(a.y, b.y) + pad >= ry0
+    if (hit) {
+      if (!inRun) {
+        ctx.moveTo(a.x, a.y)
+        inRun = true
+      }
+      ctx.lineTo(b.x, b.y)
+    } else {
+      inRun = false
+    }
+  }
+  ctx.stroke()
+}
+
 // 一条笔迹里所有点的包围盒（笔刷是圆头，调用方需要按 lineWidth/2 外扩）
 export function strokeBounds(line: Line, pad = 0) {
   let minX = Infinity

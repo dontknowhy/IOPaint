@@ -23,6 +23,7 @@ import {
   copyCanvasImage,
   canvasToBlob,
   downloadImage,
+  drawLineWithinRect,
   drawLines,
   generateMask,
   getErrorMessage,
@@ -66,6 +67,14 @@ const TOUCH_ANCHOR_THRESHOLD = 6
 // 是画笔掉帧的主因（代价随图片分辨率线性增长）。按上限等比缩小后，
 // 每帧的重绘量被限制住，画笔手感与图片分辨率无关。
 const MASK_CANVAS_MAX_PIXELS = 4 * 1024 * 1024
+// 显示用原图/渲染画布（非掩膜）的像素上限。这张画布的内容绘制时并不变化，
+// 但它每帧都会被合成为一张 GPU 共享纹理（trace 里的
+// Canvas2DResourceProviderSharedImage::ProduceCanvasResource），代价随位图面积增长：
+// 6000x6000（36M px / 144MB）时主线程 Commit 约 19ms/帧，画笔画 120 帧有 21 帧掉到
+// 33ms 以上，平移/缩放同样卡；位图压到 16M px 以内后掉帧归零。坐标仍用原图单位
+// （imageScale 经 ctx.setTransform 映射），配合 CSS width/height 撑回原图大小，
+// 布局盒子与缩放行为都不变，掩膜那套（MASK_CANVAS_MAX_PIXELS）同理。
+const IMAGE_CANVAS_MAX_PIXELS = 16 * 1024 * 1024
 
 interface EditorProps {
   file: File
@@ -232,6 +241,21 @@ export default function Editor(props: EditorProps) {
     return strokeRef.current !== null || curLineGroup.length !== 0
   }, [curLineGroup])
 
+  // 显示用原图/渲染画布的分辨率：不超过 IMAGE_CANVAS_MAX_PIXELS，坐标仍用原图坐标，
+  // 靠 ctx.setTransform 映射。imageScale === 1 时与原来完全一致。
+  const imageScale = useMemo(() => {
+    if (imageWidth === 0 || imageHeight === 0) {
+      return 1
+    }
+    const pixels = imageWidth * imageHeight
+    if (pixels <= IMAGE_CANVAS_MAX_PIXELS) {
+      return 1
+    }
+    return Math.sqrt(IMAGE_CANVAS_MAX_PIXELS / pixels)
+  }, [imageWidth, imageHeight])
+  const imageCanvasWidth = Math.max(1, Math.round(imageWidth * imageScale))
+  const imageCanvasHeight = Math.max(1, Math.round(imageHeight * imageScale))
+
   useEffect(() => {
     if (
       !imageContext ||
@@ -242,15 +266,19 @@ export default function Editor(props: EditorProps) {
       return
     }
     const render = renders.length === 0 ? original : renders[renders.length - 1]
-    imageContext.canvas.width = imageWidth
-    imageContext.canvas.height = imageHeight
-
-    imageContext.clearRect(
-      0,
-      0,
-      imageContext.canvas.width,
-      imageContext.canvas.height
-    )
+    // 位图按上限等比缩小（见 IMAGE_CANVAS_MAX_PIXELS），坐标仍用原图单位。
+    // 改 width/height 会清空位图并重置变换，所以之后必须重新 setTransform。
+    if (imageContext.canvas.width !== imageCanvasWidth) {
+      imageContext.canvas.width = imageCanvasWidth
+    }
+    if (imageContext.canvas.height !== imageCanvasHeight) {
+      imageContext.canvas.height = imageCanvasHeight
+    }
+    // clearRect / drawImage 分两次设置变换：先在 identity 下清整块位图，
+    // 再缩放绘制（与掩膜画布同一套，绘制后目标矩形按 imageScale 映射到位图）
+    imageContext.setTransform(1, 0, 0, 1, 0, 0)
+    imageContext.clearRect(0, 0, imageCanvasWidth, imageCanvasHeight)
+    imageContext.setTransform(imageScale, 0, 0, imageScale, 0, 0)
     imageContext.drawImage(render, 0, 0, imageWidth, imageHeight)
   }, [
     renders,
@@ -259,6 +287,9 @@ export default function Editor(props: EditorProps) {
     imageContext,
     imageHeight,
     imageWidth,
+    imageCanvasWidth,
+    imageCanvasHeight,
+    imageScale,
   ])
 
   // 显示用掩膜画布的分辨率：不超过 MASK_CANVAS_MAX_PIXELS，坐标仍用原图坐标，
@@ -665,7 +696,10 @@ export default function Editor(props: EditorProps) {
     ctx.rect(x0, y0, bw, bh)
     ctx.clip()
     applyMaskTransform(ctx, scale)
-    drawLines(ctx, [stroke])
+    // 只描与脏矩形相交的线段（合成一次 stroke，自交处仍只着色一次）：
+    // 脏矩形外的线段本来就会被上面的 clip 去掉，略过它们结果逐像素不变，
+    // 而每帧的路径长度不再随已画点数增长（原来的 O(n²) 重描）。
+    drawLineWithinRect(ctx, stroke, dirty, pad)
     ctx.restore()
     strokeDrawnCountRef.current = stroke.pts.length
   }, [context, brushSize, applyMaskTransform])
@@ -1338,6 +1372,10 @@ export default function Editor(props: EditorProps) {
               style={{
                 clipPath: `inset(0 ${sliderPos}% 0 0)`,
                 transition: `clip-path ${COMPARE_SLIDER_DURATION_MS}ms`,
+                // 位图可能比原图小（见 IMAGE_CANVAS_MAX_PIXELS），用 CSS 尺寸把布局
+                // 盒子撑回原图大小，坐标系和缩放行为保持不变（与掩膜画布同一套做法）
+                width: `${imageWidth}px`,
+                height: `${imageHeight}px`,
               }}
               ref={(r) => {
                 if (r && !imageContext) {

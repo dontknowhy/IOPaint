@@ -3,6 +3,7 @@
 import { describe, expect, it, vi } from "vitest"
 import {
   buildDownloadName,
+  drawLineWithinRect,
   drawLines,
   extFromMime,
   generateMask,
@@ -138,6 +139,112 @@ describe("drawLines", () => {
     ]
 
     drawLines(ctx, lines)
+
+    expect(calls).toEqual([])
+  })
+})
+
+describe("drawLineWithinRect", () => {
+  function fakeCtx() {
+    const calls: string[][] = []
+    return {
+      calls,
+      ctx: {
+        strokeStyle: "",
+        lineCap: "",
+        lineJoin: "",
+        lineWidth: 0,
+        beginPath: () => calls.push(["beginPath"]),
+        moveTo: (x: number, y: number) => calls.push(["moveTo", `${x}`, `${y}`]),
+        lineTo: (x: number, y: number) => calls.push(["lineTo", `${x}`, `${y}`]),
+        stroke: () => calls.push(["stroke"]),
+      } as unknown as CanvasRenderingContext2D,
+    }
+  }
+
+  it("只描与 rect 相交的线段，剩余线段合成一条子路径", () => {
+    const { calls, ctx } = fakeCtx()
+    const line: Line = {
+      size: 4,
+      pts: [
+        { x: 0, y: 0 },
+        { x: 10, y: 0 },
+        { x: 20, y: 0 },
+        { x: 30, y: 0 },
+        { x: 40, y: 0 },
+        { x: 50, y: 0 },
+      ],
+    }
+
+    // rect 只盖住 x∈[18,22]：命中的是 (10,20) 与 (20,30) 两段
+    drawLineWithinRect(ctx, line, { x: 18, y: -2, w: 4, h: 4 })
+
+    expect(ctx.strokeStyle).toBe(BRUSH_COLOR)
+    expect(ctx.lineCap).toBe("round")
+    expect(ctx.lineJoin).toBe("round")
+    expect(ctx.lineWidth).toBe(4)
+    expect(calls).toEqual([
+      ["beginPath"],
+      ["moveTo", "10", "0"],
+      ["lineTo", "20", "0"],
+      ["lineTo", "30", "0"],
+      ["stroke"],
+    ])
+  })
+
+  it("不相邻的两段各起一条子路径，但仍只 stroke() 一次", () => {
+    const { calls, ctx } = fakeCtx()
+    const line: Line = {
+      size: 4,
+      pts: [
+        { x: 0, y: 0 },
+        { x: 10, y: 0 },
+        { x: 20, y: 100 },
+        { x: 30, y: 100 },
+        { x: 40, y: 0 },
+        { x: 50, y: 0 },
+      ],
+    }
+
+    // y∈[-5,5] 的 rect 只与第 1 段(y=0)、以及回到 y=0 的第 4/5 段相交；
+    // 中间两段在 y=100 外，被跳过
+    drawLineWithinRect(ctx, line, { x: -5, y: -5, w: 60, h: 10 })
+
+    expect(calls.filter((c) => c[0] === "stroke")).toHaveLength(1)
+    expect(calls).toEqual([
+      ["beginPath"],
+      ["moveTo", "0", "0"],
+      ["lineTo", "10", "0"],
+      ["lineTo", "20", "100"],
+      ["moveTo", "30", "100"],
+      ["lineTo", "40", "0"],
+      ["lineTo", "50", "0"],
+      ["stroke"],
+    ])
+  })
+
+  it("单点退回 drawLines（圆头笔帽画圆点，没有 lineTo）", () => {
+    const { calls, ctx } = fakeCtx()
+
+    drawLineWithinRect(ctx, { size: 4, pts: [{ x: 3, y: 5 }] }, {
+      x: 0,
+      y: 0,
+      w: 10,
+      h: 10,
+    })
+
+    expect(calls).toEqual([["beginPath"], ["moveTo", "3", "5"], ["stroke"]])
+  })
+
+  it("没有 size 的笔迹什么也不画", () => {
+    const { calls, ctx } = fakeCtx()
+
+    drawLineWithinRect(ctx, { pts: [{ x: 1, y: 1 }, { x: 2, y: 2 }] }, {
+      x: 0,
+      y: 0,
+      w: 10,
+      h: 10,
+    })
 
     expect(calls).toEqual([])
   })
