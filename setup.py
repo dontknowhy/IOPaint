@@ -57,7 +57,10 @@ setuptools.setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/Sanster/IOPaint",
-    packages=setuptools.find_packages("."),
+    # iopaint/tests 也是一个带 __init__.py 的包，find_packages(".") 会把
+    # iopaint.tests 连同 test_*.py/conftest.py 一起收进 wheel；打包产物只需要
+    # 运行时依赖，测试套件随源码仓库分发即可，故显式排除。
+    packages=setuptools.find_packages(".", exclude=["iopaint.tests", "iopaint.tests.*"]),
     package_data={"iopaint": package_files},
     install_requires=load_requirements(),
     python_requires=">=3.8",
