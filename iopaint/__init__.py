@@ -19,12 +19,12 @@ from PIL import Image
 
 warnings.simplefilter("ignore", UserWarning)
 
-# 防解压炸弹：显式钉住单张图片的最大像素数（约 1 亿像素）。
-# PIL 默认值是 89,478,485（≈89.5MP），本仓库此前未显式设置；这里把它写成
-# 显式常量，让限制可见。超过 2× 上限时 Pillow 抛 DecompressionBombError，
-# 超过上限时抛 DecompressionBombWarning（RuntimeWarning，不受上面的
-# simplefilter("ignore", UserWarning) 影响）。
-Image.MAX_IMAGE_PIXELS = 100_000_000
+# 防解压炸弹：Pillow 的 Image.MAX_IMAGE_PIXELS 是进程级全局，无法按请求来源
+# 区分内网/外网，而解码又并发跑在线程池里，逐请求改写全局会互相踩。因此这里
+# 关掉 Pillow 的内置检查，改由 helper.check_image_pixels 按来源显式执行：
+# 外网沿用 1 亿像素上限（EXTERNAL_MAX_IMAGE_PIXELS，>上限告警、>2×上限抛错，
+# 与 Pillow 原生语义一致），内网来源（回环/私有网段）不限制（max_pixels=None）。
+Image.MAX_IMAGE_PIXELS = None
 
 
 def fix_window_pytorch():

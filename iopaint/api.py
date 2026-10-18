@@ -40,6 +40,9 @@ from iopaint.helper import (
     concat_alpha_channel,
     gen_frontend_mask,
     adjust_mask,
+    is_private_host,
+    EXTERNAL_MAX_IMAGE_PIXELS,
+    PRIVATE_MAX_IMAGE_PIXELS,
 )
 from iopaint.model.utils import torch_gc
 from iopaint.model_manager import ModelManager
@@ -70,6 +73,20 @@ WEB_APP_DIR = CURRENT_DIR / "web_app"
 # 单个请求体上限（256MB）。12MP PNG 的 base64 约 15MB，留足余量；
 # 超过则 413，避免超大 body 打爆内存（DOS-1）。
 MAX_REQUEST_BODY_BYTES = 256 * 1024 * 1024
+
+
+def _max_pixels_for_request(request: Optional[Request]) -> Optional[int]:
+    """按来源限定单张图片的像素数。
+
+    内网来源（回环/私有网段，见 helper.is_private_host）返回 None（不限制），
+    外网来源沿用 1 亿像素上限。直连部署下 request.client.host 即真实来源 IP；
+    取不到（None/无法解析）一律按外网处理。
+    """
+    host = request.client.host if request is not None and request.client else None
+    if is_private_host(host):
+        return PRIVATE_MAX_IMAGE_PIXELS
+    return EXTERNAL_MAX_IMAGE_PIXELS
+
 
 WEB_APP_NOT_BUILT_MSG = (
     "IOPaint web UI 还没构建（iopaint/web_app 是 gitignore 的构建产物）。\n"
@@ -369,8 +386,12 @@ class Api:
             return FileResponse(self.config.input)
         raise HTTPException(status_code=404, detail="Input image not found")
 
-    def api_geninfo(self, file: UploadFile) -> GenInfoResponse:
-        _, _, info = load_img(file.file.read(), return_info=True)
+    def api_geninfo(self, file: UploadFile, request: Request) -> GenInfoResponse:
+        _, _, info = load_img(
+            file.file.read(),
+            return_info=True,
+            max_pixels=_max_pixels_for_request(request),
+        )
         parts = info.get("parameters", "").split("Negative prompt: ")
         prompt = parts[0].strip()
         negative_prompt = ""
@@ -378,7 +399,7 @@ class Api:
             negative_prompt = parts[1].split("\n")[0].strip()
         return GenInfoResponse(prompt=prompt, negative_prompt=negative_prompt)
 
-    async def api_inpaint(self, req: InpaintRequest):
+    async def api_inpaint(self, req: InpaintRequest, request: Request) -> Response:
         if not req.image or not req.mask:
             raise HTTPException(status_code=400, detail="image and mask are required")
 
@@ -388,7 +409,7 @@ class Api:
         # 连同模型推理一起整体放进线程池。
         loop = asyncio.get_running_loop()
         res_img_bytes, ext = await loop.run_in_executor(
-            None, self._inpaint_blocking, req
+            None, self._inpaint_blocking, req, _max_pixels_for_request(request)
         )
 
         await self.sio.emit("diffusion_finish")
@@ -420,12 +441,22 @@ class Api:
                 ),
             )
 
-    def _inpaint_blocking(self, req: InpaintRequest) -> tuple:
+    def _inpaint_blocking(
+        self,
+        req: InpaintRequest,
+        max_pixels: Optional[int] = EXTERNAL_MAX_IMAGE_PIXELS,
+    ) -> tuple:
         """同步版 inpaint：decode → inference → encode。跑在线程池里。"""
         # 裁剪边距以服务端 config.json 为准（前端下发的是常量，不暴露给用户）
         req.hd_strategy_crop_margin = self.config.hd_strategy_crop_margin
-        image, alpha_channel, infos, ext = decode_base64_to_image(req.image)
-        mask, _, _, _ = decode_base64_to_image(req.mask, gray=True)
+        # api_inpaint 已保证二者存在；这里显式断言，顺带让类型收窄为非 None
+        assert req.image is not None and req.mask is not None
+        image, alpha_channel, infos, ext = decode_base64_to_image(
+            req.image, max_pixels=max_pixels
+        )
+        mask, _, _, _ = decode_base64_to_image(
+            req.mask, gray=True, max_pixels=max_pixels
+        )
         logger.debug(f"image ext: {ext}")
 
         mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)[1]
@@ -474,7 +505,9 @@ class Api:
         )
         return res_img_bytes, ext
 
-    async def api_run_plugin_gen_image(self, req: RunPluginRequest):
+    async def api_run_plugin_gen_image(
+        self, req: RunPluginRequest, request: Request
+    ) -> Response:
         ext = "png"
         if req.name not in self.plugins:
             raise HTTPException(status_code=422, detail="Plugin not found")
@@ -485,12 +518,18 @@ class Api:
         # PERF-1: decode + encode 与插件推理一起放进线程池
         loop = asyncio.get_running_loop()
         content = await loop.run_in_executor(
-            None, self._plugin_gen_image_blocking, req
+            None, self._plugin_gen_image_blocking, req, _max_pixels_for_request(request)
         )
         return Response(content=content, media_type=f"image/{ext}")
 
-    def _plugin_gen_image_blocking(self, req: RunPluginRequest) -> bytes:
-        rgb_np_img, alpha_channel, infos, _ = decode_base64_to_image(req.image)
+    def _plugin_gen_image_blocking(
+        self,
+        req: RunPluginRequest,
+        max_pixels: Optional[int] = EXTERNAL_MAX_IMAGE_PIXELS,
+    ) -> bytes:
+        rgb_np_img, alpha_channel, infos, _ = decode_base64_to_image(
+            req.image, max_pixels=max_pixels
+        )
         plugin = self.plugins[req.name]
         # CON-1: 插件内部状态（模型句柄等）不接受并发重入；锁只包推理，
         # 解码/编码留在锁外
@@ -512,7 +551,9 @@ class Api:
             infos=infos,
         )
 
-    async def api_run_plugin_gen_mask(self, req: RunPluginRequest):
+    async def api_run_plugin_gen_mask(
+        self, req: RunPluginRequest, request: Request
+    ) -> Response:
         if req.name not in self.plugins:
             raise HTTPException(status_code=422, detail="Plugin not found")
         if not self.plugins[req.name].support_gen_mask:
@@ -521,12 +562,16 @@ class Api:
             )
         loop = asyncio.get_running_loop()
         content = await loop.run_in_executor(
-            None, self._plugin_gen_mask_blocking, req
+            None, self._plugin_gen_mask_blocking, req, _max_pixels_for_request(request)
         )
         return Response(content=content, media_type="image/png")
 
-    def _plugin_gen_mask_blocking(self, req: RunPluginRequest) -> bytes:
-        rgb_np_img, _, _, _ = decode_base64_to_image(req.image)
+    def _plugin_gen_mask_blocking(
+        self,
+        req: RunPluginRequest,
+        max_pixels: Optional[int] = EXTERNAL_MAX_IMAGE_PIXELS,
+    ) -> bytes:
+        rgb_np_img, _, _, _ = decode_base64_to_image(req.image, max_pixels=max_pixels)
         plugin = self.plugins[req.name]
         with plugin.lock:
             bgr_or_gray_mask = plugin.gen_mask(rgb_np_img, req)
@@ -538,8 +583,10 @@ class Api:
     def api_samplers(self) -> List[str]:
         return [member.value for member in SDSampler.__members__.values()]
 
-    def api_adjust_mask(self, req: AdjustMaskRequest):
-        mask, _, _, _ = decode_base64_to_image(req.mask, gray=True)
+    def api_adjust_mask(self, req: AdjustMaskRequest, request: Request) -> Response:
+        mask, _, _, _ = decode_base64_to_image(
+            req.mask, gray=True, max_pixels=_max_pixels_for_request(request)
+        )
         mask = adjust_mask(mask, req.kernel_size, req.operate)
         return Response(content=numpy_to_bytes(mask, "png"), media_type="image/png")
 

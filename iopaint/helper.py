@@ -1,8 +1,10 @@
 import base64
 import io
+import ipaddress
 import os
 import sys
-from typing import List, Optional, Dict, Tuple
+import warnings
+from typing import Any, List, Optional, Dict, Tuple
 
 from urllib.parse import urlparse
 import cv2
@@ -198,9 +200,86 @@ def pil_to_bytes(
     return image_bytes
 
 
-def load_img(img_bytes, gray: bool = False, return_info: bool = False):
+# 单张图片的像素上限，按请求来源区分（见 api.py:_max_pixels_for_request）：
+# 外网来源沿用 1 亿像素上限；内网（回环 / RFC1918 私有网段 / 链路本地）来源
+# 传 None，表示不限制。
+#
+# Pillow 的 `Image.MAX_IMAGE_PIXELS` 是进程级全局常量，无法按请求区分来源，
+# 而解码跑在线程池里并发执行，逐请求改写全局会互相踩。因此 iopaint/__init__.py
+# 把该全局置为 None，改由下面的 check_image_pixels 按 `max_pixels` 显式检查。
+EXTERNAL_MAX_IMAGE_PIXELS = 100_000_000
+PRIVATE_MAX_IMAGE_PIXELS: Optional[int] = None
+
+# 视为内网的来源网段：回环 + RFC1918 私有网段 + 链路本地 + IPv6 ULA。
+_PRIVATE_NETWORKS = [
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+]
+
+
+def is_private_host(host: Optional[str]) -> bool:
+    """判断请求来源是否属于内网。
+
+    命中回环（127.0.0.0/8、::1）、RFC1918 私有网段（10/8、172.16/12、
+    192.168/16）、链路本地（169.254/16、fe80::/10）以及 IPv6 ULA（fc00::/7）
+    即视为内网；字面量 "localhost" 也算，双栈下的 IPv4-mapped IPv6
+    （::ffff:192.168.x.x）先还原成 IPv4 再判断。这里刻意不直接用
+    ipaddress.is_private——它还会把文档/保留网段（如 203.0.113.0/24）也算作
+    private，那样会给非内网来源放开限制。无法解析的主机名（如测试客户端的
+    "testclient"）与 None 一律按外网处理，宁可多限制。
+    """
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    # 双栈监听时对端可能以 IPv4-mapped IPv6（::ffff:192.168.x.x）出现
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return any(ip in network for network in _PRIVATE_NETWORKS)
+
+
+def check_image_pixels(size: Tuple[int, int], max_pixels: Optional[int]) -> None:
+    """复刻 Pillow 的 DecompressionBomb 两档语义，但上限可按请求来源指定。
+
+    `max_pixels=None`（内网）不检查；超过 `max_pixels` 只告警，超过 2×上限
+    视为解压炸弹抛 `DecompressionBombError`——与 Pillow 原生行为一致。
+    """
+    if max_pixels is None:
+        return
+
+    pixels = max(1, size[0]) * max(1, size[1])
+    if pixels > 2 * max_pixels:
+        raise Image.DecompressionBombError(
+            f"Image size ({pixels} pixels) exceeds limit of {2 * max_pixels} "
+            "pixels, could be decompression bomb DOS attack."
+        )
+    if pixels > max_pixels:
+        warnings.warn(
+            f"Image size ({pixels} pixels) exceeds limit of {max_pixels} pixels, "
+            "could be decompression bomb DOS attack.",
+            Image.DecompressionBombWarning,
+        )
+
+
+def load_img(
+    img_bytes: bytes,
+    gray: bool = False,
+    return_info: bool = False,
+    max_pixels: Optional[int] = EXTERNAL_MAX_IMAGE_PIXELS,
+) -> Any:
     alpha_channel = None
     image = Image.open(io.BytesIO(img_bytes))
+    check_image_pixels(image.size, max_pixels)
 
     if return_info:
         infos = image.info
@@ -344,7 +423,9 @@ def is_mac():
 
 
 def decode_base64_to_image(
-    encoding: str, gray=False
+    encoding: str,
+    gray: bool = False,
+    max_pixels: Optional[int] = EXTERNAL_MAX_IMAGE_PIXELS,
 ) -> Tuple[np.array, Optional[np.array], Dict, str]:
     if encoding.startswith("data:image/") or encoding.startswith(
         "data:application/octet-stream;base64,"
@@ -352,6 +433,7 @@ def decode_base64_to_image(
         encoding = encoding.split(";")[1].split(",")[1]
     image_bytes = base64.b64decode(encoding)
     image = Image.open(io.BytesIO(image_bytes))
+    check_image_pixels(image.size, max_pixels)
     # image.format must be read before exif_transpose, which returns a new
     # image without the format attribute set.
     ext = (image.format or "jpeg").lower()
