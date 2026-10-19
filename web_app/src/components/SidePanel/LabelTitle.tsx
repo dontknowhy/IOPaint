@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next"
 import { cn } from "@/lib/utils"
 import { Button } from "../ui/button"
 import { Label } from "../ui/label"
@@ -22,6 +23,8 @@ const LabelTitle = ({
   disabled?: boolean
   className?: string
 }) => {
+  const { t } = useTranslation()
+
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -39,7 +42,7 @@ const LabelTitle = ({
           {url ? (
             <Button variant="link" className="justify-end">
               <a href={url} target="_blank">
-                More info
+                {t("labelTitle.moreInfo")}
               </a>
             </Button>
           ) : (

@@ -16,6 +16,7 @@ import {
   Smile,
 } from "lucide-react"
 import { useStore } from "@/lib/states"
+import { useTranslation } from "react-i18next"
 import { PluginInfo, PluginName } from "@/lib/types"
 import Spinner from "@/components/ui/spinner"
 
@@ -23,31 +24,32 @@ import Spinner from "@/components/ui/spinner"
 const pluginMap = {
   [PluginName.RemoveBG]: {
     IconClass: Slice,
-    showName: "RemoveBG",
+    showNameKey: "plugins.removeBgName",
   },
   [PluginName.AnimeSeg]: {
     IconClass: Slice,
-    showName: "Anime Segmentation",
+    showNameKey: "plugins.animeSegName",
   },
   [PluginName.RealESRGAN]: {
     IconClass: Fullscreen,
-    showName: "RealESRGAN",
+    showNameKey: "plugins.realesrganName",
   },
   [PluginName.GFPGAN]: {
     IconClass: Smile,
-    showName: "GFPGAN",
+    showNameKey: "plugins.gfpganName",
   },
   [PluginName.RestoreFormer]: {
     IconClass: Smile,
-    showName: "RestoreFormer",
+    showNameKey: "plugins.restoreFormerName",
   },
   [PluginName.InteractiveSeg]: {
     IconClass: MousePointerClick,
-    showName: "Interactive Segmentation",
+    showNameKey: "plugins.interactiveSegName",
   },
-}
+} as const
 
 const Plugins = () => {
+  const { t } = useTranslation()
   const [
     file,
     plugins,
@@ -81,7 +83,7 @@ const Plugins = () => {
         <DropdownMenuSubTrigger disabled={disabled}>
           <div className="flex gap-2 items-center">
             <Fullscreen />
-            RealESRGAN
+            {t("plugins.realesrganName")}
           </div>
         </DropdownMenuSubTrigger>
         <DropdownMenuSubContent>
@@ -90,14 +92,14 @@ const Plugins = () => {
               runRenderablePlugin(false, PluginName.RealESRGAN, { upscale: 2 })
             }
           >
-            upscale 2x
+            {t("plugins.upscale2x")}
           </DropdownMenuItem>
           <DropdownMenuItem
             onClick={() =>
               runRenderablePlugin(false, PluginName.RealESRGAN, { upscale: 4 })
             }
           >
-            upscale 4x
+            {t("plugins.upscale4x")}
           </DropdownMenuItem>
         </DropdownMenuSubContent>
       </DropdownMenuSub>
@@ -105,21 +107,21 @@ const Plugins = () => {
   }
 
   const renderGenImageAndMaskPlugin = (plugin: PluginInfo) => {
-    const { IconClass, showName } = pluginMap[plugin.name as PluginName]
+    const { IconClass, showNameKey } = pluginMap[plugin.name as PluginName]
     return (
       <DropdownMenuSub key={plugin.name}>
         <DropdownMenuSubTrigger disabled={disabled}>
           <div className="flex gap-2 items-center">
             <IconClass className="p-1" />
-            {showName}
+            {t(showNameKey)}
           </div>
         </DropdownMenuSubTrigger>
         <DropdownMenuSubContent>
           <DropdownMenuItem onClick={() => onPluginClick(false, plugin.name)}>
-            Remove Background
+            {t("plugins.removeBackground")}
           </DropdownMenuItem>
           <DropdownMenuItem onClick={() => onPluginClick(true, plugin.name)}>
-            Generate Mask
+            {t("plugins.generateMask")}
           </DropdownMenuItem>
         </DropdownMenuSubContent>
       </DropdownMenuSub>
@@ -128,7 +130,7 @@ const Plugins = () => {
 
   const renderPlugins = () => {
     return plugins.map((plugin: PluginInfo) => {
-      const { IconClass, showName } = pluginMap[plugin.name as PluginName]
+      const { IconClass, showNameKey } = pluginMap[plugin.name as PluginName]
       if (plugin.name === PluginName.RealESRGAN) {
         return renderRealESRGANPlugin()
       }
@@ -146,7 +148,7 @@ const Plugins = () => {
         >
           <div className="flex gap-2 items-center">
             <IconClass className="p-1" />
-            {showName}
+            {t(showNameKey)}
           </div>
         </DropdownMenuItem>
       )

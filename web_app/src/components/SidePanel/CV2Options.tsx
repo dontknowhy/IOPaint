@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next"
 import { useStore } from "@/lib/states"
 import { LabelTitle, RowContainer } from "./LabelTitle"
 import { NumberInput } from "../ui/input"
@@ -17,12 +18,13 @@ const CV2Options = () => {
     state.settings,
     state.updateSettings,
   ])
+  const { t } = useTranslation()
 
   return (
     <div className="flex flex-col gap-4 mt-4">
       <RowContainer>
         <LabelTitle
-          text="CV2 Flag"
+          text={t("cv2.flag")}
           url="https://docs.opencv.org/4.8.0/d7/d8b/group__photo__inpaint.html#gga8002a65f5a3328fbf15df81b842d3c3ca892824c38e258feb5e72f308a358d52e"
         />
         <Select
@@ -33,7 +35,7 @@ const CV2Options = () => {
           }}
         >
           <SelectTrigger className="w-[160px]">
-            <SelectValue placeholder="Select flag" />
+            <SelectValue placeholder={t("cv2.selectFlag")} />
           </SelectTrigger>
           <SelectContent align="end">
             <SelectGroup>
@@ -47,7 +49,7 @@ const CV2Options = () => {
         </Select>
       </RowContainer>
       <LabelTitle
-        text="CV2 Radius"
+        text={t("cv2.radius")}
         url="https://docs.opencv.org/4.8.0/d7/d8b/group__photo__inpaint.html#gga8002a65f5a3328fbf15df81b842d3c3ca892824c38e258feb5e72f308a358d52e"
       />
       <RowContainer>

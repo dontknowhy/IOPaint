@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from "react"
+import { useTranslation } from "react-i18next"
 
 import useInputImage from "@/hooks/useInputImage"
 import { keepGUIAlive } from "@/lib/utils"
@@ -24,6 +25,8 @@ function Home() {
     state.setServerConfig,
     state.setFile,
   ])
+
+  const { t } = useTranslation()
 
   const userInputImage = useInputImage()
 
@@ -91,7 +94,7 @@ function Home() {
         if (dataTransfer.files.length > 1) {
           toast({
             variant: "destructive",
-            description: "Please drag and drop only one file",
+            description: t("app.dropOnlyOneFile"),
           })
         } else {
           const dragFile = dataTransfer.files[0]
@@ -100,14 +103,14 @@ function Home() {
           } else {
             toast({
               variant: "destructive",
-              description: "Please drag and drop an image file",
+              description: t("app.dropImageFile"),
             })
           }
         }
         dataTransfer.clearData()
       }
     },
-    [setFile]
+    [setFile, t]
   )
 
   const onPaste = useCallback(

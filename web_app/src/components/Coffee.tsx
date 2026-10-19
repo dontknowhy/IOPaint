@@ -1,22 +1,24 @@
 import { Coffee as CoffeeIcon } from "lucide-react"
+import { useTranslation } from "react-i18next"
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "./ui/dialog"
 import { IconButton } from "./ui/button"
 import { DialogDescription } from "@radix-ui/react-dialog"
 import Kofi from "@/assets/kofi_button_black.png"
 
 export function Coffee() {
+  const { t } = useTranslation()
+
   return (
     <Dialog>
       <DialogTrigger asChild>
-        <IconButton tooltip="Buy me a coffee">
+        <IconButton tooltip={t("coffee.tooltip")}>
           <CoffeeIcon />
         </IconButton>
       </DialogTrigger>
       <DialogContent>
-        <DialogTitle>Buy me a coffee</DialogTitle>
+        <DialogTitle>{t("coffee.title")}</DialogTitle>
         <DialogDescription className="mb-8">
-          Hi, if you found my project is useful, please conside buy me a coffee
-          to support my work. Thanks!
+          {t("coffee.description")}
         </DialogDescription>
         <div className="w-full flex items-center justify-center">
           <a

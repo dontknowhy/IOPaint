@@ -2,6 +2,7 @@ import { IconButton, ImageUploadButton } from "@/components/ui/button"
 import Shortcuts from "@/components/Shortcuts"
 
 import { lazy, Suspense } from "react"
+import { useTranslation } from "react-i18next"
 import PromptInput from "./PromptInput"
 import { RotateCw, Image } from "lucide-react"
 import { getMediaBlob, getMediaFile } from "@/lib/api"
@@ -42,6 +43,7 @@ const Header = () => {
   ])
 
   const { toast } = useToast()
+  const { t } = useTranslation()
 
   const handleRerunLastMask = () => {
     runInpainting()
@@ -86,7 +88,7 @@ const Header = () => {
 
         <ImageUploadButton
           disabled={isInpainting}
-          tooltip="Upload image"
+          tooltip={t("header.uploadImage")}
           onFileUpload={(file) => {
             setFile(file)
           }}
@@ -97,7 +99,7 @@ const Header = () => {
         {file && !model.need_prompt ? (
           <IconButton
             disabled={isInpainting}
-            tooltip="Rerun previous mask"
+            tooltip={t("header.rerunPreviousMask")}
             onClick={handleRerunLastMask}
             onMouseEnter={onRerunMouseEnter}
             onMouseLeave={onRerunMouseLeave}

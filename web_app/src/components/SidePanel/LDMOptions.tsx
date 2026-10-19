@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next"
 import { useStore } from "@/lib/states"
 import { LabelTitle, RowContainer } from "./LabelTitle"
 import { NumberInput } from "../ui/input"
@@ -17,14 +18,15 @@ const LDMOptions = () => {
     state.settings,
     state.updateSettings,
   ])
+  const { t } = useTranslation()
 
   return (
     <div className="flex flex-col gap-4 mt-4">
       <div className="flex flex-col gap-1">
         <LabelTitle
           htmlFor="steps"
-          text="Steps"
-          toolTip="The number of denoising steps. More denoising steps usually lead to a higher quality image at the expense of slower inference."
+          text={t("diffusion.steps")}
+          toolTip={t("diffusion.stepsTip")}
         />
         <RowContainer>
           <Slider
@@ -48,7 +50,7 @@ const LDMOptions = () => {
         </RowContainer>
       </div>
       <RowContainer>
-        <LabelTitle text="Sampler" />
+        <LabelTitle text={t("diffusion.sampler")} />
         <Select
           value={settings.ldmSampler as string}
           onValueChange={(value) => {
@@ -57,7 +59,7 @@ const LDMOptions = () => {
           }}
         >
           <SelectTrigger className="w-[100px]">
-            <SelectValue placeholder="Select sampler" />
+            <SelectValue placeholder={t("diffusion.selectSampler")} />
           </SelectTrigger>
           <SelectContent align="end">
             <SelectGroup>

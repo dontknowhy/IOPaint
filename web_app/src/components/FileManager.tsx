@@ -7,6 +7,7 @@ import {
   FormEvent,
 } from "react"
 import orderBy from "lodash/orderBy"
+import { useTranslation } from "react-i18next"
 import PhotoAlbum from "react-photo-album"
 import "react-photo-album/styles.css"
 import { BarsArrowDownIcon, BarsArrowUpIcon } from "@heroicons/react/24/outline"
@@ -47,18 +48,15 @@ interface Photo {
   name: string
 }
 
-const SORT_BY_NAME = "Name"
-const SORT_BY_CREATED_TIME = "Created time"
-const SORT_BY_MODIFIED_TIME = "Modified time"
-
 const IMAGE_TAB = "input"
 const OUTPUT_TAB = "output"
 
-const SortByMap = {
-  [SortBy.NAME]: SORT_BY_NAME,
-  [SortBy.CTIME]: SORT_BY_CREATED_TIME,
-  [SortBy.MTIME]: SORT_BY_MODIFIED_TIME,
-}
+// Select 的 value 保持稳定的枚举值，显示名走语言包。
+const SORT_BY_LABEL_KEYS = {
+  [SortBy.NAME]: "fileManager.sortName",
+  [SortBy.CTIME]: "fileManager.sortCreatedTime",
+  [SortBy.MTIME]: "fileManager.sortModifiedTime",
+} as const
 
 interface Props {
   onPhotoClick(tab: string, filename: string): void
@@ -75,6 +73,7 @@ export default function FileManager(props: Props) {
   ])
 
   const { toast } = useToast()
+  const { t } = useTranslation()
   const [scrollTop, setScrollTop] = useState(0)
   const [closeScrollTop, setCloseScrollTop] = useState(0)
 
@@ -167,14 +166,14 @@ export default function FileManager(props: Props) {
         }
         toast({
           variant: "destructive",
-          title: "Uh oh! Something went wrong.",
+          title: t("common.somethingWentWrong"),
           description: getErrorMessage(e),
         })
       }
     }
     fetchData()
     return () => controller.abort()
-  }, [tab, toast])
+  }, [tab, toast, t])
 
   useEffect(() => {
     if (!open) {
@@ -214,13 +213,13 @@ export default function FileManager(props: Props) {
       } catch (e) {
         toast({
           variant: "destructive",
-          title: "Uh oh! Something went wrong.",
+          title: t("common.somethingWentWrong"),
           description: getErrorMessage(e),
         })
       }
     }
     fetchData()
-  }, [fileList, debouncedSearchText, fileManagerState, photoWidth, open, tab, toast])
+  }, [fileList, debouncedSearchText, fileManagerState, photoWidth, open, tab, toast, t])
 
   const onScroll = (event: SyntheticEvent) => {
     setScrollTop(event.currentTarget.scrollTop)
@@ -235,10 +234,10 @@ export default function FileManager(props: Props) {
   const renderTitle = () => {
     return (
       <div className="flex justify-start items-center gap-[12px]">
-        <div>{`Images (${photos.length})`}</div>
+        <div>{t("fileManager.imagesCount", { count: photos.length })}</div>
         <div className="flex">
           <IconButton
-            tooltip="Rows layout"
+            tooltip={t("fileManager.rowsLayout")}
             onClick={() => {
               updateFileManagerState({ layout: "rows" })
             }}
@@ -248,7 +247,7 @@ export default function FileManager(props: Props) {
             />
           </IconButton>
           <IconButton
-            tooltip="Grid layout"
+            tooltip={t("fileManager.gridLayout")}
             onClick={() => {
               updateFileManagerState({ layout: "masonry" })
             }}
@@ -267,7 +266,7 @@ export default function FileManager(props: Props) {
   return (
     <Dialog open={open} onOpenChange={toggleOpen}>
       <DialogTrigger asChild>
-        <IconButton tooltip="File Manager">
+        <IconButton tooltip={t("fileManager.fileManager")}>
           <FolderClosed />
         </IconButton>
       </DialogTrigger>
@@ -287,46 +286,40 @@ export default function FileManager(props: Props) {
                 const target = evt.target as HTMLInputElement
                 updateFileManagerState({ searchText: target.value })
               }}
-              placeholder="Search by file name"
+              placeholder={t("fileManager.searchPlaceholder")}
             />
           </div>
 
           <Tabs defaultValue={tab} onValueChange={(val) => setTab(val)}>
             <TabsList aria-label="Manage your account">
-              <TabsTrigger value={IMAGE_TAB}>Image Directory</TabsTrigger>
-              <TabsTrigger value={OUTPUT_TAB}>Output Directory</TabsTrigger>
-              <TabsTrigger value={MASK_TAB}>Mask Directory</TabsTrigger>
+              <TabsTrigger value={IMAGE_TAB}>
+                {t("fileManager.imageDirectory")}
+              </TabsTrigger>
+              <TabsTrigger value={OUTPUT_TAB}>
+                {t("fileManager.outputDirectory")}
+              </TabsTrigger>
+              <TabsTrigger value={MASK_TAB}>
+                {t("fileManager.maskDirectory")}
+              </TabsTrigger>
             </TabsList>
           </Tabs>
 
           <div className="flex gap-2">
             <div className="flex gap-1">
               <Select
-                value={SortByMap[fileManagerState.sortBy]}
+                value={fileManagerState.sortBy}
                 onValueChange={(val) => {
-                  switch (val) {
-                    case SORT_BY_NAME:
-                      updateFileManagerState({ sortBy: SortBy.NAME })
-                      break
-                    case SORT_BY_CREATED_TIME:
-                      updateFileManagerState({ sortBy: SortBy.CTIME })
-                      break
-                    case SORT_BY_MODIFIED_TIME:
-                      updateFileManagerState({ sortBy: SortBy.MTIME })
-                      break
-                    default:
-                      break
-                  }
+                  updateFileManagerState({ sortBy: val as SortBy })
                 }}
               >
                 <SelectTrigger className="w-[140px]">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {Object.values(SortByMap).map((val) => {
+                  {Object.values(SortBy).map((sortBy) => {
                     return (
-                      <SelectItem value={val} key={val}>
-                        {val}
+                      <SelectItem value={sortBy} key={sortBy}>
+                        {t(SORT_BY_LABEL_KEYS[sortBy])}
                       </SelectItem>
                     )
                   })}
@@ -335,7 +328,7 @@ export default function FileManager(props: Props) {
 
               {fileManagerState.sortOrder === SortOrder.DESCENDING ? (
                 <IconButton
-                  tooltip="Descending Order"
+                  tooltip={t("fileManager.descendingOrder")}
                   onClick={() => {
                     updateFileManagerState({ sortOrder: SortOrder.ASCENDING })
                   }}
@@ -344,7 +337,7 @@ export default function FileManager(props: Props) {
                 </IconButton>
               ) : (
                 <IconButton
-                  tooltip="Ascending Order"
+                  tooltip={t("fileManager.ascendingOrder")}
                   onClick={() => {
                     updateFileManagerState({ sortOrder: SortOrder.DESCENDING })
                   }}

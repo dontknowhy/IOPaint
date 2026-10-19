@@ -1,4 +1,5 @@
 import React, { FormEvent, useRef } from "react"
+import { useTranslation } from "react-i18next"
 import { Button } from "./ui/button"
 import { useStore } from "@/lib/states"
 import { useClickAway, useToggle } from "react-use"
@@ -23,6 +24,7 @@ const PromptInput = () => {
   ])
 
   const [showScroll, toggleShowScroll] = useToggle(false)
+  const { t } = useTranslation()
 
   const ref = useRef(null)
   useClickAway<MouseEvent>(ref, () => {
@@ -64,7 +66,7 @@ const PromptInput = () => {
       <div className="absolute flex gap-4">
         <Textarea
           ref={ref}
-          placeholder="I want to repaint of..."
+          placeholder={t("prompt.placeholder")}
           className={cn(
             showScroll ? "focus:overflow-y-auto" : "overflow-y-hidden",
             "min-h-[32px] h-[32px] overflow-x-hidden focus:h-[120px] overflow-y-hidden transition-[height] w-[500px] py-1 px-3 bg-background resize-none"
@@ -84,7 +86,7 @@ const PromptInput = () => {
           onMouseEnter={onMouseEnter}
           onMouseLeave={onMouseLeave}
         >
-          Paint
+          {t("prompt.paint")}
         </Button>
       </div>
     </div>

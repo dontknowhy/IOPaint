@@ -35,6 +35,7 @@ import {
   touchPointXY,
 } from "@/lib/utils"
 import { Eraser, Eye, Redo, Undo, Expand, Download } from "lucide-react"
+import { useTranslation } from "react-i18next"
 import { useImage } from "@/hooks/useImage"
 import { Slider } from "./ui/slider"
 import { Line, PluginName, Point } from "@/lib/types"
@@ -106,6 +107,7 @@ type TouchLatestState = {
 export default function Editor(props: EditorProps) {
   const { file } = props
   const { toast } = useToast()
+  const { t } = useTranslation()
 
   const [
     disableShortCuts,
@@ -1121,12 +1123,12 @@ export default function Editor(props: EditorProps) {
           renderMime
         )
         toast({
-          description: "Save image success",
+          description: t("editor.saveImageSuccess"),
         })
       } catch (e) {
         toast({
           variant: "destructive",
-          title: "Uh oh! Something went wrong.",
+          title: t("common.somethingWentWrong"),
           description: getErrorMessage(e),
         })
       }
@@ -1181,6 +1183,7 @@ export default function Editor(props: EditorProps) {
     imageHeight,
     imageWidth,
     lineGroups,
+    t,
     toast,
   ])
 
@@ -1247,12 +1250,12 @@ export default function Editor(props: EditorProps) {
           ])
           await copyCanvasImage(fullRes)
           toast({
-            title: "Copy inpainting result to clipboard",
+            title: t("editor.copyResultToClipboard"),
           })
         }
       }
     },
-    [renders, imageWidth, imageHeight, curLineGroup]
+    [renders, imageWidth, imageHeight, curLineGroup, t]
   )
 
   // Toggle clean/zoom tool on spacebar.
@@ -1925,28 +1928,28 @@ export default function Editor(props: EditorProps) {
         />
         <div className="flex gap-2">
           <IconButton
-            tooltip="Reset zoom & pan"
+            tooltip={t("editor.resetZoomPan")}
             disabled={scale === minScale && panned === false}
             onClick={resetZoom}
           >
             <Expand />
           </IconButton>
           <IconButton
-            tooltip="Undo"
+            tooltip={t("editor.undo")}
             onClick={handleUndo}
             disabled={undoDisabled}
           >
             <Undo />
           </IconButton>
           <IconButton
-            tooltip="Redo"
+            tooltip={t("editor.redo")}
             onClick={handleRedo}
             disabled={redoDisabled}
           >
             <Redo />
           </IconButton>
           <IconButton
-            tooltip="Show original image"
+            tooltip={t("editor.showOriginalImage")}
             onPointerDown={(ev) => {
               ev.preventDefault()
               setShowOriginal(() => {
@@ -1971,7 +1974,7 @@ export default function Editor(props: EditorProps) {
             <Eye />
           </IconButton>
           <IconButton
-            tooltip="Save Image"
+            tooltip={t("editor.saveImage")}
             disabled={!renders.length}
             onClick={download}
           >
@@ -1980,7 +1983,7 @@ export default function Editor(props: EditorProps) {
 
           {enableManualInpainting && modelType === "inpaint" ? (
             <IconButton
-              tooltip="Run Inpainting"
+              tooltip={t("editor.runInpainting")}
               disabled={
                 isProcessing || (!hadDrawSomething() && extraMasks.length === 0)
               }

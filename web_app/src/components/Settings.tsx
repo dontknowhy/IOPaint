@@ -3,6 +3,7 @@ import { useToggle } from "@uidotdev/usehooks"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "./ui/dialog"
 import { Settings } from "lucide-react"
+import { useTranslation } from "react-i18next"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { useForm } from "react-hook-form"
 import * as z from "zod"
@@ -49,6 +50,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "./ui/select"
+import { Label } from "./ui/label"
+import { SUPPORTED_LOCALES, localeDisplayName } from "@/lib/i18n"
 
 const formSchema = z.object({
   enableFileManager: z.boolean(),
@@ -62,12 +65,19 @@ const formSchema = z.object({
   interactiveSegModel: z.string(),
 })
 
-const TAB_GENERAL = "General"
-const TAB_MODEL = "Model"
-const TAB_PLUGINS = "Plugins"
-// const TAB_FILE_MANAGER = "File Manager"
+const TAB_GENERAL = "general"
+const TAB_MODEL = "model"
+const TAB_PLUGINS = "plugins"
+// const TAB_FILE_MANAGER = "fileManager"
 
-const TAB_NAMES = [TAB_MODEL, TAB_GENERAL, TAB_PLUGINS]
+const TAB_NAMES = [TAB_MODEL, TAB_GENERAL, TAB_PLUGINS] as const
+
+// tab 状态值保持稳定标识符，显示名走语言包（key 是字面量，t() 的类型检查仍生效）。
+const TAB_LABEL_KEYS = {
+  [TAB_GENERAL]: "settings.tabs.general",
+  [TAB_MODEL]: "settings.tabs.model",
+  [TAB_PLUGINS]: "settings.tabs.plugins",
+} as const
 
 // react-query 只有这里用（拉一次 serverConfig）。原来 Provider 挂在 main.tsx，
 // 导致 @tanstack/query-core 无条件进首屏 chunk；Settings 是按需加载的，把
@@ -101,6 +111,7 @@ function SettingsDialogContent() {
     state.setServerConfig,
   ])
   const { toast } = useToast()
+  const { t, i18n } = useTranslation()
   const [model, setModel] = useState<ModelInfo>(settings.model)
   const [modelSwitchingTexts, setModelSwitchingTexts] = useState<string[]>([])
   const openModelSwitching = modelSwitchingTexts.length > 0
@@ -175,22 +186,35 @@ function SettingsDialogContent() {
       const newModelSwitchingTexts: string[] = []
       if (shouldSwitchModel) {
         newModelSwitchingTexts.push(
-          `Switching model from ${settings.model.name} to ${model.name}`
+          t("settings.switchingModel", {
+            from: settings.model.name,
+            to: model.name,
+          })
         )
       }
       if (shouldSwitchRemoveBGModel) {
         newModelSwitchingTexts.push(
-          `Switching RemoveBG model from ${serverConfig?.removeBGModel} to ${values.removeBGModel}`
+          t("settings.switchingRemoveBG", {
+            from: serverConfig?.removeBGModel,
+            to: values.removeBGModel,
+          })
         )
       }
       if (shouldSwitchRealesrganModel) {
         newModelSwitchingTexts.push(
-          `Switching RealESRGAN model from ${serverConfig?.realesrganModel} to ${values.realesrganModel}`
+          t("settings.switchingRealESRGAN", {
+            from: serverConfig?.realesrganModel,
+            to: values.realesrganModel,
+          })
         )
       }
       if (shouldSwitchInteractiveModel) {
         newModelSwitchingTexts.push(
-          `Switching ${PluginName.InteractiveSeg} model from ${serverConfig?.interactiveSegModel} to ${values.interactiveSegModel}`
+          t("settings.switchingInteractive", {
+            plugin: PluginName.InteractiveSeg,
+            from: serverConfig?.interactiveSegModel,
+            to: values.interactiveSegModel,
+          })
         )
       }
       setModelSwitchingTexts(newModelSwitchingTexts)
@@ -201,14 +225,17 @@ function SettingsDialogContent() {
         try {
           const newModel = await switchModel(model.name)
           toast({
-            title: `Switch to ${newModel.name} success`,
+            title: t("settings.switchToSuccess", { name: newModel.name }),
           })
           setModel(newModel)
           setAppModel(newModel)
         } catch (error) {
           toast({
             variant: "destructive",
-            title: `Switch to ${model.name} failed: ${getErrorMessage(error)}`,
+            title: t("settings.switchToFailed", {
+              name: model.name,
+              error: getErrorMessage(error),
+            }),
           })
           setModel(settings.model)
         }
@@ -220,7 +247,10 @@ function SettingsDialogContent() {
         } catch (error) {
           toast({
             variant: "destructive",
-            title: `Switch RemoveBG model to ${values.removeBGModel} failed: ${getErrorMessage(error)}`,
+            title: t("settings.switchRemoveBGFailed", {
+              model: values.removeBGModel,
+              error: getErrorMessage(error),
+            }),
           })
         }
       }
@@ -231,7 +261,10 @@ function SettingsDialogContent() {
         } catch (error) {
           toast({
             variant: "destructive",
-            title: `Switch RealESRGAN model to ${values.realesrganModel} failed: ${getErrorMessage(error)}`,
+            title: t("settings.switchRealESRGANFailed", {
+              model: values.realesrganModel,
+              error: getErrorMessage(error),
+            }),
           })
         }
       }
@@ -245,7 +278,11 @@ function SettingsDialogContent() {
         } catch (error) {
           toast({
             variant: "destructive",
-            title: `Switch ${PluginName.InteractiveSeg} model to ${values.interactiveSegModel} failed: ${getErrorMessage(error)}`,
+            title: t("settings.switchInteractiveFailed", {
+              plugin: PluginName.InteractiveSeg,
+              model: values.interactiveSegModel,
+              error: getErrorMessage(error),
+            }),
           })
         }
       }
@@ -297,7 +334,7 @@ function SettingsDialogContent() {
 
   function renderModelList(model_types: string[]) {
     if (!modelInfos) {
-      return <div>Please download model first</div>
+      return <div>{t("settings.pleaseDownloadModelFirst")}</div>
     }
     return modelInfos
       .filter((info) => model_types.includes(info.model_type))
@@ -341,7 +378,7 @@ function SettingsDialogContent() {
     return (
       <div className="flex flex-col gap-4 w-[510px]">
         <div className="flex flex-col gap-4 rounded-md">
-          <div className="font-medium">Current Model</div>
+          <div className="font-medium">{t("settings.currentModel")}</div>
           <div>{model.name}</div>
         </div>
 
@@ -349,22 +386,24 @@ function SettingsDialogContent() {
 
         <div className="space-y-4  rounded-md">
           <div className="flex gap-1 items-center justify-start">
-            <div className="font-medium">Available models</div>
+            <div className="font-medium">{t("settings.availableModels")}</div>
             {/* <IconButton tooltip="How to download new model">
               <Info size={20} strokeWidth={2} className="opacity-50" />
             </IconButton> */}
           </div>
           <Tabs defaultValue={defaultTab}>
             <TabsList>
-              <TabsTrigger value={MODEL_TYPE_INPAINT}>Inpaint</TabsTrigger>
+              <TabsTrigger value={MODEL_TYPE_INPAINT}>
+                {t("settings.modelType.inpaint")}
+              </TabsTrigger>
               <TabsTrigger value={MODEL_TYPE_DIFFUSERS_SD}>
-                Stable Diffusion
+                {t("settings.modelType.sd")}
               </TabsTrigger>
               <TabsTrigger value={MODEL_TYPE_DIFFUSERS_SD_INPAINT}>
-                Stable Diffusion Inpaint
+                {t("settings.modelType.sdInpaint")}
               </TabsTrigger>
               <TabsTrigger value={MODEL_TYPE_OTHER}>
-                Other Diffusion
+                {t("settings.modelType.otherDiffusion")}
               </TabsTrigger>
             </TabsList>
             <ScrollArea className="h-[240px] w-full mt-2 outline-none border rounded-lg">
@@ -396,16 +435,43 @@ function SettingsDialogContent() {
   function renderGeneralSettings() {
     return (
       <div className="space-y-4 w-[510px]">
+        <div className="flex items-center justify-between">
+          <div className="space-y-0.5">
+            <Label>{t("language.label")}</Label>
+            <p className="text-[0.8rem] text-muted-foreground">
+              {t("language.description")}
+            </p>
+          </div>
+          <Select
+            value={i18n.resolvedLanguage ?? "en"}
+            onValueChange={(value) => {
+              void i18n.changeLanguage(value)
+            }}
+          >
+            <SelectTrigger className="w-auto">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent align="end">
+              {SUPPORTED_LOCALES.map((locale) => (
+                <SelectItem key={locale} value={locale}>
+                  {localeDisplayName(locale)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <Separator />
+
         <FormField
           control={form.control}
           name="enableManualInpainting"
           render={({ field }) => (
             <FormItem className="flex items-center justify-between">
               <div className="space-y-0.5">
-                <FormLabel>Enable manual inpainting</FormLabel>
+                <FormLabel>{t("settings.enableManualInpainting")}</FormLabel>
                 <FormDescription>
-                  For erase model, click a button to trigger inpainting after
-                  draw mask.
+                  {t("settings.enableManualInpaintingDesc")}
                 </FormDescription>
               </div>
               <FormControl>
@@ -426,9 +492,9 @@ function SettingsDialogContent() {
           render={({ field }) => (
             <FormItem className="flex items-center justify-between">
               <div className="space-y-0.5">
-                <FormLabel>Enable download mask</FormLabel>
+                <FormLabel>{t("settings.enableDownloadMask")}</FormLabel>
                 <FormDescription>
-                  Also download the mask after save the inpainting result.
+                  {t("settings.enableDownloadMaskDesc")}
                 </FormDescription>
               </div>
               <FormControl>
@@ -449,10 +515,9 @@ function SettingsDialogContent() {
           render={({ field }) => (
             <FormItem className="flex items-center justify-between">
               <div className="space-y-0.5">
-                <FormLabel>Enable auto extract prompt</FormLabel>
+                <FormLabel>{t("settings.enableAutoExtractPrompt")}</FormLabel>
                 <FormDescription>
-                  Automatically extract prompt/negativate prompt from the image
-                  meta.
+                  {t("settings.enableAutoExtractPromptDesc")}
                 </FormDescription>
               </div>
               <FormControl>
@@ -477,8 +542,10 @@ function SettingsDialogContent() {
           render={({ field }) => (
             <FormItem className="flex items-center justify-between">
               <div className="space-y-0.5">
-                <FormLabel>Remove Background</FormLabel>
-                <FormDescription>Remove background model</FormDescription>
+                <FormLabel>{t("settings.removeBackground")}</FormLabel>
+                <FormDescription>
+                  {t("settings.removeBackgroundDesc")}
+                </FormDescription>
               </div>
               <Select
                 onValueChange={field.onChange}
@@ -487,7 +554,7 @@ function SettingsDialogContent() {
               >
                 <FormControl>
                   <SelectTrigger className="w-auto">
-                    <SelectValue placeholder="Select removebg model" />
+                    <SelectValue placeholder={t("settings.selectRemoveBgModel")} />
                   </SelectTrigger>
                 </FormControl>
                 <SelectContent align="end">
@@ -512,8 +579,8 @@ function SettingsDialogContent() {
           render={({ field }) => (
             <FormItem className="flex items-center justify-between">
               <div className="space-y-0.5">
-                <FormLabel>RealESRGAN</FormLabel>
-                <FormDescription>RealESRGAN Model</FormDescription>
+                <FormLabel>{t("settings.realesrgan")}</FormLabel>
+                <FormDescription>{t("settings.realesrganDesc")}</FormDescription>
               </div>
               <Select
                 onValueChange={field.onChange}
@@ -522,7 +589,7 @@ function SettingsDialogContent() {
               >
                 <FormControl>
                   <SelectTrigger className="w-auto">
-                    <SelectValue placeholder="Select RealESRGAN model" />
+                    <SelectValue placeholder={t("settings.selectRealESRGANModel")} />
                   </SelectTrigger>
                 </FormControl>
                 <SelectContent align="end">
@@ -547,9 +614,9 @@ function SettingsDialogContent() {
           render={({ field }) => (
             <FormItem className="flex items-center justify-between">
               <div className="space-y-0.5">
-                <FormLabel>Interactive Segmentation</FormLabel>
+                <FormLabel>{t("settings.interactiveSegmentation")}</FormLabel>
                 <FormDescription>
-                  Interactive Segmentation Model
+                  {t("settings.interactiveSegmentationDesc")}
                 </FormDescription>
               </div>
               <Select
@@ -559,7 +626,9 @@ function SettingsDialogContent() {
               >
                 <FormControl>
                   <SelectTrigger className="w-auto">
-                    <SelectValue placeholder="Select interactive segmentation model" />
+                    <SelectValue
+                      placeholder={t("settings.selectInteractiveSegModel")}
+                    />
                   </SelectTrigger>
                 </FormControl>
                 <SelectContent align="end">
@@ -588,7 +657,7 @@ function SettingsDialogContent() {
             <div className="flex flex-col justify-center items-center gap-4">
               <div role="status">
                 <Spinner className="w-8 h-8 text-gray-200 dark:text-gray-600" />
-                <span className="sr-only">Loading...</span>
+                <span className="sr-only">{t("settings.loading")}</span>
               </div>
 
               {modelSwitchingTexts ? (
@@ -607,7 +676,7 @@ function SettingsDialogContent() {
       </AlertDialog>
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogTrigger asChild>
-          <IconButton tooltip="Settings">
+          <IconButton tooltip={t("settings.tooltip")}>
             <Settings />
           </IconButton>
         </DialogTrigger>
@@ -617,7 +686,7 @@ function SettingsDialogContent() {
           onOpenAutoFocus={(event) => event.preventDefault()}
           // onPointerDownOutside={(event) => event.preventDefault()}
         >
-          <DialogTitle>Settings</DialogTitle>
+          <DialogTitle>{t("settings.title")}</DialogTitle>
           <Separator />
 
           <div className="flex flex-row space-x-8 h-full">
@@ -632,7 +701,7 @@ function SettingsDialogContent() {
                     "justify-start"
                   )}
                 >
-                  {item}
+                  {t(TAB_LABEL_KEYS[item])}
                 </Button>
               ))}
             </div>
@@ -650,7 +719,9 @@ function SettingsDialogContent() {
                   )} */}
 
                   <div className="absolute right-10 bottom-6">
-                    <Button onClick={() => onOpenChange(false)}>Ok</Button>
+                    <Button onClick={() => onOpenChange(false)}>
+                      {t("settings.ok")}
+                    </Button>
                   </div>
                 </form>
               </div>

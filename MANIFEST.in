@@ -4,6 +4,7 @@ include pyproject.toml
 
 recursive-include iopaint/web_app *
 recursive-include iopaint/model *.yaml *.txt
+recursive-include iopaint/locales *.json
 
 global-exclude __pycache__
 global-exclude *.pyc

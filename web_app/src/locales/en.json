@@ -1,0 +1,194 @@
+{
+  "common": {
+    "somethingWentWrong": "Uh oh! Something went wrong."
+  },
+  "app": {
+    "dropOnlyOneFile": "Please drag and drop only one file",
+    "dropImageFile": "Please drag and drop an image file"
+  },
+  "api": {
+    "screenshotHint": "Please take a screenshot of the detailed error message in your terminal",
+    "saveImageError": "Something went wrong: {{error}}"
+  },
+  "language": {
+    "label": "Language",
+    "description": "Interface display language"
+  },
+  "fileSelect": {
+    "clickOrDrag": "Click here or drag an image file",
+    "tapToLoad": "Tap here to load your picture",
+    "fileTooLarge": "file too large"
+  },
+  "header": {
+    "uploadImage": "Upload image",
+    "rerunPreviousMask": "Rerun previous mask"
+  },
+  "coffee": {
+    "tooltip": "Buy me a coffee",
+    "title": "Buy me a coffee",
+    "description": "Hi, if you found my project is useful, please conside buy me a coffee to support my work. Thanks!"
+  },
+  "prompt": {
+    "placeholder": "I want to repaint of...",
+    "paint": "Paint"
+  },
+  "settings": {
+    "tooltip": "Settings",
+    "title": "Settings",
+    "ok": "Ok",
+    "loading": "Loading...",
+    "tabs": {
+      "general": "General",
+      "model": "Model",
+      "plugins": "Plugins"
+    },
+    "pleaseDownloadModelFirst": "Please download model first",
+    "currentModel": "Current Model",
+    "availableModels": "Available models",
+    "modelType": {
+      "inpaint": "Inpaint",
+      "sd": "Stable Diffusion",
+      "sdInpaint": "Stable Diffusion Inpaint",
+      "otherDiffusion": "Other Diffusion"
+    },
+    "enableManualInpainting": "Enable manual inpainting",
+    "enableManualInpaintingDesc": "For erase model, click a button to trigger inpainting after draw mask.",
+    "enableDownloadMask": "Enable download mask",
+    "enableDownloadMaskDesc": "Also download the mask after save the inpainting result.",
+    "enableAutoExtractPrompt": "Enable auto extract prompt",
+    "enableAutoExtractPromptDesc": "Automatically extract prompt/negativate prompt from the image meta.",
+    "removeBackground": "Remove Background",
+    "removeBackgroundDesc": "Remove background model",
+    "selectRemoveBgModel": "Select removebg model",
+    "realesrgan": "RealESRGAN",
+    "realesrganDesc": "RealESRGAN Model",
+    "selectRealESRGANModel": "Select RealESRGAN model",
+    "interactiveSegmentation": "Interactive Segmentation",
+    "interactiveSegmentationDesc": "Interactive Segmentation Model",
+    "selectInteractiveSegModel": "Select interactive segmentation model",
+    "switchingModel": "Switching model from {{from}} to {{to}}",
+    "switchingRemoveBG": "Switching RemoveBG model from {{from}} to {{to}}",
+    "switchingRealESRGAN": "Switching RealESRGAN model from {{from}} to {{to}}",
+    "switchingInteractive": "Switching {{plugin}} model from {{from}} to {{to}}",
+    "switchToSuccess": "Switch to {{name}} success",
+    "switchToFailed": "Switch to {{name}} failed: {{error}}",
+    "switchRemoveBGFailed": "Switch RemoveBG model to {{model}} failed: {{error}}",
+    "switchRealESRGANFailed": "Switch RealESRGAN model to {{model}} failed: {{error}}",
+    "switchInteractiveFailed": "Switch {{plugin}} model to {{model}} failed: {{error}}"
+  },
+  "shortcuts": {
+    "tooltip": "Hotkeys",
+    "title": "Hotkeys",
+    "pan": "Pan",
+    "resetZoomPan": "Reset Zoom/Pan",
+    "zoomIn": "Zoom In",
+    "zoomOut": "Zoom Out",
+    "zoomInOut": "Zoom In/Out",
+    "panHorizontally": "Pan Horizontally",
+    "decreaseBrushSize": "Decrease Brush Size",
+    "increaseBrushSize": "Increase Brush Size",
+    "viewOriginalImage": "View Original Image",
+    "undo": "Undo",
+    "redo": "Redo",
+    "copyResult": "Copy Result",
+    "pasteImage": "Paste Image",
+    "triggerManuallyInpainting": "Trigger Manually Inpainting",
+    "toggleHotkeysDialog": "Toggle Hotkeys Dialog",
+    "toggleSettingsDialog": "Toggle Settings Dialog",
+    "toggleFileManager": "Toggle File Manager"
+  },
+  "fileManager": {
+    "fileManager": "File Manager",
+    "rowsLayout": "Rows layout",
+    "gridLayout": "Grid layout",
+    "imagesCount": "Images ({{count}})",
+    "searchPlaceholder": "Search by file name",
+    "imageDirectory": "Image Directory",
+    "outputDirectory": "Output Directory",
+    "maskDirectory": "Mask Directory",
+    "sortName": "Name",
+    "sortCreatedTime": "Created time",
+    "sortModifiedTime": "Modified time",
+    "descendingOrder": "Descending Order",
+    "ascendingOrder": "Ascending Order"
+  },
+  "plugins": {
+    "removeBgName": "RemoveBG",
+    "animeSegName": "Anime Segmentation",
+    "realesrganName": "RealESRGAN",
+    "gfpganName": "GFPGAN",
+    "restoreFormerName": "RestoreFormer",
+    "interactiveSegName": "Interactive Segmentation",
+    "removeBackground": "Remove Background",
+    "generateMask": "Generate Mask",
+    "upscale2x": "upscale 2x",
+    "upscale4x": "upscale 4x"
+  },
+  "editor": {
+    "saveImageSuccess": "Save image success",
+    "copyResultToClipboard": "Copy inpainting result to clipboard",
+    "resetZoomPan": "Reset zoom & pan",
+    "undo": "Undo",
+    "redo": "Redo",
+    "showOriginalImage": "Show original image",
+    "saveImage": "Save Image",
+    "runInpainting": "Run Inpainting"
+  },
+  "diffusion": {
+    "cropper": "Cropper",
+    "cropperTip": "Inpainting on part of image, improve inference speed and reduce memory usage.",
+    "brushnetTip": "BrushNet is a plug-and-play image inpainting model works on any SD1.5 base models.",
+    "selectBrushnetModel": "Select brushnet model",
+    "controlnetTip": "Using an additional conditioning image to control how an image is generated",
+    "selectControlMethod": "Select control method",
+    "lcmLoraTip": "Enable quality image generation in typically 2-8 steps. Suggest disabling guidance_scale by setting it to 0. You can also try values between 1.0 and 2.0. When LCM Lora is enabled, LCMSampler will be used automatically.",
+    "negativePrompt": "Negative prompt",
+    "negativePromptTip": "Negative prompt guides the model away from generating certain things in an image",
+    "exampleImage": "Example Image",
+    "exampleImageTip": "An example image to guide image generation.",
+    "uploadExampleImage": "Upload example image",
+    "imageGuidanceScale": "Image guidance scale",
+    "imageGuidanceScaleTip": "Push the generated image towards the inital image. Higher image guidance scale encourages generated images that are closely linked to the source image, usually at the expense of lower image quality.",
+    "strength": "Strength",
+    "strengthTip": "Strength is a measure of how much noise is added to the base image, which influences how similar the output is to the base image. Higher value means more noise and more different from the base image",
+    "extender": "Extender",
+    "extenderTip": "Perform outpainting on images to expand it's content.",
+    "selectAxis": "Select axis",
+    "task": "Task",
+    "taskTip": "PowerPaint task. When using extender, image-outpainting task will be auto used. For object-removal and image-outpainting, it is recommended to set the guidance_scale at 10 or above.",
+    "selectTask": "Select task",
+    "powerpaintV2Tip": "PowerPaint is a plug-and-play image inpainting model works on any SD1.5 base models.",
+    "steps": "Steps",
+    "stepsTip": "The number of denoising steps. More denoising steps usually lead to a higher quality image at the expense of slower inference.",
+    "guidance": "Guidance",
+    "guidanceTip": "Guidance scale affects how aligned the text prompt and generated image are. Higher value means the prompt and generated image are closely aligned, so the output is a stricter interpretation of the prompt",
+    "sampler": "Sampler",
+    "selectSampler": "Select sampler",
+    "seed": "Seed",
+    "seedTip": "Using same parameters and a fixed seed can generate same result image.",
+    "matchHistograms": "Match histograms",
+    "matchHistogramsTip": "Match the inpainting result histogram to the source image histogram",
+    "maskOp": "Mask OP",
+    "maskOpTip": "Expand or shrink mask. Using the slider to adjust the kernel size for dilation or erosion.",
+    "paint": "Paint",
+    "expand": "Expand",
+    "shrink": "Shrink",
+    "reverse": "Reverse",
+    "clear": "Clear"
+  },
+  "cv2": {
+    "flag": "CV2 Flag",
+    "selectFlag": "Select flag",
+    "radius": "CV2 Radius"
+  },
+  "labelTitle": {
+    "moreInfo": "More info"
+  },
+  "ui": {
+    "close": "Close"
+  },
+  "states": {
+    "pleaseDrawMask": "Please draw mask on picture",
+    "runPluginSuccess": "Run {{plugin}} successfully in {{time}}s"
+  }
+}

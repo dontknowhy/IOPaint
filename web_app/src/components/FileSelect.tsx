@@ -1,4 +1,5 @@
 import { useState } from "react"
+import { useTranslation } from "react-i18next"
 import useResolution from "@/hooks/useResolution"
 
 type FileSelectProps = {
@@ -7,6 +8,7 @@ type FileSelectProps = {
 
 export default function FileSelect(props: FileSelectProps) {
   const { onSelection } = props
+  const { t } = useTranslation()
 
   const [uploadElemId] = useState(`file-upload-${Math.random().toString()}`)
 
@@ -24,7 +26,7 @@ export default function FileSelect(props: FileSelectProps) {
     try {
       // Check if file is larger than 20mb
       if (file.size > 20 * 1024 * 1024) {
-        throw new Error("file too large")
+        throw new Error(t("fileSelect.fileTooLarge"))
       }
       onSelection(file)
     } catch (e) {
@@ -61,8 +63,8 @@ export default function FileSelect(props: FileSelectProps) {
           />
           <p className="text-center">
             {resolution === "desktop"
-              ? "Click here or drag an image file"
-              : "Tap here to load your picture"}
+              ? t("fileSelect.clickOrDrag")
+              : t("fileSelect.tapToLoad")}
           </p>
         </div>
       </label>

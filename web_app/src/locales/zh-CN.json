@@ -1,0 +1,194 @@
+{
+  "common": {
+    "somethingWentWrong": "出错了。"
+  },
+  "app": {
+    "dropOnlyOneFile": "请只拖入一个文件",
+    "dropImageFile": "请拖入图片文件"
+  },
+  "api": {
+    "screenshotHint": "请截图终端里的详细错误信息",
+    "saveImageError": "出错了：{{error}}"
+  },
+  "language": {
+    "label": "界面语言",
+    "description": "界面显示语言"
+  },
+  "fileSelect": {
+    "clickOrDrag": "点击此处或拖入图片文件",
+    "tapToLoad": "点击此处加载图片",
+    "fileTooLarge": "文件过大"
+  },
+  "header": {
+    "uploadImage": "上传图片",
+    "rerunPreviousMask": "重新运行上一次掩膜"
+  },
+  "coffee": {
+    "tooltip": "请我喝杯咖啡",
+    "title": "请我喝杯咖啡",
+    "description": "你好，如果这个项目对你有帮助，欢迎请我喝杯咖啡支持我的工作，谢谢！"
+  },
+  "prompt": {
+    "placeholder": "我想重绘……",
+    "paint": "绘制"
+  },
+  "settings": {
+    "tooltip": "设置",
+    "title": "设置",
+    "ok": "确定",
+    "loading": "加载中…",
+    "tabs": {
+      "general": "常规",
+      "model": "模型",
+      "plugins": "插件"
+    },
+    "pleaseDownloadModelFirst": "请先下载模型",
+    "currentModel": "当前模型",
+    "availableModels": "可用模型",
+    "modelType": {
+      "inpaint": "重绘",
+      "sd": "Stable Diffusion",
+      "sdInpaint": "Stable Diffusion 重绘",
+      "otherDiffusion": "其他扩散模型"
+    },
+    "enableManualInpainting": "启用手动重绘",
+    "enableManualInpaintingDesc": "对擦除模型：画好掩膜后，点击按钮触发重绘。",
+    "enableDownloadMask": "启用下载掩膜",
+    "enableDownloadMaskDesc": "保存重绘结果后同时下载掩膜。",
+    "enableAutoExtractPrompt": "启用自动提取提示词",
+    "enableAutoExtractPromptDesc": "自动从图片元数据中提取正向/负向提示词。",
+    "removeBackground": "移除背景",
+    "removeBackgroundDesc": "移除背景模型",
+    "selectRemoveBgModel": "选择移除背景模型",
+    "realesrgan": "RealESRGAN",
+    "realesrganDesc": "RealESRGAN 模型",
+    "selectRealESRGANModel": "选择 RealESRGAN 模型",
+    "interactiveSegmentation": "交互式分割",
+    "interactiveSegmentationDesc": "交互式分割模型",
+    "selectInteractiveSegModel": "选择交互式分割模型",
+    "switchingModel": "正在将模型从 {{from}} 切换为 {{to}}",
+    "switchingRemoveBG": "正在将 RemoveBG 模型从 {{from}} 切换为 {{to}}",
+    "switchingRealESRGAN": "正在将 RealESRGAN 模型从 {{from}} 切换为 {{to}}",
+    "switchingInteractive": "正在将 {{plugin}} 模型从 {{from}} 切换为 {{to}}",
+    "switchToSuccess": "切换到 {{name}} 成功",
+    "switchToFailed": "切换到 {{name}} 失败：{{error}}",
+    "switchRemoveBGFailed": "将 RemoveBG 模型切换为 {{model}} 失败：{{error}}",
+    "switchRealESRGANFailed": "将 RealESRGAN 模型切换为 {{model}} 失败：{{error}}",
+    "switchInteractiveFailed": "将 {{plugin}} 模型切换为 {{model}} 失败：{{error}}"
+  },
+  "shortcuts": {
+    "tooltip": "快捷键",
+    "title": "快捷键",
+    "pan": "平移",
+    "resetZoomPan": "重置缩放/平移",
+    "zoomIn": "放大",
+    "zoomOut": "缩小",
+    "zoomInOut": "放大/缩小",
+    "panHorizontally": "水平平移",
+    "decreaseBrushSize": "减小画笔尺寸",
+    "increaseBrushSize": "增大画笔尺寸",
+    "viewOriginalImage": "查看原图",
+    "undo": "撤销",
+    "redo": "重做",
+    "copyResult": "复制结果",
+    "pasteImage": "粘贴图片",
+    "triggerManuallyInpainting": "手动触发重绘",
+    "toggleHotkeysDialog": "显示/隐藏快捷键对话框",
+    "toggleSettingsDialog": "显示/隐藏设置对话框",
+    "toggleFileManager": "显示/隐藏文件管理器"
+  },
+  "fileManager": {
+    "fileManager": "文件管理器",
+    "rowsLayout": "行布局",
+    "gridLayout": "网格布局",
+    "imagesCount": "图片（{{count}}）",
+    "searchPlaceholder": "按文件名搜索",
+    "imageDirectory": "输入目录",
+    "outputDirectory": "输出目录",
+    "maskDirectory": "掩膜目录",
+    "sortName": "名称",
+    "sortCreatedTime": "创建时间",
+    "sortModifiedTime": "修改时间",
+    "descendingOrder": "降序",
+    "ascendingOrder": "升序"
+  },
+  "plugins": {
+    "removeBgName": "RemoveBG",
+    "animeSegName": "动漫分割",
+    "realesrganName": "RealESRGAN",
+    "gfpganName": "GFPGAN",
+    "restoreFormerName": "RestoreFormer",
+    "interactiveSegName": "交互式分割",
+    "removeBackground": "移除背景",
+    "generateMask": "生成掩膜",
+    "upscale2x": "放大 2 倍",
+    "upscale4x": "放大 4 倍"
+  },
+  "editor": {
+    "saveImageSuccess": "保存图片成功",
+    "copyResultToClipboard": "已复制重绘结果到剪贴板",
+    "resetZoomPan": "重置缩放/平移",
+    "undo": "撤销",
+    "redo": "重做",
+    "showOriginalImage": "查看原图",
+    "saveImage": "保存图片",
+    "runInpainting": "运行重绘"
+  },
+  "diffusion": {
+    "cropper": "裁剪",
+    "cropperTip": "只对图片的一部分重绘，可加快推理速度并降低内存占用。",
+    "brushnetTip": "BrushNet 是一个即插即用的重绘模型，适用于任何 SD1.5 基础模型。",
+    "selectBrushnetModel": "选择 BrushNet 模型",
+    "controlnetTip": "使用额外的条件图来控制图片的生成方式",
+    "selectControlMethod": "选择控制方式",
+    "lcmLoraTip": "通常在 2-8 步内即可生成高质量图片。建议把 guidance_scale 设为 0 来关闭它，也可以尝试 1.0 到 2.0 之间的值。启用 LCM LoRA 后会自动使用 LCMSampler。",
+    "negativePrompt": "负向提示词",
+    "negativePromptTip": "负向提示词会引导模型避免在图片中生成某些内容",
+    "exampleImage": "示例图片",
+    "exampleImageTip": "用于引导图片生成的示例图片。",
+    "uploadExampleImage": "上传示例图片",
+    "imageGuidanceScale": "图像引导强度",
+    "imageGuidanceScaleTip": "让生成结果更接近原图。图像引导强度越高，生成图片与原图的关联越紧密，但通常会牺牲一些画质。",
+    "strength": "强度",
+    "strengthTip": "强度衡量给基础图片加入多少噪声，决定输出与原图的相似程度。值越高，噪声越多，与原图差异越大。",
+    "extender": "扩图",
+    "extenderTip": "对图片执行外绘，扩展它的内容。",
+    "selectAxis": "选择方向",
+    "task": "任务",
+    "taskTip": "PowerPaint 任务。使用扩图时会自动采用图像外绘任务。对于物体移除和图像外绘，建议把 guidance_scale 设为 10 或更高。",
+    "selectTask": "选择任务",
+    "powerpaintV2Tip": "PowerPaint 是一个即插即用的重绘模型，适用于任何 SD1.5 基础模型。",
+    "steps": "步数",
+    "stepsTip": "去噪步数。步数越多通常画质越好，但推理越慢。",
+    "guidance": "引导强度",
+    "guidanceTip": "引导强度影响文本提示词与生成图片的一致程度。值越高，提示词与生成图片越一致，输出越严格地遵循提示词。",
+    "sampler": "采样器",
+    "selectSampler": "选择采样器",
+    "seed": "随机种子",
+    "seedTip": "使用相同的参数和固定的随机种子可以生成相同的图片。",
+    "matchHistograms": "匹配直方图",
+    "matchHistogramsTip": "将重绘结果的直方图与源图片的直方图匹配",
+    "maskOp": "掩膜操作",
+    "maskOpTip": "扩大或缩小掩膜。用滑块调整膨胀或腐蚀的核大小。",
+    "paint": "绘制",
+    "expand": "扩大",
+    "shrink": "缩小",
+    "reverse": "反选",
+    "clear": "清除"
+  },
+  "cv2": {
+    "flag": "CV2 算法",
+    "selectFlag": "选择算法",
+    "radius": "CV2 半径"
+  },
+  "labelTitle": {
+    "moreInfo": "更多信息"
+  },
+  "ui": {
+    "close": "关闭"
+  },
+  "states": {
+    "pleaseDrawMask": "请在图片上画出掩膜",
+    "runPluginSuccess": "{{plugin}} 运行成功，用时 {{time}} 秒"
+  }
+}

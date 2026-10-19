@@ -187,6 +187,9 @@ read it:
   `save_btn.click` inputs, `default_configs` move together (trigger: adding a config field or editing web_config.py).
 - `docs/agents/frontend.md` — zustand store, `api.ts`, socket.io `/ws`-before-`/` mount order, Editor mask canvas,
   shared hooks (trigger: working in `web_app/src/` or the backend static/socket.io mounts).
+- `docs/agents/i18n.md` — the two language catalogs (`web_app/src/locales/*.json`, `iopaint/locales/*.json`), how to
+  add a language (drop one JSON), key conventions, and the parity tests (trigger: adding/editing UI strings or a
+  locale).
 - `docs/agents/type-check.md` — new-code-only mypy gate: `python scripts/check_types.py` runs mypy on
   `iopaint/**/*.py` changed vs `origin/main` and fails only on errors anchored to newly added lines (trigger: before
   committing backend Python changes; it also gates CI — the `backend` job runs it as "Type check (new code only)",

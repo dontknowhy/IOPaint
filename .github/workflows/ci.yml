@@ -99,7 +99,8 @@ jobs:
           cache-dependency-path: web_app/package-lock.json
 
       # test_webui 用真浏览器打真前端，所以必须先把 dist 装进 iopaint/web_app，
-      # 不然 `/` 只回 503（见 api.py 的 WebAppStaticFiles），17 个用例会全挂。
+      # 不然 `/` 只回 503（见 api.py 的 WebAppStaticFiles），前端用例会全挂。
+      # test_web_config_i18n 打的是 Gradio 自带前端（不需要 dist），但同样要浏览器。
       - name: Build frontend into the package
         run: |
           cd web_app
@@ -110,4 +111,4 @@ jobs:
 
       # conftest 的 iopaint_server 跑在 bind(("", 0)) 拿到的空闲端口上，不碰 8080
       - name: Run web UI tests
-        run: pytest iopaint/tests/test_webui.py -q
+        run: pytest iopaint/tests/test_webui.py iopaint/tests/test_web_config_i18n.py -q

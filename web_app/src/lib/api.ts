@@ -1,5 +1,6 @@
 import { AxiosError } from "axios"
 import axios from "axios"
+import i18n from "./i18n"
 import {
   Filename,
   GenInfo,
@@ -79,7 +80,7 @@ api.interceptors.response.use(
       // ignore parsing errors, fall back to the axios error message
     }
     throw new Error(
-      `${detail || error.message}\nPlease take a screenshot of the detailed error message in your terminal`
+      `${detail || error.message}\n${i18n.t("api.screenshotHint")}`
     )
   }
 )
@@ -240,7 +241,7 @@ export async function downloadToOutput(
   try {
     await api.post("/save_image", fd)
   } catch (error) {
-    throw new Error(`Something went wrong: ${error}`)
+    throw new Error(i18n.t("api.saveImageError", { error: String(error) }))
   }
 }
 

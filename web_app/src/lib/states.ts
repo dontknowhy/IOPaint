@@ -3,6 +3,7 @@ import { shallow } from "zustand/shallow"
 import { immer } from "zustand/middleware/immer"
 import { castDraft } from "immer"
 import { createWithEqualityFn } from "zustand/traditional"
+import i18n from "./i18n"
 import {
   AdjustMaskOperate,
   CV2Flag,
@@ -488,7 +489,7 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         if (maskLineGroup.length === 0 && !settings.showExtender) {
           toast({
             variant: "destructive",
-            description: "Please draw mask on picture",
+            description: i18n.t("states.pleaseDrawMask"),
           })
           return
         }
@@ -651,7 +652,10 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           const end = new Date()
           const time = end.getTime() - start.getTime()
           toast({
-            description: `Run ${pluginName} successfully in ${time / 1000}s`,
+            description: i18n.t("states.runPluginSuccess", {
+              plugin: pluginName,
+              time: time / 1000,
+            }),
           })
         } catch (e) {
           toast({

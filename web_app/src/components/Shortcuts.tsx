@@ -1,4 +1,5 @@
 import { Keyboard } from "lucide-react"
+import { useTranslation } from "react-i18next"
 import { IconButton } from "@/components/ui/button"
 import { useToggle } from "@uidotdev/usehooks"
 import {
@@ -43,6 +44,7 @@ const CmdOrCtrl = () => {
 
 export function Shortcuts() {
   const [open, toggleOpen] = useToggle(false)
+  const { t } = useTranslation()
 
   useHotKey("h", () => {
     toggleOpen()
@@ -51,35 +53,56 @@ export function Shortcuts() {
   return (
     <Dialog open={open} onOpenChange={toggleOpen}>
       <DialogTrigger asChild>
-        <IconButton tooltip="Hotkeys">
+        <IconButton tooltip={t("shortcuts.tooltip")}>
           <Keyboard />
         </IconButton>
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Hotkeys</DialogTitle>
+          <DialogTitle>{t("shortcuts.title")}</DialogTitle>
           <div className="flex gap-2 flex-col pt-4">
-            <ShortCut content="Pan" keys={["Space + Drag"]} />
-            <ShortCut content="Reset Zoom/Pan" keys={["Esc"]} />
-            <ShortCut content="Zoom In" keys={["PageUp"]} />
-            <ShortCut content="Zoom Out" keys={["PageDown"]} />
-            <ShortCut content="Zoom In/Out" keys={["Space + Scroll"]} />
-            <ShortCut content="Pan Horizontally" keys={["Shift + Scroll"]} />
-            <ShortCut content="Decrease Brush Size" keys={["["]} />
-            <ShortCut content="Increase Brush Size" keys={["]"]} />
-            <ShortCut content="View Original Image" keys={["Hold Tab"]} />
-
-            <ShortCut content="Undo" keys={[CmdOrCtrl(), "Z"]} />
-            <ShortCut content="Redo" keys={[CmdOrCtrl(), "Shift", "Z"]} />
-            <ShortCut content="Copy Result" keys={[CmdOrCtrl(), "C"]} />
-            <ShortCut content="Paste Image" keys={[CmdOrCtrl(), "V"]} />
+            <ShortCut content={t("shortcuts.pan")} keys={["Space + Drag"]} />
+            <ShortCut content={t("shortcuts.resetZoomPan")} keys={["Esc"]} />
+            <ShortCut content={t("shortcuts.zoomIn")} keys={["PageUp"]} />
+            <ShortCut content={t("shortcuts.zoomOut")} keys={["PageDown"]} />
             <ShortCut
-              content="Trigger Manually Inpainting"
+              content={t("shortcuts.zoomInOut")}
+              keys={["Space + Scroll"]}
+            />
+            <ShortCut
+              content={t("shortcuts.panHorizontally")}
+              keys={["Shift + Scroll"]}
+            />
+            <ShortCut content={t("shortcuts.decreaseBrushSize")} keys={["["]} />
+            <ShortCut content={t("shortcuts.increaseBrushSize")} keys={["]"]} />
+            <ShortCut
+              content={t("shortcuts.viewOriginalImage")}
+              keys={["Hold Tab"]}
+            />
+
+            <ShortCut content={t("shortcuts.undo")} keys={[CmdOrCtrl(), "Z"]} />
+            <ShortCut
+              content={t("shortcuts.redo")}
+              keys={[CmdOrCtrl(), "Shift", "Z"]}
+            />
+            <ShortCut
+              content={t("shortcuts.copyResult")}
+              keys={[CmdOrCtrl(), "C"]}
+            />
+            <ShortCut
+              content={t("shortcuts.pasteImage")}
+              keys={[CmdOrCtrl(), "V"]}
+            />
+            <ShortCut
+              content={t("shortcuts.triggerManuallyInpainting")}
               keys={["Shift", "R"]}
             />
-            <ShortCut content="Toggle Hotkeys Dialog" keys={["H"]} />
-            <ShortCut content="Toggle Settings Dialog" keys={["S"]} />
-            <ShortCut content="Toggle File Manager" keys={["F"]} />
+            <ShortCut content={t("shortcuts.toggleHotkeysDialog")} keys={["H"]} />
+            <ShortCut
+              content={t("shortcuts.toggleSettingsDialog")}
+              keys={["S"]}
+            />
+            <ShortCut content={t("shortcuts.toggleFileManager")} keys={["F"]} />
           </div>
         </DialogHeader>
       </DialogContent>

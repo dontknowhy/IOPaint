@@ -25,6 +25,15 @@ package_files += [
     "model/original_sd_configs/v2-inference-v.yaml",
 ]
 
+# --- i18n locale files (Gradio web_config) --------------------------------
+# 放在 iopaint/locales/ 里的语言包要随 wheel 分发，否则 pip 安装后 Gradio
+# 配置页只有内置英文（build_en_catalog）。新增语言只需放文件，这里自动收集。
+_locales_dir = Path("iopaint/locales")
+if _locales_dir.is_dir():
+    package_files += [
+        str(p.relative_to("iopaint")) for p in sorted(_locales_dir.glob("*.json"))
+    ]
+
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 

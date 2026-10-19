@@ -12,11 +12,12 @@ import io
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 pw = pytest.importorskip("playwright", reason="playwright not installed")
-from playwright.sync_api import sync_playwright, expect  # noqa: E402
+from playwright.sync_api import Browser, BrowserContext, expect, sync_playwright  # noqa: E402
 
 from iopaint.api import WEB_APP_DIR
 
@@ -36,10 +37,17 @@ def browser_instance():
         browser.close()
 
 
+# webui 的断言全部用英文文案，而界面默认按浏览器语言自动选择（中文开发机上
+# navigator.language=zh-CN 会渲染成中文）。显式固定 locale=en-US，让结果与
+# 开发机/CI 的系统语言无关。
+def _new_context(browser_instance: Browser, **kwargs: Any) -> BrowserContext:
+    return browser_instance.new_context(locale="en-US", **kwargs)
+
+
 @pytest.fixture(scope="module")
 def page(browser_instance, iopaint_server):
     """One shared page for the whole module – fast, no per-test context creation."""
-    ctx = browser_instance.new_context(viewport={"width": 1280, "height": 720})
+    ctx = _new_context(browser_instance, viewport={"width": 1280, "height": 720})
     pg = ctx.new_page()
     pg.goto(iopaint_server, wait_until="load", timeout=30000)
     pg.wait_for_timeout(2000)
@@ -59,7 +67,7 @@ def _upload_image(page_obj, tmp_path):
 def _fresh_page(browser_instance, iopaint_server):
     """独立 context 的干净页面：settings 存在 localStorage 里，
     新 context 才能保证「默认设置」的断言不被共享 page 的历史污染。"""
-    ctx = browser_instance.new_context(viewport={"width": 1280, "height": 720})
+    ctx = _new_context(browser_instance, viewport={"width": 1280, "height": 720})
     pg = ctx.new_page()
     pg.goto(iopaint_server, wait_until="load", timeout=30000)
     pg.wait_for_timeout(2000)
@@ -208,7 +216,7 @@ class TestInpaintFlow:
 
 class TestResponsive:
     def test_mobile(self, browser_instance, iopaint_server):
-        ctx = browser_instance.new_context(viewport={"width": 375, "height": 667})
+        ctx = _new_context(browser_instance, viewport={"width": 375, "height": 667})
         pg = ctx.new_page()
         pg.goto(iopaint_server, wait_until="load", timeout=30000)
         pg.wait_for_timeout(2000)
@@ -216,7 +224,7 @@ class TestResponsive:
         ctx.close()
 
     def test_tablet(self, browser_instance, iopaint_server):
-        ctx = browser_instance.new_context(viewport={"width": 768, "height": 1024})
+        ctx = _new_context(browser_instance, viewport={"width": 768, "height": 1024})
         pg = ctx.new_page()
         pg.goto(iopaint_server, wait_until="load", timeout=30000)
         pg.wait_for_timeout(2000)
@@ -241,7 +249,7 @@ class TestSetFileTiming:
     ):
         from PIL import Image
 
-        ctx = browser_instance.new_context(viewport={"width": 1280, "height": 720})
+        ctx = _new_context(browser_instance, viewport={"width": 1280, "height": 720})
         pg = ctx.new_page()
         pg.goto(iopaint_server, wait_until="load", timeout=30000)
         pg.wait_for_timeout(2000)
@@ -330,7 +338,7 @@ class TestDeviceNoticeToast:
             data["deviceNotice"] = self.NOTICE
             route.fulfill(json=data)
 
-        ctx = browser_instance.new_context(viewport={"width": 1280, "height": 720})
+        ctx = _new_context(browser_instance, viewport={"width": 1280, "height": 720})
         pg = ctx.new_page()
         pg.route("**/server-config", inject)
         pg.goto(iopaint_server, wait_until="load", timeout=30000)
