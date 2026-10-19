@@ -402,7 +402,14 @@ export const generateMask = (
   const maskCanvas = document.createElement("canvas")
   maskCanvas.width = imageWidth
   maskCanvas.height = imageHeight
-  const ctx = maskCanvas.getContext("2d")
+  // 掩膜要按原图分辨率生成（后端要求 mask 与 image 同尺寸），大图上就是几十 MP
+  // 的一块画布（83.6MP ≈ 334MB）。Chromium 的加速 2D 画布把这块位图放在 GPU 进程里：
+  // GPU 进程一崩（Linux 上 DRI/驱动加载失败常见，日志 `GPU process exited unexpectedly`
+  // / `GPU state invalid after WaitForGetOffsetInRange`），位图连同内容一起丢，
+  // toBlob 出来就是全透明掩膜 —— 后端收到空掩膜只会把原图重新编码一遍，
+  // 表现成「能导入、不能 inpaint」。willReadFrequently 让这块画布走 CPU 位图：
+  // 内容不进 GPU 显存（也不再申请 334MB 纹理），GPU 进程崩了也与它无关。
+  const ctx = maskCanvas.getContext("2d", { willReadFrequently: true })
   if (!ctx) {
     throw new Error("could not retrieve mask canvas")
   }

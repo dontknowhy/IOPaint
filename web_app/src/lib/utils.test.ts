@@ -298,4 +298,22 @@ describe("generateMask guard", () => {
       spy.mockRestore()
     }
   })
+
+  it("requests a software-backed 2d context", () => {
+    // 全分辨率掩膜画布必须走 CPU 位图：Chromium 的加速画布把内容放 GPU 进程，
+    // GPU 进程崩溃会丢内容，toBlob 出全透明掩膜 → 后端收到空掩膜只重编码原图
+    // （用户看到的「能导入、不能 inpaint」）。这里钉住 willReadFrequently，
+    // 防止以后被顺手删掉。
+    const spy = vi
+      .spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockReturnValue(null)
+    try {
+      expect(() => generateMask(10, 10, [])).toThrow(
+        "could not retrieve mask canvas"
+      )
+      expect(spy).toHaveBeenCalledWith("2d", { willReadFrequently: true })
+    } finally {
+      spy.mockRestore()
+    }
+  })
 })
