@@ -36,9 +36,32 @@ import {
   loadImage,
   srcToFile,
 } from "./utils"
+import inpaint, {
+  getGenInfo,
+  httpStatus,
+  postAdjustMask,
+  runPlugin,
+} from "./api"
 
 const _activeBlobUrls = new Set<string>()
-import inpaint, { getGenInfo, postAdjustMask, runPlugin } from "./api"
+// 无损盒子：render 的 blob URL → 服务端 X-Revision。
+// 用 src 作 key，undo/redo 只移动 Image 引用，不需要同步维护并行数组。
+const _renderRevisions = new Map<string, string>()
+
+/** 当前 render 对应的服务端 canonical revision（没有则 null）。 */
+export function getRenderRevision(src: string | undefined | null) {
+  if (!src) {
+    return null
+  }
+  return _renderRevisions.get(src) ?? null
+}
+
+function forgetRenderRevision(src: string | undefined | null) {
+  if (src) {
+    _renderRevisions.delete(src)
+  }
+}
+
 import { toast } from "@/components/ui/use-toast"
 
 type FileManagerState = {
@@ -504,21 +527,24 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         // 此前 srcToFile/generateMask 等 await 在 try 之外，一旦 reject 就会
         // 永久停在 true（按钮一直转圈，且后续请求被 isInpainting 守卫挡死）。
         try {
-          let targetFile = file
+          // 有 revision 的 render 不再把它的（有损）字节当下一轮输入；
+          // 服务端直接在 canonical 像素上继续编辑。没有 revision 的 render
+          //（插件产物 / 老结果）才回退到字节上传。
+          let targetRender: HTMLImageElement | null = null
           if (useLastLineGroup === true) {
             // renders.length == 1 还是用原来的
             if (renders.length > 1) {
-              const lastRender = renders[renders.length - 2]
-              targetFile = await srcToFile(
-                lastRender.currentSrc,
-                file.name,
-                file.type
-              )
+              targetRender = renders[renders.length - 2]
             }
           } else if (renders.length > 0) {
-            const lastRender = renders[renders.length - 1]
+            targetRender = renders[renders.length - 1]
+          }
+
+          let targetFile: File | null = file
+          const revision = getRenderRevision(targetRender?.currentSrc)
+          if (targetRender && !revision) {
             targetFile = await srcToFile(
-              lastRender.currentSrc,
+              targetRender.currentSrc,
               file.name,
               file.type
             )
@@ -540,21 +566,45 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
 
           try {
             const maskBlob = await canvasToBlob(maskCanvas, "image/png")
-            const res = await inpaint(
-              targetFile,
-              settings,
-              cropperState,
-              extenderState,
-              maskBlob,
-              paintByExampleFile
-            )
+            const request = (img: File | null, rev: string | null) =>
+              inpaint(
+                img,
+                settings,
+                cropperState,
+                extenderState,
+                maskBlob,
+                paintByExampleFile,
+                rev
+              )
+            let res
+            try {
+              res = await request(revision ? null : targetFile, revision)
+            } catch (e) {
+              // revision 失效（逐出/重启/切图）→ 回传当前 render 字节重试。
+              // 这是唯一允许的回退分支，首次导入也走这里。
+              if (revision && httpStatus(e) === 410) {
+                const fallback = targetRender
+                  ? await srcToFile(
+                      targetRender.currentSrc,
+                      file.name,
+                      file.type
+                    )
+                  : file
+                res = await request(fallback, null)
+              } else {
+                throw e
+              }
+            }
 
-            const { blob, seed } = res
+            const { blob, seed, revision: newRevision } = res
             if (seed) {
               get().setSeed(parseInt(seed, 10))
             }
             const blobUrl = URL.createObjectURL(blob)
             _activeBlobUrls.add(blobUrl)
+            if (newRevision) {
+              _renderRevisions.set(blobUrl, newRevision)
+            }
             const newRender = new Image()
             await loadImage(newRender, blobUrl)
             // 若期间用户切换了图片，丢弃过期结果，避免污染新图片的编辑器状态
@@ -562,6 +612,7 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
             if (get().file !== file) {
               URL.revokeObjectURL(blobUrl)
               _activeBlobUrls.delete(blobUrl)
+              forgetRenderRevision(blobUrl)
               return
             }
             const newRenders = [...renders, newRender]
@@ -628,6 +679,7 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
             if (get().file !== file) {
               URL.revokeObjectURL(blobUrl)
               _activeBlobUrls.delete(blobUrl)
+              forgetRenderRevision(blobUrl)
               return
             }
             get().setImageSize(newRender.width, newRender.height)
@@ -826,6 +878,7 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           if (_activeBlobUrls.has(url)) {
             URL.revokeObjectURL(url)
             _activeBlobUrls.delete(url)
+            forgetRenderRevision(url)
           }
         }
       },
@@ -1021,6 +1074,7 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           URL.revokeObjectURL(url)
         }
         _activeBlobUrls.clear()
+        _renderRevisions.clear()
 
         if (get().settings.enableAutoExtractPrompt) {
           getGenInfo(file)

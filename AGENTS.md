@@ -146,6 +146,7 @@ statement-of-current-state voice as "Other gotchas" below. Never write it as a c
   history (rebase reword + `--force-with-lease`, with `git diff <old> HEAD` empty) only ever happens on explicit
   request.
 - The same rule governs comments: yaml/code comments describe current state too, not the debugging history.
+- Comments, test docstrings, log strings and UI copy must be **self-contained**: never cite the temporary planning document or its IDs (`P0`/`D5`/`M2'`, tier labels such as `T1/T2/T3`, etc.). Those identifiers only exist in the uncommitted plan file under the harness temp dir, so a repo reader cannot resolve them. Write the behavior or mechanism directly instead.
 - Executable criterion for the subject: it must name at least one concrete symbol (class / method / file, e.g.
   `ModelManager`, `_wait_interactive`, `Editor.tsx`) **and** one concrete mechanism noun (e.g. `threading.Lock`,
   `run_in_executor`, `pointer-events`); a subject failing either half is rewritten before committing. Two

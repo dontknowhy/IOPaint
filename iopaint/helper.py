@@ -8,7 +8,7 @@ from typing import Any, List, Optional, Dict, Tuple
 
 from urllib.parse import urlparse
 import cv2
-from PIL import Image, ImageOps, PngImagePlugin
+from PIL import Image, ImageOps, PngImagePlugin, JpegImagePlugin
 import numpy as np
 import torch
 from iopaint.const import MPS_UNSUPPORT_MODELS
@@ -165,7 +165,13 @@ _PIL_SAVE_WHITELIST = ("exif", "icc_profile", "dpi", "comment")
 
 
 def pil_to_bytes(
-    pil_img, ext: str, quality: int = 95, infos=None, png_compress_level: int = 1
+    pil_img,
+    ext: str,
+    quality: int = 95,
+    infos=None,
+    png_compress_level: int = 1,
+    subsampling: Optional[int] = None,
+    webp_method: int = 4,
 ) -> bytes:
     """Encode a PIL image to bytes.
 
@@ -174,6 +180,12 @@ def pil_to_bytes(
     level9=35317ms——降级只损失 ~18% 体积，却省下数秒延迟。PNG 本身无损，
     降低压缩级别不影响像素，只影响响应延迟与字节数（实测 level1/6 均逐像素相等）。
     响应路径（api.py / batch）都走默认值；需要更小体积时显式传 6/9。
+
+    `subsampling` 只对 JPEG 生效：Pillow 不显式传时落 libjpeg 默认 4:2:0。
+    导出边界要显式传 0 才是 4:4:4；`None` 保持旧行为。
+
+    `ext="webp"` 固定走 lossless（`method=4`）。它只用于无状态无损线格式，
+    体积比 PNG level1 小约 15%，但 12MP 编码慢 3~4 倍；默认不启用。
     """
     if infos is None:
         infos = {}
@@ -182,8 +194,14 @@ def pil_to_bytes(
             ext = "jpeg"
 
         save_kwargs = {}
+        is_jpeg = ext.lower() in ("jpg", "jpeg")
         if ext.lower() == "png":
             save_kwargs["compress_level"] = png_compress_level
+        elif ext.lower() == "webp":
+            save_kwargs["lossless"] = True
+            save_kwargs["method"] = int(webp_method)
+        elif is_jpeg and subsampling is not None:
+            save_kwargs["subsampling"] = int(subsampling)
         parameters = infos.get("parameters")
         if parameters is not None and ext.lower() == "png":
             pnginfo_data = PngImagePlugin.PngInfo()
@@ -198,6 +216,28 @@ def pil_to_bytes(
         pil_img.save(output, format=ext, quality=quality, **save_kwargs)
         image_bytes = output.getvalue()
     return image_bytes
+
+
+def jpeg_sampling(image: Image.Image) -> Optional[int]:
+    """读取源 JPEG 的色度抽样（0=4:4:4, 1=4:2:2, 2=4:2:0）。
+
+    非 JPEG / Pillow 不支持时返回 None。必须在 convert()/copy() 之前调用。
+    """
+    try:
+        if (image.format or "").upper() not in ("JPEG", "MPO"):
+            return None
+        return int(JpegImagePlugin.get_sampling(image))
+    except Exception:
+        return None
+
+
+def jpeg_sampling_from_bytes(data: bytes) -> Optional[int]:
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            return jpeg_sampling(image)
+    except Exception:
+        return None
+
 
 
 # 单张图片的像素上限，按请求来源区分（见 api.py:_max_pixels_for_request）：

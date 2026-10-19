@@ -431,6 +431,81 @@ class TestInpaintRoundTrip:
         ctx.close()
 
 
+class TestLosslessRevision:
+    """第二轮开始只传 revision + mask；undo 后回到原始文件字节。
+
+    无损依赖两层契约：
+    1. 有 revision 的 render 不再把上一轮（有损）响应字节当输入；
+    2. undo 撤掉 render 后，原始上传文件仍是唯一输入源，而不是最后一帧的 JPEG。
+    """
+
+    def test_second_round_omits_image_and_sends_revision(
+        self,
+        browser_instance: Browser,
+        iopaint_server: str,
+        tmp_path: Path,
+    ) -> None:
+        ctx, pg = _fresh_page(browser_instance, iopaint_server)
+        _upload_image(pg, tmp_path)
+
+        with pg.expect_response("**/inpaint", timeout=20000) as resp_info:
+            _draw_stroke(pg)
+        first = resp_info.value
+        assert first.status == 200, f"第一轮 /inpaint 返回 {first.status}"
+        revision = first.headers.get("x-revision")
+        assert revision, "第一轮响应缺少 X-Revision"
+
+        expect(_save_button(pg)).to_be_enabled(timeout=10000)
+        _wait_interactive(pg)
+
+        with pg.expect_request("**/inpaint", timeout=20000) as req_info:
+            with pg.expect_response("**/inpaint", timeout=20000) as second_info:
+                _draw_stroke(pg, dx=30)
+
+        payload = json.loads(req_info.value.post_data)
+        assert "image" not in payload, "第二轮仍在上传整张图片"
+        assert payload.get("revision") == revision, payload.get("revision")
+
+        second = second_info.value
+        assert second.status == 200, f"第二轮 /inpaint 返回 {second.status}"
+        # cv2 在纯色图上可能没有像素变化，此时 revision 保持不变（不新增空 revision）
+        assert second.headers.get("x-revision"), "第二轮响应缺少 X-Revision"
+
+        ctx.close()
+
+    def test_undo_then_edit_uses_original_file(
+        self,
+        browser_instance: Browser,
+        iopaint_server: str,
+        tmp_path: Path,
+    ) -> None:
+        ctx, pg = _fresh_page(browser_instance, iopaint_server)
+        _upload_image(pg, tmp_path)
+
+        with pg.expect_response("**/inpaint", timeout=20000) as resp_info:
+            _draw_stroke(pg)
+        assert resp_info.value.status == 200
+        expect(_save_button(pg)).to_be_enabled(timeout=10000)
+
+        pg.keyboard.press("Control+z")
+        expect(_save_button(pg)).to_be_disabled(timeout=3000)
+        _wait_interactive(pg)
+
+        raw = (tmp_path / "test.png").read_bytes()
+        original = "data:image/png;base64," + base64.b64encode(raw).decode()
+
+        with pg.expect_request("**/inpaint", timeout=20000) as req_info:
+            with pg.expect_response("**/inpaint", timeout=20000) as second_info:
+                _draw_stroke(pg, dx=30)
+
+        payload = json.loads(req_info.value.post_data)
+        assert "revision" not in payload, "undo 后仍复用了已撤销的 revision"
+        assert payload.get("image") == original, "undo 后没有回到原始文件字节"
+        assert second_info.value.status == 200
+
+        ctx.close()
+
+
 class TestInpaintErrorToast:
     """后端 500 → axios 拦截器把 detail 拍平成一行 + 追加截图提示 → destructive
     toast；且失败不会产生 render（Save 保持 disabled）。"""

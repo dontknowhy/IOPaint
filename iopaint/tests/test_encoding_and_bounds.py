@@ -2,15 +2,21 @@
 """
 import base64
 import io
+import math
 
 import cv2
 import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, JpegImagePlugin
 from pydantic import ValidationError
 
 from iopaint.exceptions import ModelLoadError
-from iopaint.helper import numpy_to_bytes, pil_to_bytes
+from iopaint.helper import (
+    jpeg_sampling,
+    jpeg_sampling_from_bytes,
+    numpy_to_bytes,
+    pil_to_bytes,
+)
 from iopaint.schema import AdjustMaskRequest, InpaintRequest, RunPluginRequest
 
 
@@ -91,6 +97,58 @@ class TestPilCompressLevel:
         default_bytes = pil_to_bytes(img, "jpg")
         q95 = pil_to_bytes(img, "jpg", quality=95)
         assert default_bytes == q95
+
+
+class TestJpegSubsampling:
+    """导出必须显式传 subsampling，Pillow 默认会落 4:2:0。"""
+
+    def _photo_like(self) -> np.ndarray:
+        rng = np.random.default_rng(11)
+        arr = rng.integers(0, 256, (96, 128, 3), dtype=np.uint8)
+        # 平滑渐变 + 少量饱和色块：既不像纯噪声，也保留足够的色度细节
+        x = np.linspace(0, 255, 128, dtype=np.uint8)
+        arr[:, :, 0] = np.tile(x, (96, 1))
+        arr[:, :, 1] = np.tile(x[::-1], (96, 1))
+        arr[24:72, 32:96] = (220, 30, 180)
+        return arr
+
+    def _psnr(self, a: np.ndarray, b: np.ndarray) -> float:
+        mse = np.mean((a.astype(np.float64) - b.astype(np.float64)) ** 2)
+        return float("inf") if mse == 0 else 20 * math.log10(255.0 / math.sqrt(mse))
+
+    def test_pil_to_bytes_honors_subsampling(self) -> None:
+        img = Image.fromarray(self._photo_like())
+        assert JpegImagePlugin.get_sampling(
+            Image.open(io.BytesIO(pil_to_bytes(img, "jpeg", quality=100, subsampling=0)))
+        ) == 0
+        assert JpegImagePlugin.get_sampling(
+            Image.open(io.BytesIO(pil_to_bytes(img, "jpeg", quality=100, subsampling=2)))
+        ) == 2
+        # 不传时保持旧行为：libjpeg 默认 4:2:0
+        assert JpegImagePlugin.get_sampling(
+            Image.open(io.BytesIO(pil_to_bytes(img, "jpeg", quality=100)))
+        ) == 2
+
+    def test_q100_444_beats_q100_420(self) -> None:
+        arr = self._photo_like()
+        img = Image.fromarray(arr)
+        decoded = {}
+        for sampling in (0, 2):
+            data = pil_to_bytes(img, "jpeg", quality=100, subsampling=sampling)
+            decoded[sampling] = np.array(Image.open(io.BytesIO(data)).convert("RGB"))
+        psnr_444 = self._psnr(decoded[0], arr)
+        psnr_420 = self._psnr(decoded[2], arr)
+        # 计划实测 12MP 照片 50.32 vs 36.45dB；这里只锁方向与量级（同图比较，不引用外部数字）
+        assert psnr_444 > psnr_420 + 8.0, (psnr_444, psnr_420)
+
+    def test_jpeg_sampling_helpers(self) -> None:
+        img = Image.fromarray(self._photo_like())
+        jpeg = pil_to_bytes(img, "jpeg", quality=90, subsampling=1)
+        png = pil_to_bytes(img, "png")
+        assert jpeg_sampling_from_bytes(jpeg) == 1
+        assert jpeg_sampling_from_bytes(png) is None
+        with Image.open(io.BytesIO(jpeg)) as opened:
+            assert jpeg_sampling(opened) == 1
 
 
 # ---------------------------------------------------------------------------

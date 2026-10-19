@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import os
 import time
 import traceback
@@ -41,11 +42,13 @@ from iopaint.helper import (
     gen_frontend_mask,
     adjust_mask,
     is_private_host,
+    jpeg_sampling_from_bytes,
     EXTERNAL_MAX_IMAGE_PIXELS,
     PRIVATE_MAX_IMAGE_PIXELS,
 )
 from iopaint.model.utils import torch_gc
 from iopaint.model_manager import ModelManager
+from iopaint.revision_cache import RevisionCache, sha256_bytes
 from iopaint.runtime import to_torch_device
 from iopaint.plugins import build_plugins, RealESRGANUpscaler, InteractiveSeg
 from iopaint.plugins.base_plugin import BasePlugin
@@ -56,6 +59,7 @@ from iopaint.schema import (
     ServerConfigResponse,
     SwitchModelRequest,
     InpaintRequest,
+    ExportRequest,
     RunPluginRequest,
     SDSampler,
     PluginInfo,
@@ -86,6 +90,39 @@ def _max_pixels_for_request(request: Optional[Request]) -> Optional[int]:
     if is_private_host(host):
         return PRIVATE_MAX_IMAGE_PIXELS
     return EXTERNAL_MAX_IMAGE_PIXELS
+
+
+def _data_url_to_bytes(encoding: str) -> bytes:
+    """base64/data-url → 原始字节（不落盘、不二次编码）。"""
+    if encoding.startswith("data:image/") or encoding.startswith(
+        "data:application/octet-stream;base64,"
+    ):
+        encoding = encoding.split(";", 1)[1].split(",", 1)[1]
+    return base64.b64decode(encoding)
+
+
+def _media_type_for_ext(ext: str) -> str:
+    ext = ext.lower().lstrip(".")
+    return {
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "png": "image/png",
+        "webp": "image/webp",
+        "gif": "image/gif",
+        "bmp": "image/bmp",
+        "tif": "image/tiff",
+        "tiff": "image/tiff",
+    }.get(ext, f"image/{ext}")
+
+
+def _subsampling_value(mode: str, source_sampling: Optional[int]) -> Optional[int]:
+    if mode == "444":
+        return 0
+    if mode == "420":
+        return 2
+    if mode == "keep":
+        return source_sampling
+    return None
 
 
 WEB_APP_NOT_BUILT_MSG = (
@@ -210,7 +247,7 @@ def api_middleware(app: FastAPI):
         # 全站无 cookie/鉴权，credentials 没有用途；且 "origins=* + credentials=true"
         # 是规范禁止的组合（浏览器会直接拒绝响应）。见 SEC-3。
         "allow_credentials": False,
-        "expose_headers": ["X-Seed"],
+        "expose_headers": ["X-Seed", "X-Revision", "X-Internal-Format"],
     }
     app.add_middleware(CORSMiddleware, **cors_options)
 
@@ -267,6 +304,10 @@ class Api:
         self.file_manager = self._build_file_manager()
         self.plugins = self._build_plugins()
         self.model_manager = self._build_model_manager()
+        self.revision_cache = RevisionCache(
+            max_bytes=self.config.revision_cache_mb * 1024 * 1024,
+            delta_compress=self.config.delta_compress,
+        )
 
         # fmt: off
         self.add_api_route("/api/v1/gen-info", self.api_geninfo, methods=["POST"], response_model=GenInfoResponse)
@@ -276,6 +317,7 @@ class Api:
         self.add_api_route("/api/v1/model", self.api_switch_model, methods=["POST"], response_model=ModelInfo)
         self.add_api_route("/api/v1/inputimage", self.api_input_image, methods=["GET"])
         self.add_api_route("/api/v1/inpaint", self.api_inpaint, methods=["POST"])
+        self.add_api_route("/api/v1/export", self.api_export, methods=["POST"])
         self.add_api_route("/api/v1/switch_plugin_model", self.api_switch_plugin_model, methods=["POST"])
         self.add_api_route("/api/v1/run_plugin_gen_mask", self.api_run_plugin_gen_mask, methods=["POST"])
         self.add_api_route("/api/v1/run_plugin_gen_image", self.api_run_plugin_gen_image, methods=["POST"])
@@ -400,24 +442,33 @@ class Api:
         return GenInfoResponse(prompt=prompt, negative_prompt=negative_prompt)
 
     async def api_inpaint(self, req: InpaintRequest, request: Request) -> Response:
-        if not req.image or not req.mask:
-            raise HTTPException(status_code=400, detail="image and mask are required")
+        if not req.mask:
+            raise HTTPException(status_code=400, detail="mask is required")
+        if not req.image and not req.revision:
+            raise HTTPException(
+                status_code=400, detail="image or revision is required"
+            )
 
         # PERF-1: base64 解码、后处理、PNG/JPEG 编码都是 CPU 密集操作。
         # 原实现里它们跑在事件循环上，一张 12MP 图的 PNG 编码就要 ~7s，
         # 期间整个服务（含 /api/v1/samplers 等轻请求）都会被卡住。
         # 连同模型推理一起整体放进线程池。
         loop = asyncio.get_running_loop()
-        res_img_bytes, ext = await loop.run_in_executor(
+        res_img_bytes, ext, revision, internal_format = await loop.run_in_executor(
             None, self._inpaint_blocking, req, _max_pixels_for_request(request)
         )
 
         await self.sio.emit("diffusion_finish")
 
+        headers = {"X-Seed": str(req.sd_seed)}
+        if revision:
+            headers["X-Revision"] = revision
+        if internal_format:
+            headers["X-Internal-Format"] = internal_format
         return Response(
             content=res_img_bytes,
             media_type=f"image/{ext}",
-            headers={"X-Seed": str(req.sd_seed)},
+            headers=headers,
         )
 
     @staticmethod
@@ -446,21 +497,88 @@ class Api:
         req: InpaintRequest,
         max_pixels: Optional[int] = EXTERNAL_MAX_IMAGE_PIXELS,
     ) -> tuple:
-        """同步版 inpaint：decode → inference → encode。跑在线程池里。"""
+        """同步版 inpaint：decode → inference → encode。跑在线程池里。
+
+        revision 命中时**忽略上传的图片字节**，直接在当前 canonical 像素上
+        继续推理；未命中才回退到旧路径，并在日志里写明三类原因。
+        """
         # 裁剪边距以服务端 config.json 为准（前端下发的是常量，不暴露给用户）
         req.hd_strategy_crop_margin = self.config.hd_strategy_crop_margin
-        # api_inpaint 已保证二者存在；这里显式断言，顺带让类型收窄为非 None
-        assert req.image is not None and req.mask is not None
-        image, alpha_channel, infos, ext = decode_base64_to_image(
-            req.image, max_pixels=max_pixels
-        )
+        assert req.mask is not None
         mask, _, _, _ = decode_base64_to_image(
             req.mask, gray=True, max_pixels=max_pixels
         )
+        mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)[1]
+
+        raw_bytes: Optional[bytes] = None
+        source_hash: Optional[str] = None
+        if req.image:
+            raw_bytes = _data_url_to_bytes(req.image)
+            source_hash = sha256_bytes(raw_bytes)
+
+        lease = None
+        if req.revision:
+            lease = self.revision_cache.begin_by_revision(req.revision)
+            if lease is None:
+                logger.info(
+                    "revision cache miss: revision expired (evicted/restart); "
+                    f"revision={req.revision[:16]}…"
+                )
+                if not req.image:
+                    raise HTTPException(
+                        status_code=410,
+                        detail="revision expired; resend the image bytes",
+                    )
+        if lease is None and source_hash is not None:
+            lease = self.revision_cache.begin_by_hash(source_hash)
+            if lease is None:
+                logger.info(
+                    "revision cache miss: first import (upload hash not cached)"
+                )
+                self.revision_cache.stats["miss_first_import"] += 1
+
+        if lease is not None:
+            image = lease.image
+            alpha_channel = lease.alpha
+            infos = lease.infos
+            ext = lease.ext
+            source_sampling = lease.source_sampling
+            source_bytes = lease.source_bytes
+            logger.debug(
+                f"revision cache hit: {image.shape[1]}x{image.shape[0]} "
+                f"generation={lease.branch_generation()}"
+            )
+        else:
+            assert req.image is not None
+            image, alpha_channel, infos, ext = decode_base64_to_image(
+                req.image, max_pixels=max_pixels
+            )
+            source_sampling = (
+                jpeg_sampling_from_bytes(raw_bytes) if raw_bytes else None
+            )
+            # 只有 JPEG 源才需要保留原始字节做 DCT 系数域导出
+            keep_source = (
+                raw_bytes
+                if raw_bytes is not None and ext.lower() in ("jpg", "jpeg")
+                else None
+            )
+            created = self.revision_cache.create(
+                image,
+                alpha_channel,
+                ext,
+                infos,
+                source_sampling,
+                keep_source,
+                seed_hash=source_hash,
+            )
+            if created is not None:
+                lease = self.revision_cache.begin_entry(created)
+
         logger.debug(f"image ext: {ext}")
 
-        mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)[1]
         if image.shape[:2] != mask.shape[:2]:
+            if lease is not None:
+                lease.release()
             raise HTTPException(
                 400,
                 detail=f"Image size({image.shape[:2]}) and mask size({mask.shape[:2]}) not match.",
@@ -488,22 +606,146 @@ class Api:
             name="extender",
         )
 
-        start = time.time()
-        rgb_np_img = self.model_manager(image, mask, req)
-        logger.info(f"process time: {(time.time() - start) * 1000:.2f}ms")
-        if self.config.empty_cache_after_inpaint:
-            torch_gc()
+        try:
+            if cv2.countNonZero(mask) == 0:
+                # 空掩膜 = 无操作。不跑推理，也不新增 revision。
+                logger.info("empty mask: skip inference")
+                result_rgb = image
+            else:
+                start = time.time()
+                rgb_np_img = self.model_manager(image, mask, req)
+                logger.info(f"process time: {(time.time() - start) * 1000:.2f}ms")
+                if self.config.empty_cache_after_inpaint:
+                    torch_gc()
+                result_rgb = cv2.cvtColor(rgb_np_img, cv2.COLOR_BGR2RGB)
 
-        rgb_np_img = cv2.cvtColor(rgb_np_img, cv2.COLOR_BGR2RGB)
-        rgb_res = concat_alpha_channel(rgb_np_img, alpha_channel)
+            revision = None
+            if lease is not None:
+                revision = lease.commit(result_rgb)
+                lease.release()
+                lease = None
+        finally:
+            if lease is not None:
+                lease.release()
 
+        rgb_res = concat_alpha_channel(result_rgb, alpha_channel)
+        wire_ext: str
+        if self.config.stateless_lossless:
+            wire_ext = self.config.wire_format
+        else:
+            wire_ext = ext
+        internal_format = wire_ext if self.config.stateless_lossless else None
         res_img_bytes = pil_to_bytes(
             Image.fromarray(rgb_res),
-            ext=ext,
+            ext=wire_ext,
             quality=self.config.quality,
             infos=infos,
         )
-        return res_img_bytes, ext
+        if revision:
+            # 把响应字节的 sha256 也登记为该 revision 的别名，老客户端
+            # 下一轮原样上传上一轮响应时也能命中（无需前端改动）。
+            self.revision_cache.alias(sha256_bytes(res_img_bytes), revision)
+        return res_img_bytes, wire_ext, revision, internal_format
+
+    def api_export(self, req: ExportRequest, request: Request) -> Response:
+        """唯一编码出口：canonical/上传像素 → 源格式的交付字节。"""
+        if not req.revision and not req.image:
+            raise HTTPException(
+                status_code=400, detail="revision or image is required"
+            )
+
+        image = alpha_channel = None
+        infos: Dict = {}
+        source_ext: Optional[str] = None
+        source_sampling: Optional[int] = None
+        source_bytes: Optional[bytes] = None
+        changed_blocks: Optional[np.ndarray] = None
+
+        if req.revision:
+            snap = self.revision_cache.snapshot(req.revision)
+            if snap is not None:
+                (
+                    image,
+                    alpha_channel,
+                    source_ext,
+                    infos,
+                    source_sampling,
+                    source_bytes,
+                    changed_blocks,
+                ) = snap
+            else:
+                logger.info(
+                    "export revision miss: revision expired (evicted/restart); "
+                    f"revision={req.revision[:16]}…"
+                )
+                if not req.image:
+                    raise HTTPException(
+                        status_code=410,
+                        detail="revision expired; resend the image bytes",
+                    )
+
+        if image is None:
+            assert req.image is not None
+            raw = _data_url_to_bytes(req.image)
+            image, alpha_channel, infos, decoded_ext = decode_base64_to_image(
+                req.image, max_pixels=_max_pixels_for_request(request)
+            )
+            source_ext = decoded_ext
+            source_sampling = jpeg_sampling_from_bytes(raw)
+            source_bytes = raw
+
+        assert source_ext is not None
+        fmt = (req.format or source_ext).lower().lstrip(".")
+        if fmt == "jpg":
+            fmt = "jpeg"
+        is_jpeg = fmt in ("jpeg", "jpg")
+        quality = (
+            req.quality
+            if req.quality is not None
+            else self.config.export_quality
+        )
+        sampling_mode = req.subsampling or self.config.export_subsampling
+        export_mode = req.export_mode or self.config.export_mode
+
+        # baseline JPEG 源 + 源格式 + 未强制改参数时，掩膜外块直接复用
+        # 源 DCT 系数（逐块零损）。任何不满足都回退整图 full 编码。
+        if (
+            is_jpeg
+            and export_mode == "dct_patch"
+            and req.quality is None
+            and req.subsampling is None
+            and source_bytes is not None
+            and changed_blocks is not None
+            and format(source_ext).lower() in ("jpeg", "jpg")
+        ):
+            try:
+                from iopaint.jpeg_dct import patch_jpeg
+
+                patched = patch_jpeg(source_bytes, image, changed_blocks)
+            except Exception as e:  # pragma: no cover - 兜底日志
+                logger.warning(f"jpeg dct patch failed, fallback to full encode: {e}")
+                patched = None
+            if patched is not None:
+                return Response(
+                    content=patched,
+                    media_type="image/jpeg",
+                    headers={"X-Export-Mode": "dct_patch"},
+                )
+
+        subsampling = _subsampling_value(sampling_mode, source_sampling)
+        pil_img = Image.fromarray(concat_alpha_channel(image, alpha_channel))
+        data = pil_to_bytes(
+            pil_img,
+            ext=fmt,
+            quality=quality,
+            infos=infos,
+            subsampling=subsampling,
+        )
+        return Response(
+            content=data,
+            media_type=_media_type_for_ext(fmt),
+            headers={"X-Export-Mode": "full"},
+        )
 
     async def api_run_plugin_gen_image(
         self, req: RunPluginRequest, request: Request

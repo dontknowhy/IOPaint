@@ -271,6 +271,25 @@ class ApiConfig(BaseModel):
     output_dir: Optional[Path]
     quality: int
     empty_cache_after_inpaint: bool = False
+    # 无损盒子：进程内 canonical revision 缓存上限（MB，0=关闭）。
+    # 单条上限 = 该值 / 2，禁用阈值 = 该值全额：
+    # 超过单条上限只保留最新 canonical（无撤销历史），超过全额则不缓存；
+    # 两个阈值由这一个参数派生，不引入第二个尺寸参数。
+    revision_cache_mb: int = Field(512, ge=0)
+    # 撤销补丁用 zstd 压缩，降低反复编辑的内存占用（需要可选依赖 zstandard；
+    # 未安装时回退为原始补丁并打印告警）。压缩只影响历史补丁，不影响像素。
+    delta_compress: bool = False
+    # 导出默认 quality=100 + 4:4:4；inpaint 响应仍用 quality（保持旧行为/延迟）
+    export_quality: int = Field(100, ge=1, le=100)
+    # 444 / 420 / keep（keep=沿用源 JPEG 的 get_sampling()）
+    export_subsampling: Literal["444", "420", "keep"] = "444"
+    # jpeg 源优先走 DCT 系数域局部导出；失败自动回退 full
+    export_mode: Literal["dct_patch", "full"] = "dct_patch"
+    # 无状态兜底（默认关）。开启后 /inpaint 响应改为 PNG level1，
+    # 前端把 PNG 字节当作下一轮输入也不会累积损失，代价是每轮 +~1.5s。
+    stateless_lossless: bool = False
+    # 无状态线格式：png（默认，CPU 最省）或 webp（lossless method=4，体积更小但更慢）
+    wire_format: Literal["png", "webp"] = "png"
     # hd_strategy=Crop 时掩膜外扩的边距；同时作用于 erase 与 diffusion 模型
     hd_strategy_crop_margin: int = 128
     enable_interactive_seg: bool
@@ -295,6 +314,10 @@ class InpaintRequest(BaseModel):
     )
     mask: Optional[str] = Field(
         None, description="base64 encoded mask", max_length=64_000_000
+    )
+    # 服务端 canonical 的 revision。命中时 image 可省略（服务端忽略上传字节）。
+    revision: Optional[str] = Field(
+        None, max_length=128, description="Canonical revision from X-Revision"
     )
 
     ldm_steps: int = Field(20, ge=1, le=150, description="Steps for ldm model.")
@@ -466,6 +489,22 @@ class InpaintRequest(BaseModel):
             logger.info("ControlNet is enabled, set enable_brushnet=False")
 
         return self
+
+
+class ExportRequest(BaseModel):
+    """导出边界：唯一编码出口。
+
+    revision 命中时使用服务端 canonical 像素；否则用上传的 base64 图片。
+    未命中且没有 image 时返回 410，前端回传图片字节重试。
+    """
+
+    revision: Optional[str] = Field(None, max_length=128)
+    image: Optional[str] = Field(None, max_length=64_000_000)
+    # 目标格式；缺省跟随 revision 的源格式 / 上传图片的真实格式
+    format: Optional[str] = Field(None, max_length=16)
+    quality: Optional[int] = Field(None, ge=1, le=100)
+    subsampling: Optional[Literal["444", "420", "keep"]] = None
+    export_mode: Optional[Literal["dct_patch", "full"]] = None
 
 
 class RunPluginRequest(BaseModel):

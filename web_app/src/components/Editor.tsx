@@ -14,7 +14,7 @@ import {
   TransformWrapper,
 } from "react-zoom-pan-pinch"
 import { useKeyPressEvent } from "react-use"
-import { downloadToOutput, runPlugin } from "@/lib/api"
+import { exportImage, runPlugin, saveBlobToOutput } from "@/lib/api"
 import { IconButton } from "@/components/ui/button"
 import {
   askWritePermission,
@@ -29,9 +29,9 @@ import {
   getErrorMessage,
   isMidClick,
   isRightClick,
-  mimeFromSrc,
   mouseXY,
   strokeBounds,
+  srcToFile,
   touchPointXY,
 } from "@/lib/utils"
 import { Eraser, Eye, Redo, Undo, Expand, Download } from "lucide-react"
@@ -39,7 +39,7 @@ import { useTranslation } from "react-i18next"
 import { useImage } from "@/hooks/useImage"
 import { Slider } from "./ui/slider"
 import { Line, PluginName, Point } from "@/lib/types"
-import { useStore } from "@/lib/states"
+import { getRenderRevision, useStore } from "@/lib/states"
 import Cropper from "./Cropper"
 import { InteractiveSegPoints } from "./InteractiveSeg"
 import useHotKey from "@/hooks/useHotkey"
@@ -1111,17 +1111,19 @@ export default function Editor(props: EditorProps) {
     if (file === undefined) {
       return
     }
+    // 导出走 /export 的唯一编码出口。revision 可用时直接用服务端
+    // canonical 像素（掩膜外零重压缩），失效才回传 render 字节。
+    const exportRender = (render: HTMLImageElement) =>
+      exportImage(getRenderRevision(render.currentSrc), () =>
+        srcToFile(render.currentSrc, file.name, file.type)
+      )
+
     if (enableAutoSaving && renders.length > 0) {
       try {
         const lastRender = renders[renders.length - 1]
-        // 保存名的扩展名以渲染结果（服务端响应）的真实类型为准；
-        // file.type/file.name 只是浏览器按扩展名的猜测，可能与字节不符（CONS-3）
-        const renderMime = (await mimeFromSrc(lastRender.currentSrc)) ?? file.type
-        await downloadToOutput(
-          lastRender,
-          buildDownloadName(file.name, "", renderMime),
-          renderMime
-        )
+        // 保存名的扩展名以导出响应的真实类型为准（CONS-3）
+        const { blob, mimeType } = await exportRender(lastRender)
+        await saveBlobToOutput(blob, file.name, mimeType)
         toast({
           description: t("editor.saveImageSuccess"),
         })
@@ -1138,9 +1140,11 @@ export default function Editor(props: EditorProps) {
     // TODO: download to output directory
     const curRender = renders[renders.length - 1]
     if (curRender) {
-      const renderMime = await mimeFromSrc(curRender.currentSrc)
-      const name = buildDownloadName(file.name, "_cleanup", renderMime)
-      downloadImage(curRender.currentSrc, name)
+      const { blob, mimeType } = await exportRender(curRender)
+      const name = buildDownloadName(file.name, "_cleanup", mimeType)
+      const url = URL.createObjectURL(blob)
+      downloadImage(url, name)
+      setTimeout(() => URL.revokeObjectURL(url), 10_000)
     } else {
       // FE-2/D-14：还没有任何渲染结果（例如刚打开图片就按 Ctrl+S）时
       // 回落下载原图，而不是读 undefined.currentSrc 抛 TypeError

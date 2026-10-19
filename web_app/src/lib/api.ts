@@ -1,4 +1,4 @@
-import { AxiosError } from "axios"
+import { AxiosError, AxiosResponse } from "axios"
 import axios from "axios"
 import i18n from "./i18n"
 import {
@@ -10,7 +10,7 @@ import {
   ServerConfig,
 } from "@/lib/types"
 import { Settings } from "@/lib/states"
-import { buildDownloadName, convertToBase64, srcToFile } from "@/lib/utils"
+import { buildDownloadName, convertToBase64 } from "@/lib/utils"
 import {
   HD_STRATEGY,
   HD_STRATEGY_CROP_MARGIN,
@@ -79,21 +79,33 @@ api.interceptors.response.use(
     } catch {
       // ignore parsing errors, fall back to the axios error message
     }
-    throw new Error(
+    throw Object.assign(new Error(
       `${detail || error.message}\n${i18n.t("api.screenshotHint")}`
-    )
+    ), { status: error.response?.status })
   }
 )
 
+/** HTTP status carried by errors thrown by the response interceptor. */
+export function httpStatus(error: unknown): number | undefined {
+  return (error as { status?: number } | null)?.status
+}
+
+export interface InpaintResponse {
+  blob: Blob
+  seed?: string
+  revision?: string
+}
+
 export default async function inpaint(
-  imageFile: File,
+  imageFile: File | null,
   settings: Settings,
   croperRect: Rect,
   extenderState: Rect,
   mask: File | Blob,
-  paintByExampleImage: File | null = null
-) {
-  const imageBase64 = await convertToBase64(imageFile)
+  paintByExampleImage: File | null = null,
+  revision: string | null = null
+): Promise<InpaintResponse> {
+  const imageBase64 = imageFile ? await convertToBase64(imageFile) : null
   const maskBase64 = await convertToBase64(mask)
   const exampleImageBase64 = paintByExampleImage
     ? await convertToBase64(paintByExampleImage)
@@ -102,7 +114,9 @@ export default async function inpaint(
   const res = await api.post(
     "/inpaint",
     {
-      image: imageBase64,
+      // revision 命中时服务端忽略 image；省略它可以把上传字节降到 0。
+      ...(imageBase64 ? { image: imageBase64 } : {}),
+      ...(revision ? { revision } : {}),
       mask: maskBase64,
       ldm_steps: settings.ldmSteps,
       ldm_sampler: settings.ldmSampler,
@@ -152,6 +166,7 @@ export default async function inpaint(
   return {
     blob: res.data as Blob,
     seed: res.headers["x-seed"] as string | undefined,
+    revision: res.headers["x-revision"] as string | undefined,
   }
 }
 
@@ -227,15 +242,45 @@ export async function getMedias(
   return res.data
 }
 
-export async function downloadToOutput(
-  image: HTMLImageElement,
+// 唯一导出出口。revision 失效（切图/逐出/重启）时回传图片字节重试。
+export async function exportImage(
+  revision: string | null,
+  fallback: () => Promise<File>
+): Promise<{ blob: Blob; mimeType: string }> {
+  const request = (body: Record<string, unknown>) =>
+    api.post("/export", body, { responseType: "blob" })
+
+  let res: AxiosResponse<Blob> | undefined
+  if (revision) {
+    try {
+      res = await request({ revision })
+    } catch (error) {
+      if (httpStatus(error) !== 410) {
+        throw error
+      }
+    }
+  }
+  if (!res) {
+    const image = await convertToBase64(await fallback())
+    res = await request({ image })
+  }
+  return {
+    blob: res.data as Blob,
+    mimeType:
+      (res.headers["content-type"] as string | undefined) ??
+      "application/octet-stream",
+  }
+}
+
+export async function saveBlobToOutput(
+  blob: Blob,
   filename: string,
   mimeType: string
 ) {
   // 服务端原样写盘（api_save_image 直接按 filename 落地），扩展名必须与
-  // 实际字节一致，否则落盘文件名不副实（CONS-3）
+  // 实际字节一致，否则落盘文件名不副实（CONS-3）。
   const safeName = buildDownloadName(filename, "", mimeType)
-  const file = await srcToFile(image.src, safeName, mimeType)
+  const file = new File([blob], safeName, { type: mimeType })
   const fd = new FormData()
   fd.append("file", file)
   try {
@@ -243,6 +288,15 @@ export async function downloadToOutput(
   } catch (error) {
     throw new Error(i18n.t("api.saveImageError", { error: String(error) }))
   }
+}
+
+export async function downloadToOutput(
+  image: HTMLImageElement,
+  filename: string,
+  mimeType: string
+) {
+  const blob = await (await fetch(image.src)).blob()
+  return saveBlobToOutput(blob, filename, mimeType)
 }
 
 export async function getGenInfo(file: File): Promise<GenInfo> {

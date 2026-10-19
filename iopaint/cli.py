@@ -1,7 +1,7 @@
 import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional, cast
 
 import typer
 from fastapi import FastAPI
@@ -172,6 +172,36 @@ def start(
     ),
     # 默认 95 与 const.QUALITY_HELP、helper.pil_to_bytes 的默认值保持一致
     quality: int = Option(95, help=QUALITY_HELP),
+    revision_cache_mb: int = Option(
+        512,
+        help="In-process canonical revision cache budget in MB. "
+        "0 disables the lossless revision path. Single-entry and disabled "
+        "thresholds derive from this value (half / full).",
+    ),
+    delta_compress: bool = Option(
+        False,
+        help="Compress undo patches with zstd (optional dependency; "
+        "falls back to raw patches when zstandard is absent)",
+    ),
+    export_quality: int = Option(
+        100, help="Quality of /api/v1/export (default 100)"
+    ),
+    export_subsampling: str = Option(
+        "444", help="JPEG chroma subsampling for export: 444 / 420 / keep"
+    ),
+    export_mode: str = Option(
+        "dct_patch",
+        help="JPEG export mode: dct_patch (patch changed DCT blocks) or full",
+    ),
+    stateless_lossless: bool = Option(
+        False,
+        help="Stateless lossless: use PNG as the /inpaint wire format so every round is lossless "
+        "even without the revision cache (costs ~1.5s per 12MP round)",
+    ),
+    wire_format: str = Option(
+        "png",
+        help="Wire format for stateless lossless: png (fast) or webp (smaller, ~3x slower)",
+    ),
     empty_cache_after_inpaint: bool = Option(
         False,
         help="Call torch.cuda.empty_cache() after each inpainting. "
@@ -281,6 +311,15 @@ def start(
         mask_dir=mask_dir,
         output_dir=output_dir,
         quality=quality,
+        revision_cache_mb=revision_cache_mb,
+        delta_compress=delta_compress,
+        export_quality=export_quality,
+        export_subsampling=cast(
+            Literal["444", "420", "keep"], export_subsampling
+        ),
+        export_mode=cast(Literal["dct_patch", "full"], export_mode),
+        stateless_lossless=stateless_lossless,
+        wire_format=cast(Literal["png", "webp"], wire_format),
         empty_cache_after_inpaint=empty_cache_after_inpaint,
         hd_strategy_crop_margin=hd_strategy_crop_margin,
         enable_interactive_seg=enable_interactive_seg,
