@@ -182,8 +182,8 @@ read it:
   `--forked`/GPU/shared-:8080 gotchas (trigger: about to run or modify slow tests).
 - `docs/agents/playwright.md` — webui test details: Radix close-animation `pointer-events`, `_wait_interactive()`,
   brush-slider `aria-valuemax` (trigger: writing or debugging `test_webui.py`).
-- `docs/agents/torch-and-env.md` — torch cu121 pins, `environment.yml` vs stale `scripts/environment.yaml`, MPS
-  fallback / JIT fuser import order (trigger: touching `requirements.txt`/`environment.yml` or `import torch` order).
+- `docs/agents/torch-and-env.md` — torch cu126 pins / cuDNN 9.10.2 Pascal ceiling, `environment.yml` vs stale
+  `scripts/environment.yaml`, MPS fallback / JIT fuser import order (trigger: touching `requirements.txt`/`environment.yml` or `import torch` order).
 - `docs/agents/web-config.md` — `web_config.py` Gradio wiring: `save_config`'s positional component list,
   `save_btn.click` inputs, `default_configs` move together (trigger: adding a config field or editing web_config.py).
 - `docs/agents/frontend.md` — zustand store, `api.ts`, socket.io `/ws`-before-`/` mount order, Editor mask canvas,

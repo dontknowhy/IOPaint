@@ -1,10 +1,12 @@
-# NOTE: torch/torchvision must be built for CUDA 12.1 (cu121) and bundle cuDNN 8.9.x,
-# because cuDNN >= 9.1 dropped support for SM < 7.5 GPUs (e.g. Pascal P104).
+# NOTE: torch/torchvision must be built for CUDA 12.6 (cu126): that wheel pins
+# nvidia-cudnn-cu12==9.10.2.21, the last cuDNN that still runs on SM < 7.5 GPUs
+# (e.g. Pascal P104-100 / P620; later cuDNN builds dropped them, and so does the
+# default PyPI wheel of this torch, which is cu13 + cuDNN 9.24).
 # Install from a CUDA index, e.g.:
-#   pip install -r requirements.txt --index-url https://mirror.sjtu.edu.cn/pytorch-wheels/cu121
-# (nvidia-cudnn-cu12==8.9.2.26 and other nvidia-* runtimes are pulled in by torch's own pins)
-torch==2.3.1+cu121
-torchvision==0.18.1+cu121
+#   pip install -r requirements.txt --index-url https://mirrors.aliyun.com/pytorch-wheels/cu126
+# (nvidia-cudnn-cu12==9.10.2.21 and other nvidia-* runtimes are pulled in by torch's own pins)
+torch==2.14.1+cu126
+torchvision==0.29.1+cu126
 # D-16：钉死版本，避免上游 minor 版本漂移悄悄改行为（与当前生产环境一致）
 opencv-python==5.0.0.93
 diffusers==0.34.0

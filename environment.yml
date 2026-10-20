@@ -7,11 +7,14 @@ channels:
 dependencies:
   - python=3.12
   - pip
-  - # Core PyTorch (CUDA 12.1)
-  - pytorch::torch=2.3.1=py3.12_cuda12.1_cudnn8.9.2_0
-  - pytorch::torchvision=0.18.1=py3.12_cuda12.1_cudnn8.9.2_0
-  - # pip dependencies (from requirements.txt + extras)
+  # Core PyTorch：torch 2.14.1 没有 conda 构建（pytorch channel 里搜不到），只能走 pip。
+  # +cu126 这个 local version 只在 CUDA 索引上有；它 pin 的 cuDNN 9.10.2.21 是最后一个还支持
+  # Pascal / SM<7.5 的 cuDNN（PyPI 上默认轮子是 cu13 + cuDNN 9.24，Pascal 上跑不了）。
   - pip:
+    - --extra-index-url https://mirrors.aliyun.com/pytorch-wheels/cu126
+    - torch==2.14.1+cu126
+    - torchvision==0.29.1+cu126
+    # pip dependencies (from requirements.txt + extras)
     - opencv-python
     - diffusers==0.34.0
     - huggingface_hub==0.36.2
@@ -35,7 +38,7 @@ dependencies:
     - gradio==5.50.0
     - typer-config==1.4.0
     - Pillow>=10.0.0
-    - # Dev tools（和 requirements-dev.txt 是同一份，见根目录 requirements-dev.txt）
+    # Dev tools（和 requirements-dev.txt 是同一份，见根目录 requirements-dev.txt）
     - pytest
     - pytest-loguru
     - mypy==2.4.0

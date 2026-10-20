@@ -25,14 +25,14 @@ jobs:
             requirements.txt
             requirements-dev.txt
 
-      # requirements.txt 钉的是 torch==2.3.1+cu121，那个 local version 只有 CUDA 索引上有，
+      # requirements.txt 钉的是 torch==2.14.1+cu126，那个 local version 只有 CUDA 索引上有，
       # 所以先摘掉这两行走 CPU wheel（代码本身不挑 CUDA 版本）。别改 requirements.txt 的钉法。
       - name: Install backend
         run: |
           python -m pip install --upgrade pip
           grep -vE '^(torch|torchvision)==' requirements.txt > /tmp/req-notorch.txt
           pip install --extra-index-url https://download.pytorch.org/whl/cpu \
-            torch==2.3.1+cpu torchvision==0.18.1+cpu
+            torch==2.14.1+cpu torchvision==0.29.1+cpu
           pip install -r /tmp/req-notorch.txt
           pip install pytest pytest-loguru
           # 类型检查只用 dev 依赖里的 pin（mypy==2.4.0，见 requirements-dev.txt），
@@ -87,7 +87,7 @@ jobs:
           python -m pip install --upgrade pip
           grep -vE '^(torch|torchvision)==' requirements.txt > /tmp/req-notorch.txt
           pip install --extra-index-url https://download.pytorch.org/whl/cpu \
-            torch==2.3.1+cpu torchvision==0.18.1+cpu
+            torch==2.14.1+cpu torchvision==0.29.1+cpu
           pip install -r /tmp/req-notorch.txt
           pip install pytest pytest-loguru playwright
           playwright install --with-deps chromium

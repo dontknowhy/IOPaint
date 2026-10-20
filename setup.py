@@ -48,7 +48,7 @@ def load_requirements():
             line = line.split("#", 1)[0].strip()
             if not line:
                 continue
-            # PKG-1：torch==2.3.1+cu121 的本地版本号只有 CUDA 索引上有，
+            # PKG-1：torch==2.14.1+cu126 的本地版本号只有 CUDA 索引上有，
             # PyPI 上解析不到 → 打包时剥掉 `+xxx`（运行时行为不受影响，
             # 本仓库安装仍按 requirements.txt 走 CUDA 索引）
             line = re.sub(r"(==[^;#\s]+)\+[^;#\s]+", r"\1", line)

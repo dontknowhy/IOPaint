@@ -60,14 +60,14 @@ jobs:
           python -m venv "$GITHUB_WORKSPACE/.venv"
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
 
-      # 同 ci.yml：requirements.txt 钉的 +cu121 只在 CUDA 索引上，摘掉走 CPU wheel。
+      # 同 ci.yml：requirements.txt 钉的 +cu126 只在 CUDA 索引上，摘掉走 CPU wheel。
       # pytest-forked 只为 --forked（用例级内存隔离，见测试步注释）。
       - name: Install backend
         run: |
           python -m pip install --upgrade pip
           grep -vE '^(torch|torchvision)==' requirements.txt > /tmp/req-notorch.txt
           pip install --extra-index-url https://download.pytorch.org/whl/cpu \
-            torch==2.3.1+cpu torchvision==0.18.1+cpu
+            torch==2.14.1+cpu torchvision==0.29.1+cpu
           pip install -r /tmp/req-notorch.txt
           pip install pytest pytest-loguru pytest-forked
 
