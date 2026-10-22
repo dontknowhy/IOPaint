@@ -10,6 +10,7 @@ from typer import Option
 from typer_config import use_json_config
 
 from iopaint.const import *
+from iopaint.i18n import cli_text
 from iopaint.runtime import (
     setup_model_dir,
     dump_environment_info,
@@ -19,7 +20,6 @@ from iopaint.runtime import (
     resolve_gpu_id,
     to_torch_device,
     hub_is_reachable,
-    DEVICE_SPEC_HELP,
 )
 from iopaint.schema import (
     InteractiveSegModel,
@@ -60,8 +60,11 @@ def _resolve_export_format(value: str) -> Optional[ExportFormat]:
     fmt = _EXPORT_FORMAT_ALIASES.get(fmt, fmt)
     if fmt not in EXPORT_FORMATS:
         raise ValueError(
-            f"Invalid --export-format '{value}'. "
-            f"Choose one of: {', '.join(EXPORT_FORMATS)}"
+            cli_text(
+                "cli.error.export_format",
+                value=value,
+                choices=", ".join(EXPORT_FORMATS),
+            )
         )
     return cast(ExportFormat, fmt)
 
@@ -69,21 +72,19 @@ def _resolve_export_format(value: str) -> Optional[ExportFormat]:
 typer_app = typer.Typer(pretty_exceptions_show_locals=False, add_completion=False)
 
 
-@typer_app.command(help="Install all plugins dependencies")
+@typer_app.command(help=cli_text("cli.command.install_plugins_packages"))
 def install_plugins_packages():
     from iopaint.installer import install_plugins_package
 
     install_plugins_package()
 
 
-@typer_app.command(help="Download SD/SDXL normal/inpainting model from HuggingFace")
+@typer_app.command(help=cli_text("cli.command.download"))
 def download(
-    model: str = Option(
-        ..., help="Model id on HuggingFace e.g: runwayml/stable-diffusion-inpainting"
-    ),
+    model: str = Option(..., help=cli_text("cli.help.download_model")),
     model_dir: Path = Option(
         DEFAULT_MODEL_DIR,
-        help=MODEL_DIR_HELP,
+        help=cli_text("cli.help.model_dir", model_dir=DEFAULT_MODEL_DIR),
         file_okay=False,
         callback=setup_model_dir,
     ),
@@ -94,15 +95,15 @@ def download(
     try:
         cli_download_model(model)
     except ModelLoadError as e:
-        logger.error(f"Failed to download model {model}: {e}")
+        logger.error(cli_text("cli.error.model_download", model=model, error=e))
         raise SystemExit(1)
 
 
-@typer_app.command(name="list", help="List downloaded models")
+@typer_app.command(name="list", help=cli_text("cli.command.list"))
 def list_model(
     model_dir: Path = Option(
         DEFAULT_MODEL_DIR,
-        help=MODEL_DIR_HELP,
+        help=cli_text("cli.help.model_dir", model_dir=DEFAULT_MODEL_DIR),
         file_okay=False,
         callback=setup_model_dir,
     ),
@@ -114,29 +115,22 @@ def list_model(
         print(it.name)
 
 
-@typer_app.command(help="Batch processing images")
+@typer_app.command(help=cli_text("cli.command.run"))
 def run(
     model: str = Option("lama"),
-    device: str = Option("cpu", help=f"Device. One of: {DEVICE_SPEC_HELP}"),
-    gpu_id: Optional[int] = Option(None, help=GPU_ID_HELP),
-    image: Path = Option(..., help="Image folders or file path"),
-    mask: Path = Option(
-        ...,
-        help="Mask folders or file path. "
-        "If it is a directory, the mask images in the directory should have the same name as the original image."
-        "If it is a file, all images will use this mask."
-        "Mask will automatically resize to the same size as the original image.",
+    device: str = Option(
+        "cpu",
+        help=cli_text("cli.help.device", values=cli_text("cli.help.device_values")),
     ),
-    output: Path = Option(..., help="Output directory or file path"),
-    config: Path = Option(
-        None, help="Config file path. You can use dump command to create a base config."
-    ),
-    concat: bool = Option(
-        False, help="Concat original image, mask and output images into one image"
-    ),
+    gpu_id: Optional[int] = Option(None, help=cli_text("cli.help.gpu_id")),
+    image: Path = Option(..., help=cli_text("cli.help.image")),
+    mask: Path = Option(..., help=cli_text("cli.help.mask")),
+    output: Path = Option(..., help=cli_text("cli.help.output")),
+    config: Path = Option(None, help=cli_text("cli.help.config")),
+    concat: bool = Option(False, help=cli_text("cli.help.concat")),
     model_dir: Path = Option(
         DEFAULT_MODEL_DIR,
-        help=MODEL_DIR_HELP,
+        help=cli_text("cli.help.model_dir", model_dir=DEFAULT_MODEL_DIR),
         file_okay=False,
         callback=setup_model_dir,
     ),
@@ -155,7 +149,7 @@ def run(
         try:
             cli_download_model(model)
         except ModelLoadError as e:
-            logger.error(f"Failed to download model {model}: {e}")
+            logger.error(cli_text("cli.error.model_download", model=model, error=e))
             raise SystemExit(1)
 
     from iopaint.batch_processing import batch_inpaint
@@ -165,87 +159,90 @@ def run(
     )
 
 
-@typer_app.command(help="Start IOPaint server")
+@typer_app.command(help=cli_text("cli.command.start"))
 @use_json_config()
 def start(
     host: str = Option("127.0.0.1"),
     port: int = Option(8080),
-    inbrowser: bool = Option(False, help=INBROWSER_HELP),
+    inbrowser: bool = Option(False, help=cli_text("cli.help.inbrowser")),
     model: str = Option(
         DEFAULT_MODEL,
-        help=f"Erase models: [{', '.join(AVAILABLE_MODELS)}].\n"
-        f"Diffusion models: [{', '.join(DIFFUSION_MODELS)}] or any SD/SDXL normal/inpainting models on HuggingFace.",
+        help=cli_text(
+            "cli.help.model",
+            erase_models=", ".join(AVAILABLE_MODELS),
+            diffusion_models=", ".join(DIFFUSION_MODELS),
+        ),
     ),
     model_dir: Path = Option(
         DEFAULT_MODEL_DIR,
-        help=MODEL_DIR_HELP,
+        help=cli_text("cli.help.model_dir", model_dir=DEFAULT_MODEL_DIR),
         dir_okay=True,
         file_okay=False,
         callback=setup_model_dir,
     ),
-    low_mem: bool = Option(False, help=LOW_MEM_HELP),
-    no_half: bool = Option(False, help=NO_HALF_HELP),
-    force_fp16: bool = Option(False, help=FORCE_FP16_HELP),
-    cpu_offload: bool = Option(False, help=CPU_OFFLOAD_HELP),
-    disable_nsfw_checker: bool = Option(False, help=DISABLE_NSFW_HELP),
-    cpu_textencoder: bool = Option(False, help=CPU_TEXTENCODER_HELP),
-    local_files_only: bool = Option(False, help=LOCAL_FILES_ONLY_HELP),
-    device: str = Option("cpu", help=f"Device. One of: {DEVICE_SPEC_HELP}"),
-    gpu_id: Optional[int] = Option(None, help=GPU_ID_HELP),
-    input: Optional[Path] = Option(None, help=INPUT_HELP),
+    low_mem: bool = Option(False, help=cli_text("cli.help.low_mem")),
+    no_half: bool = Option(False, help=cli_text("cli.help.no_half")),
+    force_fp16: bool = Option(False, help=cli_text("cli.help.force_fp16")),
+    cpu_offload: bool = Option(False, help=cli_text("cli.help.cpu_offload")),
+    disable_nsfw_checker: bool = Option(
+        False, help=cli_text("cli.help.disable_nsfw_checker")
+    ),
+    cpu_textencoder: bool = Option(False, help=cli_text("cli.help.cpu_textencoder")),
+    local_files_only: bool = Option(False, help=cli_text("cli.help.local_files_only")),
+    device: str = Option(
+        "cpu",
+        help=cli_text("cli.help.device", values=cli_text("cli.help.device_values")),
+    ),
+    gpu_id: Optional[int] = Option(None, help=cli_text("cli.help.gpu_id")),
+    input: Optional[Path] = Option(None, help=cli_text("cli.help.input")),
     mask_dir: Optional[Path] = Option(
-        None, help=MASK_DIR_HELP, dir_okay=True, file_okay=False
+        None, help=cli_text("cli.help.mask_dir"), dir_okay=True, file_okay=False
     ),
     output_dir: Optional[Path] = Option(
-        None, help=OUTPUT_DIR_HELP, dir_okay=True, file_okay=False
+        None, help=cli_text("cli.help.output_dir"), dir_okay=True, file_okay=False
     ),
     # 默认 95 与 const.QUALITY_HELP、helper.pil_to_bytes 的默认值保持一致
-    quality: int = Option(95, help=QUALITY_HELP),
+    quality: int = Option(95, help=cli_text("cli.help.quality")),
     revision_cache_mb: int = Option(
-        512,
-        help="In-process canonical revision cache budget in MB. "
-        "0 disables the lossless revision path. Single-entry and disabled "
-        "thresholds derive from this value (half / full).",
+        512, help=cli_text("cli.help.revision_cache_mb")
     ),
-    delta_compress: bool = Option(
-        False,
-        help="Compress undo patches with zstd (optional dependency; "
-        "falls back to raw patches when zstandard is absent)",
+    delta_compress: bool = Option(False, help=cli_text("cli.help.delta_compress")),
+    export_quality: int = Option(100, help=cli_text("cli.help.export_quality")),
+    export_subsampling: str = Option(
+        "444", help=cli_text("cli.help.export_subsampling")
     ),
-    export_quality: int = Option(100, help=EXPORT_QUALITY_HELP),
-    export_subsampling: str = Option("444", help=EXPORT_SUBSAMPLING_HELP),
-    export_mode: str = Option("dct_patch", help=EXPORT_MODE_HELP),
-    export_force: bool = Option(False, help=EXPORT_FORCE_HELP),
-    export_format: str = Option("", help=EXPORT_FORMAT_HELP),
+    export_mode: str = Option("dct_patch", help=cli_text("cli.help.export_mode")),
+    export_force: bool = Option(False, help=cli_text("cli.help.export_force")),
+    export_format: str = Option("", help=cli_text("cli.help.export_format")),
     export_png_compress_level: int = Option(
-        1, help=EXPORT_PNG_COMPRESS_LEVEL_HELP
+        1, help=cli_text("cli.help.export_png_compress_level")
     ),
-    export_webp_lossless: bool = Option(True, help=EXPORT_WEBP_LOSSLESS_HELP),
+    export_webp_lossless: bool = Option(
+        True, help=cli_text("cli.help.export_webp_lossless")
+    ),
     stateless_lossless: bool = Option(
-        False,
-        help="Stateless lossless: use PNG as the /inpaint wire format so every round is lossless "
-        "even without the revision cache (costs ~1.5s per 12MP round)",
+        False, help=cli_text("cli.help.stateless_lossless")
     ),
-    wire_format: str = Option(
-        "png",
-        help="Wire format for stateless lossless: png (fast) or webp (smaller, ~3x slower)",
-    ),
+    wire_format: str = Option("png", help=cli_text("cli.help.wire_format")),
     empty_cache_after_inpaint: bool = Option(
-        False,
-        help="Call torch.cuda.empty_cache() after each inpainting. "
-        "Disabled by default for faster repeated inference, "
-        "enable it if you run into CUDA out of memory errors.",
+        False, help=cli_text("cli.help.empty_cache_after_inpaint")
     ),
-    hd_strategy_crop_margin: int = Option(128, help=HD_STRATEGY_CROP_MARGIN_HELP),
-    enable_interactive_seg: bool = Option(False, help=INTERACTIVE_SEG_HELP),
+    hd_strategy_crop_margin: int = Option(
+        128, help=cli_text("cli.help.hd_strategy_crop_margin")
+    ),
+    enable_interactive_seg: bool = Option(
+        False, help=cli_text("cli.help.enable_interactive_seg")
+    ),
     interactive_seg_model: InteractiveSegModel = Option(
-        InteractiveSegModel.sam2_1_tiny, help=INTERACTIVE_SEG_MODEL_HELP
+        InteractiveSegModel.sam2_1_tiny, help=cli_text("cli.help.interactive_seg_model")
     ),
     interactive_seg_device: Device = Option(Device.cpu),
-    enable_remove_bg: bool = Option(False, help=REMOVE_BG_HELP),
-    remove_bg_device: Device = Option(Device.cpu, help=REMOVE_BG_DEVICE_HELP),
+    enable_remove_bg: bool = Option(False, help=cli_text("cli.help.enable_remove_bg")),
+    remove_bg_device: Device = Option(
+        Device.cpu, help=cli_text("cli.help.remove_bg_device")
+    ),
     remove_bg_model: RemoveBGModel = Option(RemoveBGModel.briaai_rmbg_1_4),
-    enable_anime_seg: bool = Option(False, help=ANIMESEG_HELP),
+    enable_anime_seg: bool = Option(False, help=cli_text("cli.help.enable_anime_seg")),
     enable_realesrgan: bool = Option(False),
     realesrgan_device: Device = Option(Device.cpu),
     realesrgan_model: RealESRGANModel = Option(RealESRGANModel.realesr_general_x4v3),
@@ -269,15 +266,13 @@ def start(
     gfpgan_device = check_device(gfpgan_device)
 
     if input and not input.exists():
-        logger.error(f"invalid --input: {input} not exists")
+        logger.error(cli_text("cli.error.input_missing", input=input))
         raise SystemExit(1)
     if mask_dir and not mask_dir.exists():
-        logger.error(f"invalid --mask-dir: {mask_dir} not exists")
+        logger.error(cli_text("cli.error.mask_dir_missing", mask_dir=mask_dir))
         raise SystemExit(1)
     if input and input.is_dir() and not output_dir:
-        logger.error(
-            "invalid --output-dir: --output-dir must be set when --input is a directory"
-        )
+        logger.error(cli_text("cli.error.output_dir_required"))
         raise SystemExit(1)
     if output_dir:
         output_dir = output_dir.expanduser().absolute()
@@ -312,7 +307,7 @@ def start(
             cli_download_model(model)
         except ModelLoadError as e:
             # 启动期下载失败：打印错误并退出，语义与原 SystemExit(1) 一致
-            logger.error(f"Failed to download model {model}: {e}")
+            logger.error(cli_text("cli.error.model_download", model=model, error=e))
             raise SystemExit(1)
 
     from iopaint.api import Api
@@ -379,12 +374,12 @@ def start(
         api = Api(app, api_config)
     except ModelLoadError as e:
         # 插件依赖缺失 / 模型加载失败：启动期语义保持“打印错误并退出”
-        logger.error(f"Failed to start IOPaint: {e}")
+        logger.error(cli_text("cli.error.start_failed", error=e))
         raise SystemExit(1)
     api.launch()
 
 
-@typer_app.command(help="Start IOPaint web config page")
+@typer_app.command(help=cli_text("cli.command.start_web_config"))
 def start_web_config(
     config_file: Path = Option("config.json"),
 ):

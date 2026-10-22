@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from loguru import logger
 
 from iopaint.helper import download_model
+from iopaint.i18n import cli_text
 from iopaint.plugins.base_plugin import BasePlugin
 from iopaint.schema import RunPluginRequest, RealESRGANModel
 
@@ -431,7 +432,7 @@ class RealESRGANUpscaler(BasePlugin):
             },
         }
         if name not in REAL_ESRGAN_MODELS:
-            raise ValueError(f"Unknown RealESRGAN model name: {name}")
+            raise ValueError(cli_text("cli.error.realesrgan_model", name=name))
         model_info = REAL_ESRGAN_MODELS[name]
 
         model_path = download_model(model_info["url"], model_info["model_md5"])

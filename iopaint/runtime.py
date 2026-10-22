@@ -6,13 +6,13 @@ import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from iopaint.i18n import cli_text
 from iopaint.schema import Device
 from loguru import logger
 from rich import print
 from typing import Dict, Any, List, Optional, Tuple
 
 # 用户可用 `--device cuda:N` / `--gpu-id N` / `IOPaint_GPU=N` 指定用哪块 GPU
-DEVICE_SPEC_HELP = "cpu | cuda | cuda:N (使用第 N 块 GPU) | mps"
 GPU_ENV_VAR = "IOPaint_GPU"
 
 
@@ -217,29 +217,34 @@ def parse_device_spec(
         name, _, index = raw.partition(":")
         if not index.isdigit():
             raise ValueError(
-                f"Invalid --device '{spec}': index must be a non-negative integer, "
-                f"e.g. cuda:1. Valid values: {DEVICE_SPEC_HELP}"
+                cli_text(
+                    "cli.error.device_index",
+                    spec=spec,
+                    values=cli_text("cli.help.device_values"),
+                )
             )
         parsed_id = int(index)
         raw = name
     if raw not in Device.values():
         raise ValueError(
-            f"Invalid --device '{spec}'. Valid values: {DEVICE_SPEC_HELP}"
+            cli_text(
+                "cli.error.device",
+                spec=spec,
+                values=cli_text("cli.help.device_values"),
+            )
         )
 
     if gpu_id is not None:
         if parsed_id is not None and parsed_id != gpu_id:
             raise ValueError(
-                f"--device '{spec}' conflicts with --gpu-id {gpu_id}, keep only one"
+                cli_text("cli.error.device_conflict", spec=spec, gpu_id=gpu_id)
             )
         parsed_id = gpu_id
 
     device = Device(raw)
     if device != Device.cuda:
         if parsed_id is not None:
-            raise ValueError(
-                f"GPU index is only valid with device=cuda, but current device is '{raw}'"
-            )
+            raise ValueError(cli_text("cli.error.gpu_needs_cuda", device=raw))
         env_id = _env_gpu_id(strict=False)
         if env_id is not None:
             logger.warning(
@@ -270,8 +275,7 @@ def _env_gpu_id(strict: bool = True) -> Optional[int]:
     if not raw.isdigit():
         if strict:
             raise ValueError(
-                f"Environment variable {GPU_ENV_VAR} must be a non-negative integer, "
-                f"got '{raw}'"
+                cli_text("cli.error.gpu_env", env=GPU_ENV_VAR, value=raw)
             )
         return None
     return int(raw)
@@ -287,8 +291,12 @@ def resolve_gpu_id(device: Device, gpu_id: Optional[int]) -> Optional[int]:
         return None
     if gpu_id >= len(gpus):
         raise ValueError(
-            f"GPU index {gpu_id} is out of range, only {len(gpus)} CUDA device(s) "
-            f"are visible: {describe_gpus()}"
+            cli_text(
+                "cli.error.gpu_out_of_range",
+                gpu_id=gpu_id,
+                count=len(gpus),
+                gpus=describe_gpus(),
+            )
         )
     return gpu_id
 

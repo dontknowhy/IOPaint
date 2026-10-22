@@ -1,5 +1,6 @@
 """Shared fixtures for IOPaint tests."""
 import asyncio
+import os
 import socket
 import subprocess
 import sys
@@ -7,6 +8,12 @@ import time
 from pathlib import Path
 
 import pytest
+
+# CLI 文案按 IOPAINT_LOCALE / LANG 选语言，开发机若是 zh_CN 会让断言英文文案的用例变红
+# （与 test_webui 固定 locale="en-US" 同理）。这里在导入任何测试模块之前钉死 en
+# —— CLI 帮助串在 `iopaint.cli` 导入时就已经取好；要测中文的用例自己用 monkeypatch
+# 覆盖环境变量，或起子进程传入 IOPAINT_LOCALE=zh-CN。
+os.environ["IOPAINT_LOCALE"] = "en"
 
 
 def _free_port():

@@ -17,6 +17,7 @@ from torch.hub import download_url_to_file, get_dir
 import hashlib
 
 from iopaint.exceptions import ModelLoadError
+from iopaint.i18n import cli_text
 from iopaint.runtime import device_str
 
 
@@ -63,15 +64,23 @@ def download_model(url, model_md5: str = None):
                 try:
                     os.remove(cached_file)
                     logger.error(
-                        f"Model md5: {_md5}, expected md5: {model_md5}, wrong model deleted. Please restart iopaint."
-                        f"If you still have errors, please try download model manually first https://lama-cleaner-docs.vercel.app/install/download_model_manually.\n"
+                        cli_text(
+                            "cli.error.md5_mismatch_deleted",
+                            md5=_md5,
+                            expected=model_md5,
+                        )
                     )
                 except OSError:
                     logger.error(
-                        f"Model md5: {_md5}, expected md5: {model_md5}, please delete {cached_file} and restart iopaint."
+                        cli_text(
+                            "cli.error.md5_mismatch_delete_hint",
+                            md5=_md5,
+                            expected=model_md5,
+                            path=cached_file,
+                        )
                     )
                 raise ModelLoadError(
-                    f"Model md5 mismatch for {cached_file}, please delete it and restart iopaint."
+                    cli_text("cli.error.md5_mismatch", path=cached_file)
                 )
 
     return cached_file
@@ -89,19 +98,26 @@ def handle_error(model_path, model_md5, e):
         try:
             os.remove(model_path)
             logger.error(
-                f"Model md5: {_md5}, expected md5: {model_md5}, wrong model deleted. Please restart iopaint."
-                f"If you still have errors, please try download model manually first https://lama-cleaner-docs.vercel.app/install/download_model_manually.\n"
+                cli_text(
+                    "cli.error.md5_mismatch_deleted",
+                    md5=_md5,
+                    expected=model_md5,
+                )
             )
         except OSError:
             logger.error(
-                f"Model md5: {_md5}, expected md5: {model_md5}, please delete {model_path} and restart iopaint."
+                cli_text(
+                    "cli.error.md5_mismatch_delete_hint",
+                    md5=_md5,
+                    expected=model_md5,
+                    path=model_path,
+                )
             )
     else:
         logger.error(
-            f"Failed to load model {model_path},"
-            f"please submit an issue at https://github.com/Sanster/IOPaint/issues and include a screenshot of the error:\n{e}"
+            cli_text("cli.error.load_failed_issue", path=model_path, error=e)
         )
-    raise ModelLoadError(f"Failed to load model {model_path}: {e}")
+    raise ModelLoadError(cli_text("cli.error.load_failed", path=model_path, error=e))
 
 
 def load_jit_model(url_or_path, device, model_md5: str):

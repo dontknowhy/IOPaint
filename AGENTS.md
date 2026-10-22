@@ -207,8 +207,8 @@ read it:
 - `docs/agents/frontend.md` — zustand store, `api.ts`, socket.io `/ws`-before-`/` mount order, Editor mask canvas,
   shared hooks (trigger: working in `web_app/src/` or the backend static/socket.io mounts).
 - `docs/agents/i18n.md` — the two language catalogs (`web_app/src/locales/*.json`, `iopaint/locales/*.json`), how to
-  add a language (drop one JSON), key conventions, and the parity tests (trigger: adding/editing UI strings or a
-  locale).
+  add a language (drop one JSON), key conventions, the CLI's `IOPAINT_LOCALE`/`LANG` selection, and the parity tests
+  (trigger: adding/editing UI strings, CLI help or error text, or a locale).
 - `docs/agents/type-check.md` — new-code-only mypy gate: `python scripts/check_types.py` runs mypy on
   `iopaint/**/*.py` changed vs `origin/main` and fails only on errors anchored to newly added lines (trigger: before
   committing backend Python changes; it also gates CI — the `backend` job runs it as "Type check (new code only)",

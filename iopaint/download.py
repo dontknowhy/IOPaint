@@ -5,6 +5,7 @@ from functools import lru_cache
 from typing import List, Optional
 
 import torch
+from iopaint.i18n import cli_text
 from iopaint.schema import ModelType, ModelInfo
 from loguru import logger
 from pathlib import Path
@@ -73,14 +74,18 @@ def _inspect_single_file(model_abs_path: str) -> Optional[tuple]:
                 is_sdxl = any(k.startswith(_SDXL_MARKER_PREFIX) for k in keys)
                 return in_channels, is_sdxl
         except Exception as e:
-            logger.error(f"Failed to inspect {model_abs_path}: {e}")
+            logger.error(
+                cli_text("cli.error.inspect_failed", path=model_abs_path, error=e)
+            )
             return None
 
     # .ckpt fallback: pickle must be fully loaded to inspect the keys
     try:
         checkpoint = torch.load(model_abs_path, map_location="cpu", weights_only=True)
     except Exception as e:
-        logger.error(f"Failed to load {model_abs_path}: {e}")
+        logger.error(
+            cli_text("cli.error.model_file_load_failed", path=model_abs_path, error=e)
+        )
         return None
     in_channels = None
     for key in _UNET_FIRST_CONV_KEYS:

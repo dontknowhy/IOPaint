@@ -5,6 +5,7 @@ from loguru import logger
 import torch
 from torch.hub import get_dir
 
+from iopaint.i18n import cli_text
 from iopaint.plugins.base_plugin import BasePlugin
 from iopaint.schema import Device, RunPluginRequest, RemoveBGModel
 
@@ -29,9 +30,7 @@ class RemoveBG(BasePlugin):
             import rembg
 
             if rembg.__version__ < "2.0.59":
-                raise ValueError(
-                    "To use birefnet models, please upgrade rembg to >= 2.0.59. pip install -U rembg"
-                )
+                raise ValueError(cli_text("cli.error.remove_bg_upgrade"))
 
         hub_dir = get_dir()
         model_dir = os.path.join(hub_dir, "checkpoints")

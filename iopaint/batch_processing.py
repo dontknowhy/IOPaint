@@ -18,6 +18,7 @@ from rich.progress import (
 )
 
 from iopaint.helper import pil_to_bytes
+from iopaint.i18n import cli_text
 from iopaint.model_manager import ModelManager
 from iopaint.schema import InpaintRequest
 
@@ -58,19 +59,17 @@ def batch_inpaint(
     concat: bool = False,
 ):
     if image.is_dir() and output.is_file():
-        logger.error(
-            "invalid --output: when image is a directory, output should be a directory"
-        )
+        logger.error(cli_text("cli.error.batch_output_not_dir"))
         raise SystemExit(1)
     output.mkdir(parents=True, exist_ok=True)
 
     image_paths = glob_images(image)
     mask_paths = glob_images(mask)
     if len(image_paths) == 0:
-        logger.error("invalid --image: empty image folder")
+        logger.error(cli_text("cli.error.batch_empty_image"))
         exit(-1)
     if len(mask_paths) == 0:
-        logger.error("invalid --mask: empty mask folder")
+        logger.error(cli_text("cli.error.batch_empty_mask"))
         exit(-1)
 
     if config is None:

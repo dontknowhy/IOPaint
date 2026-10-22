@@ -27,6 +27,7 @@ from loguru import logger
 
 from iopaint.schema import SDSampler
 from iopaint.exceptions import ModelLoadError
+from iopaint.i18n import cli_text
 from iopaint.runtime import device_str, cuda_device_index
 from torch import conv2d, conv_transpose2d
 
@@ -997,11 +998,7 @@ def handle_from_pretrained_exceptions(func, **kwargs):
             logger.info("revision=fp16 not found, try revision=main")
             return func(**{**kwargs, "variant": None, "revision": "main"})
         elif "Max retries exceeded" in previous_traceback:
-            raise ModelLoadError(
-                "Fetching model from HuggingFace failed. "
-                "If this is your first time downloading the model, you may need to set up proxy in terminal."
-                "If the model has already been downloaded, you can add --local-files-only when starting."
-            )
+            raise ModelLoadError(cli_text("cli.error.hf_fetch"))
         raise e
     except Exception as e:
         raise e
