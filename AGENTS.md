@@ -5,6 +5,7 @@ frontend (`web_app/`) that is compiled into the Python package and served by the
 
 ## TOC
 
+- [Coding principles](#coding-principles)
 - [Commands](#commands)
 - [Health check](#health-check)
 - [The backend serves the built frontend](#the-backend-serves-the-built-frontend)
@@ -14,6 +15,20 @@ frontend (`web_app/`) that is compiled into the Python package and served by the
 - [Other gotchas](#other-gotchas)
 - [Agent docs index](#agent-docs-index)
 - [Multi-batch agent tasks](#multi-batch-agent-tasks)
+
+## Coding principles
+
+Small, boring, in-style diffs: read the target file plus 1–2 files of the same kind and the relevant tests first,
+reuse existing helpers instead of inventing new ones, and keep the change scoped to the task. Don't add abstractions,
+dependencies, config knobs or defensive branches nobody asked for; when the small diff would distort the code, rewrite
+and explain why. Say "not sure" instead of guessing, never edit code you haven't read, never edit a test to make it
+pass, and run no destructive command (force push, `rm -rf`, DB writes) without explicit approval. A bug fix ships with a
+test that fails before it; a feature covers the normal path plus 1–2 edges. Before handing off run
+`bash scripts/check.sh` (see [Health check](#health-check)) and report what changed, what was skipped, and what is still
+uncertain.
+
+Full text, including the type-annotation and check-command adaptations to this repo: docs/agents/coding-principles.md
+(trigger: writing or reviewing any code change).
 
 ## Commands
 
@@ -178,6 +193,9 @@ cases that draw on the canvas or assert on UI controls).
 Long-form topics live in `docs/agents/*.md` (all English, like this file). Each entry has the condition for when to
 read it:
 
+- `docs/agents/coding-principles.md` — the opening stance plus seven coding principles: read-before-write, minimal diff,
+  existing conventions, no over-engineering, honesty/boundaries, tests that can fail, delivery self-check (trigger:
+  writing or reviewing any code change).
 - `docs/agents/slow-tests.md` — running/extending the weight-heavy `pytest -m slow` suite; one-time weight downloads;
   `--forked`/GPU/shared-:8080 gotchas (trigger: about to run or modify slow tests).
 - `docs/agents/playwright.md` — webui test details: Radix close-animation `pointer-events`, `_wait_interactive()`,
