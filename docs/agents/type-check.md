@@ -47,9 +47,10 @@ run prints the rest as "pre-existing errors on unchanged lines (ignored)" — 21
 - Parses `git diff -U0` hunks to know which line numbers are *newly added* in each changed file, and keeps only mypy
   errors anchored on those lines. Errors on pre-existing lines are counted and printed as info, never fatal — that is
   how "old files are not back-ported" is enforced mechanically.
-- Exit 1 only when at least one error lands on an added line; exit 0 otherwise. `MYPY=/path/to/mypy` overrides the
-  binary; run it with an interpreter that has the runtime deps so imports resolve:
-  `--python-executable` is pinned to the running interpreter.
+- Exit 1 only when at least one error lands on an added line; exit 0 otherwise. mypy is resolved from the running
+  interpreter (`sys.executable -m mypy`) when importable, so it always comes from the same env as
+  `--python-executable`; `MYPY=/path/to/mypy` overrides that choice. Run it with an interpreter that has the runtime
+  deps so imports resolve.
 
 Usage (with the same interpreter you use to run IOPaint, so imports resolve):
 

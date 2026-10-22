@@ -7,8 +7,10 @@ Errors on pre-existing lines are printed as info and never fail.
 
 Run it with an interpreter that has the runtime deps (pydantic, loguru, ...), e.g.:
     python scripts/check_types.py [BASE_REF]
-Override the mypy binary with MYPY=/path/to/mypy if it is not on PATH.
+mypy is taken from that same interpreter (`sys.executable -m mypy`); override it
+with MYPY=/path/to/mypy.
 """
+import importlib.util
 import os
 import re
 import shutil
@@ -68,6 +70,24 @@ def added_lines(base: str, path: str) -> set[int]:
     return out
 
 
+def mypy_command() -> list[str]:
+    """Pick the mypy that belongs to the running interpreter.
+
+    `shutil.which("mypy")` may find an unrelated distro binary built for
+    another Python (/usr/bin/mypy on 3.14 here) whose parser chokes on
+    site-packages code from this env. Prefer `sys.executable -m mypy` so the
+    checker and `--python-executable` always come from the same env; keep
+    MYPY=... as an escape hatch.
+    """
+    override = os.environ.get("MYPY")
+    if override:
+        return [override]
+    if importlib.util.find_spec("mypy") is not None:
+        return [sys.executable, "-m", "mypy"]
+    exe = shutil.which("mypy")
+    return [exe] if exe else []
+
+
 def main() -> int:
     base = sys.argv[1] if len(sys.argv) > 1 else "origin/main"
     files = changed_py_files(base)
@@ -75,14 +95,14 @@ def main() -> int:
         print(f"check_types: no changed iopaint/**/*.py vs {base} — nothing to check.")
         return 0
 
-    mypy = os.environ.get("MYPY") or shutil.which("mypy")
+    mypy = mypy_command()
     if not mypy:
         print("check_types: mypy not found (set MYPY=/path/to/mypy).", file=sys.stderr)
         return 2
 
     added = {f: added_lines(base, f) for f in files}
     proc = subprocess.run(
-        [mypy, *MYPY_FLAGS, "--python-executable", sys.executable, *files],
+        [*mypy, *MYPY_FLAGS, "--python-executable", sys.executable, *files],
         capture_output=True,
         text=True,
     )
