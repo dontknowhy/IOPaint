@@ -142,6 +142,45 @@ QUALITY_HELP = """
 Quality of image encoding, 0-100. Default is 95, higher quality will generate larger file size.
 """
 
+EXPORT_FORCE_HELP = """
+Force /api/v1/export to ignore the request's format/quality/subsampling/export_mode
+and use the export_* settings from config.json. JPEG DCT patch is disabled because
+the source quantization tables no longer match the forced quality.
+"""
+
+EXPORT_FORMAT_HELP = """
+Forced export format when export_force=true: jpeg/jpg, png, webp, bmp or tiff
+(tif is accepted as an alias). Empty means keep the source image format.
+"""
+
+EXPORT_QUALITY_HELP = """
+Export quality (1-100) for JPEG/WebP. It is the fallback when the request does
+not set quality, and the enforced value when export_force=true.
+"""
+
+EXPORT_SUBSAMPLING_HELP = """
+JPEG chroma subsampling for export: 444 / 420 / keep (keep = reuse the source
+JPEG sampling). Fallback when the request does not set it; enforced when
+export_force=true.
+"""
+
+EXPORT_MODE_HELP = """
+JPEG export mode: dct_patch (patch changed DCT blocks losslessly) or full.
+Ignored when export_force=true, which always re-encodes the full image because
+the source quantization tables no longer match the forced quality.
+"""
+
+EXPORT_PNG_COMPRESS_LEVEL_HELP = """
+PNG zlib compression level 0-9. Lossless: higher levels make smaller files but
+take longer to encode. Default 1 matches the WebUI response path.
+"""
+
+EXPORT_WEBP_LOSSLESS_HELP = """
+Encode WebP exports losslessly (default). Only read when export_force=true;
+non-forced exports stay lossless. Disable it to let export_quality control the
+lossy WebP compression ratio.
+"""
+
 INTERACTIVE_SEG_HELP = "Enable interactive segmentation using Segment Anything."
 INTERACTIVE_SEG_MODEL_HELP = "Model size: mobile_sam < vit_b < vit_l < vit_h. Bigger model size means better segmentation but slower speed."
 REMOVE_BG_HELP = "Enable remove background plugin."

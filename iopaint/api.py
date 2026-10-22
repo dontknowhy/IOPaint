@@ -695,22 +695,36 @@ class Api:
             source_bytes = raw
 
         assert source_ext is not None
-        fmt = (req.format or source_ext).lower().lstrip(".")
+        # config.json 的 export_force=True 时忽略请求里的编码参数，
+        # 统一走 export_* 配置；未指定 export_format 时保留源图格式。
+        forced = self.config.export_force
+        if forced:
+            fmt = (self.config.export_format or source_ext).lower().lstrip(".")
+        else:
+            fmt = (req.format or source_ext).lower().lstrip(".")
         if fmt == "jpg":
             fmt = "jpeg"
         is_jpeg = fmt in ("jpeg", "jpg")
-        quality = (
-            req.quality
-            if req.quality is not None
-            else self.config.export_quality
-        )
-        sampling_mode = req.subsampling or self.config.export_subsampling
+        if forced:
+            quality = self.config.export_quality
+            sampling_mode = self.config.export_subsampling
+        else:
+            quality = (
+                req.quality
+                if req.quality is not None
+                else self.config.export_quality
+            )
+            sampling_mode = req.subsampling or self.config.export_subsampling
+        # export_mode 只在未强制路径参与 DCT 局部导出的门槛判断；
+        # 强制路径总是整图重编码。
         export_mode = req.export_mode or self.config.export_mode
 
         # baseline JPEG 源 + 源格式 + 未强制改参数时，掩膜外块直接复用
         # 源 DCT 系数（逐块零损）。任何不满足都回退整图 full 编码。
+        # export_force 下源量化表与强制质量/子采样不匹配，必须整图重编码。
         if (
-            is_jpeg
+            not forced
+            and is_jpeg
             and export_mode == "dct_patch"
             and req.quality is None
             and req.subsampling is None
@@ -734,12 +748,22 @@ class Api:
 
         subsampling = _subsampling_value(sampling_mode, source_sampling)
         pil_img = Image.fromarray(concat_alpha_channel(image, alpha_channel))
+        if is_jpeg and pil_img.mode == "RGBA":
+            # JPEG 不支持 alpha：透明区域垫白底再转 RGB，避免
+            # "cannot write mode RGBA as JPEG" 的 500。
+            background = Image.new("RGB", pil_img.size, (255, 255, 255))
+            background.paste(pil_img, mask=pil_img.getchannel("A"))
+            pil_img = background
         data = pil_to_bytes(
             pil_img,
             ext=fmt,
             quality=quality,
             infos=infos,
             subsampling=subsampling,
+            png_compress_level=self.config.export_png_compress_level,
+            # 只有强制覆盖导出的 WebP 才按 export_webp_lossless 决定
+            # 有损/无损；普通请求保持 helper 默认的 lossless 行为。
+            webp_lossless=self.config.export_webp_lossless if forced else True,
         )
         return Response(
             content=data,

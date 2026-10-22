@@ -73,6 +73,34 @@ class TestSaveConfig:
         assert saved["output_dir"] is None
         assert saved["mask_dir"] is None
 
+    def test_export_fields_are_persisted(self, _config_file: Path) -> None:
+        save_config(
+            **_save_kwargs(
+                export_force=True,
+                export_format="png",
+                export_quality=80,
+                export_subsampling="420",
+                export_mode="full",
+                export_png_compress_level=9,
+                export_webp_lossless=True,
+            )
+        )
+        saved = json.loads(_config_file.read_text(encoding="utf-8"))
+        assert saved["export_force"] is True
+        assert saved["export_format"] == "png"
+        assert saved["export_quality"] == 80
+        assert saved["export_subsampling"] == "420"
+        assert saved["export_mode"] == "full"
+        assert saved["export_png_compress_level"] == 9
+        assert saved["export_webp_lossless"] is True
+
+    def test_empty_export_format_means_follow_source(
+        self, _config_file: Path
+    ) -> None:
+        save_config(**_save_kwargs(export_format=""))
+        saved = json.loads(_config_file.read_text(encoding="utf-8"))
+        assert saved["export_format"] is None
+
     def test_missing_input_returns_error(self, _config_file, tmp_path):
         msg = save_config(**_save_kwargs(input=str(tmp_path / "ghost")))
         assert msg == "[Error] Input file or directory does not exist"

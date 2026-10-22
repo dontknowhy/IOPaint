@@ -1,7 +1,7 @@
 import random
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Literal, List
+from typing import Optional, Literal, List, get_args
 
 from loguru import logger
 
@@ -139,6 +139,11 @@ class Choices(str, Enum):
     @classmethod
     def values(cls):
         return [member.value for member in cls]
+
+
+ExportFormat = Literal["jpeg", "jpg", "png", "webp", "bmp", "tiff"]
+# CLI / web-config 的下拉框都从这里派生，新增格式只需改上面的 Literal
+EXPORT_FORMATS = get_args(ExportFormat)
 
 
 class RealESRGANModel(Choices):
@@ -285,6 +290,18 @@ class ApiConfig(BaseModel):
     export_subsampling: Literal["444", "420", "keep"] = "444"
     # jpeg 源优先走 DCT 系数域局部导出；失败自动回退 full
     export_mode: Literal["dct_patch", "full"] = "dct_patch"
+    # 强制覆盖 /api/v1/export 的编码参数：True 时忽略请求里的
+    # format/quality/subsampling/export_mode，统一使用下面 export_* 配置；
+    # 同时禁用 DCT 局部导出（源量化表不再匹配强制指定的质量）。
+    export_force: bool = False
+    # 强制导出格式；None = 跟随请求 / 源图格式。jpg 等价 jpeg
+    export_format: Optional[ExportFormat] = None
+    # PNG zlib 压缩级别 0-9：只影响体积/编码耗时，不影响像素（无损）
+    export_png_compress_level: int = Field(1, ge=0, le=9)
+    # WebP 导出是否无损（默认无损，保持导出边界旧行为）。无损时
+    # export_quality 不生效；只有 export_force=True 时才读取该值，
+    # 未强制时沿用 wire 格式的 lossless 行为
+    export_webp_lossless: bool = True
     # 无状态兜底（默认关）。开启后 /inpaint 响应改为 PNG level1，
     # 前端把 PNG 字节当作下一轮输入也不会累积损失，代价是每轮 +~1.5s。
     stateless_lossless: bool = False

@@ -172,6 +172,7 @@ def pil_to_bytes(
     png_compress_level: int = 1,
     subsampling: Optional[int] = None,
     webp_method: int = 4,
+    webp_lossless: bool = True,
 ) -> bytes:
     """Encode a PIL image to bytes.
 
@@ -184,8 +185,9 @@ def pil_to_bytes(
     `subsampling` 只对 JPEG 生效：Pillow 不显式传时落 libjpeg 默认 4:2:0。
     导出边界要显式传 0 才是 4:4:4；`None` 保持旧行为。
 
-    `ext="webp"` 固定走 lossless（`method=4`）。它只用于无状态无损线格式，
-    体积比 PNG level1 小约 15%，但 12MP 编码慢 3~4 倍；默认不启用。
+    `ext="webp"` 默认走 lossless（`method=4`）：无状态无损线格式体积比 PNG
+    level1 小约 15%，但 12MP 编码慢 3~4 倍；默认不启用。导出边界需要按
+    `quality` 有损编码时显式传 `webp_lossless=False`。
     """
     if infos is None:
         infos = {}
@@ -198,7 +200,7 @@ def pil_to_bytes(
         if ext.lower() == "png":
             save_kwargs["compress_level"] = png_compress_level
         elif ext.lower() == "webp":
-            save_kwargs["lossless"] = True
+            save_kwargs["lossless"] = bool(webp_lossless)
             save_kwargs["method"] = int(webp_method)
         elif is_jpeg and subsampling is not None:
             save_kwargs["subsampling"] = int(subsampling)

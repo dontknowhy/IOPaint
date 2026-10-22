@@ -24,6 +24,13 @@ from iopaint.const import (
     CPU_OFFLOAD_HELP,
     CPU_TEXTENCODER_HELP,
     DISABLE_NSFW_HELP,
+    EXPORT_FORCE_HELP,
+    EXPORT_FORMAT_HELP,
+    EXPORT_MODE_HELP,
+    EXPORT_PNG_COMPRESS_LEVEL_HELP,
+    EXPORT_QUALITY_HELP,
+    EXPORT_SUBSAMPLING_HELP,
+    EXPORT_WEBP_LOSSLESS_HELP,
     FORCE_FP16_HELP,
     GFPGAN_HELP,
     GPU_ID_HELP,
@@ -70,6 +77,13 @@ def build_en_catalog() -> Dict[str, Any]:
             "device": "Device",
             "gpu_id": f"GPU index {GPU_ID_HELP}",
             "quality": f"Image Quality ({QUALITY_HELP})",
+            "export_force": EXPORT_FORCE_HELP,
+            "export_format": EXPORT_FORMAT_HELP,
+            "export_quality": EXPORT_QUALITY_HELP,
+            "export_subsampling": EXPORT_SUBSAMPLING_HELP,
+            "export_mode": EXPORT_MODE_HELP,
+            "export_png_compress_level": EXPORT_PNG_COMPRESS_LEVEL_HELP,
+            "export_webp_lossless": EXPORT_WEBP_LOSSLESS_HELP,
             "empty_cache_after_inpaint": (
                 "Empty CUDA cache after each inpainting. "
                 "Disabled by default for faster repeated inference."

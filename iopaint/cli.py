@@ -21,7 +21,14 @@ from iopaint.runtime import (
     hub_is_reachable,
     DEVICE_SPEC_HELP,
 )
-from iopaint.schema import InteractiveSegModel, Device, RealESRGANModel, RemoveBGModel
+from iopaint.schema import (
+    InteractiveSegModel,
+    Device,
+    RealESRGANModel,
+    RemoveBGModel,
+    ExportFormat,
+    EXPORT_FORMATS,
+)
 
 
 def _resolve_cli_device(device: str, gpu_id: Optional[int]):
@@ -36,6 +43,28 @@ def _resolve_cli_device(device: str, gpu_id: Optional[int]):
     if parsed_gpu_id is not None:
         logger.info(f"Using GPU {parsed_gpu_id}")
     return parsed_device, parsed_gpu_id
+
+
+_EXPORT_FORMAT_ALIASES = {"tif": "tiff"}
+
+
+def _resolve_export_format(value: str) -> Optional[ExportFormat]:
+    """`--export-format` → ApiConfig.export_format；空串表示不强制。
+
+    config.json 里的值也走这里（typer_config 把它当命令行参数注入），
+    所以非法格式在启动期就报错，而不是等第一次导出才 500。
+    """
+    fmt = value.strip().lower().lstrip(".")
+    if not fmt:
+        return None
+    fmt = _EXPORT_FORMAT_ALIASES.get(fmt, fmt)
+    if fmt not in EXPORT_FORMATS:
+        raise ValueError(
+            f"Invalid --export-format '{value}'. "
+            f"Choose one of: {', '.join(EXPORT_FORMATS)}"
+        )
+    return cast(ExportFormat, fmt)
+
 
 typer_app = typer.Typer(pretty_exceptions_show_locals=False, add_completion=False)
 
@@ -183,16 +212,15 @@ def start(
         help="Compress undo patches with zstd (optional dependency; "
         "falls back to raw patches when zstandard is absent)",
     ),
-    export_quality: int = Option(
-        100, help="Quality of /api/v1/export (default 100)"
+    export_quality: int = Option(100, help=EXPORT_QUALITY_HELP),
+    export_subsampling: str = Option("444", help=EXPORT_SUBSAMPLING_HELP),
+    export_mode: str = Option("dct_patch", help=EXPORT_MODE_HELP),
+    export_force: bool = Option(False, help=EXPORT_FORCE_HELP),
+    export_format: str = Option("", help=EXPORT_FORMAT_HELP),
+    export_png_compress_level: int = Option(
+        1, help=EXPORT_PNG_COMPRESS_LEVEL_HELP
     ),
-    export_subsampling: str = Option(
-        "444", help="JPEG chroma subsampling for export: 444 / 420 / keep"
-    ),
-    export_mode: str = Option(
-        "dct_patch",
-        help="JPEG export mode: dct_patch (patch changed DCT blocks) or full",
-    ),
+    export_webp_lossless: bool = Option(True, help=EXPORT_WEBP_LOSSLESS_HELP),
     stateless_lossless: bool = Option(
         False,
         help="Stateless lossless: use PNG as the /inpaint wire format so every round is lossless "
@@ -227,6 +255,11 @@ def start(
     restoreformer_device: Device = Option(Device.cpu),
 ):
     dump_environment_info()
+    try:
+        parsed_export_format = _resolve_export_format(export_format)
+    except ValueError as e:
+        logger.error(str(e))
+        raise SystemExit(1)
     device, gpu_id = _resolve_cli_device(device, gpu_id)
     if force_fp16 and no_half:
         logger.warning("--force-fp16 is ignored because --no-half (fp32) is set")
@@ -318,6 +351,10 @@ def start(
             Literal["444", "420", "keep"], export_subsampling
         ),
         export_mode=cast(Literal["dct_patch", "full"], export_mode),
+        export_force=export_force,
+        export_format=parsed_export_format,
+        export_png_compress_level=export_png_compress_level,
+        export_webp_lossless=export_webp_lossless,
         stateless_lossless=stateless_lossless,
         wire_format=cast(Literal["png", "webp"], wire_format),
         empty_cache_after_inpaint=empty_cache_after_inpaint,

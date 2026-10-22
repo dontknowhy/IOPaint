@@ -41,6 +41,7 @@ describe("extFromMime", () => {
   it("maps known mime types", () => {
     expect(extFromMime("image/png")).toBe(".png")
     expect(extFromMime("image/jpeg")).toBe(".jpg")
+    expect(extFromMime("image/tiff")).toBe(".tiff")
   })
 
   it("ignores mime parameters and case", () => {

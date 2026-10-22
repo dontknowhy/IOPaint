@@ -16,6 +16,7 @@ from iopaint.schema import (
     RemoveBGModel,
     RealESRGANModel,
     ApiConfig,
+    EXPORT_FORMATS,
 )
 
 os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
@@ -51,6 +52,13 @@ default_configs = dict(
     mask_dir=None,
     output_dir=None,
     quality=95,
+    export_force=False,
+    export_format=None,
+    export_quality=100,
+    export_subsampling="444",
+    export_mode="dct_patch",
+    export_png_compress_level=1,
+    export_webp_lossless=True,
     empty_cache_after_inpaint=False,
     hd_strategy_crop_margin=128,
     enable_interactive_seg=False,
@@ -104,6 +112,13 @@ def save_config(
     mask_dir,
     output_dir,
     quality,
+    export_force,
+    export_format,
+    export_quality,
+    export_subsampling,
+    export_mode,
+    export_png_compress_level,
+    export_webp_lossless,
     empty_cache_after_inpaint,
     hd_strategy_crop_margin,
     enable_interactive_seg,
@@ -127,6 +142,9 @@ def save_config(
     # WebConfig 时先剔除，其余参数与组件列表仍是位置绑定。
     params = dict(locals())
     params.pop("request", None)
+    # Gradio 的下拉框用空串表示“跟随源图格式”，pydantic 的 Optional[Literal]
+    # 只接受 None，所以构造前先归一化。
+    params["export_format"] = params.get("export_format") or None
     config = WebConfig(**params)
     locale = pick_locale(request.headers.get("accept-language") if request else None)
     if str(config.input) == ".":
@@ -219,6 +237,46 @@ def build_demo(config_file: Path, i18n: "gr.I18n") -> "gr.Blocks":
                     maximum=100,
                     step=1,
                 )
+
+                with gr.Row():
+                    export_force = gr.Checkbox(
+                        init_config.export_force,
+                        label=i18n("web_config.export_force"),
+                    )
+                    export_format = gr.Dropdown(
+                        [""] + list(EXPORT_FORMATS),
+                        value=init_config.export_format or "",
+                        label=i18n("web_config.export_format"),
+                    )
+                    export_quality = gr.Slider(
+                        value=init_config.export_quality,
+                        label=i18n("web_config.export_quality"),
+                        minimum=1,
+                        maximum=100,
+                        step=1,
+                    )
+                with gr.Row():
+                    export_subsampling = gr.Dropdown(
+                        ["444", "420", "keep"],
+                        value=init_config.export_subsampling,
+                        label=i18n("web_config.export_subsampling"),
+                    )
+                    export_mode = gr.Dropdown(
+                        ["dct_patch", "full"],
+                        value=init_config.export_mode,
+                        label=i18n("web_config.export_mode"),
+                    )
+                    export_png_compress_level = gr.Slider(
+                        value=init_config.export_png_compress_level,
+                        label=i18n("web_config.export_png_compress_level"),
+                        minimum=0,
+                        maximum=9,
+                        step=1,
+                    )
+                    export_webp_lossless = gr.Checkbox(
+                        init_config.export_webp_lossless,
+                        label=i18n("web_config.export_webp_lossless"),
+                    )
 
                 empty_cache_after_inpaint = gr.Checkbox(
                     init_config.empty_cache_after_inpaint,
@@ -364,6 +422,13 @@ def build_demo(config_file: Path, i18n: "gr.I18n") -> "gr.Blocks":
                 mask_dir,
                 output_dir,
                 quality,
+                export_force,
+                export_format,
+                export_quality,
+                export_subsampling,
+                export_mode,
+                export_png_compress_level,
+                export_webp_lossless,
                 empty_cache_after_inpaint,
                 hd_strategy_crop_margin,
                 enable_interactive_seg,

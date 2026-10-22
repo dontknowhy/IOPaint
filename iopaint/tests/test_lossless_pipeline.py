@@ -367,3 +367,130 @@ def test_dct_patch_falls_back_for_progressive(tmp_path: Path) -> None:
     out = _export(client, revision=rev, format="jpeg")
     assert out.status_code == 200
     assert out.headers["X-Export-Mode"] == "full"
+
+
+def test_export_force_overrides_request_format_and_quality(tmp_path: Path) -> None:
+    arr = np.zeros((64, 64, 3), dtype=np.uint8)
+    arr[:, :, 0] = np.tile(np.arange(64, dtype=np.uint8), (64, 1))
+    arr[:, :, 1] = np.tile(np.arange(64, dtype=np.uint8)[:, None], (1, 64))
+    arr[:, :, 2] = 100
+    buf = io.BytesIO()
+    Image.fromarray(arr).save(buf, format="PNG")
+    source = buf.getvalue()
+
+    # 请求里显式要 png/q1/4:2:0，但 config 强制 jpeg/q95/4:4:4
+    _, client = _client(
+        tmp_path,
+        export_force=True,
+        export_format="jpeg",
+        export_quality=95,
+        export_subsampling="444",
+    )
+    resp = _export(
+        client,
+        image=_b64(source, "image/png"),
+        format="png",
+        quality=1,
+        subsampling="420",
+        export_mode="full",
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("image/jpeg")
+    assert resp.headers["X-Export-Mode"] == "full"
+    img = Image.open(io.BytesIO(resp.content))
+    assert img.format == "JPEG"
+    assert JpegImagePlugin.get_sampling(img) == 0
+    # q1 会把渐变糊成 ~1x dB；q95 应远高于阈值
+    assert _psnr(_decode(resp.content), arr) > 35
+
+
+def test_export_force_skips_dct_patch(tmp_path: Path) -> None:
+    arr = np.full((32, 32, 3), 120, dtype=np.uint8)
+    source = _encode_jpeg(arr)
+    _, client = _client(
+        tmp_path, export_force=True, export_format="jpeg", export_quality=95
+    )
+    out = _export(client, image=_b64(source), format="jpeg")
+    assert out.status_code == 200
+    # 源量化表不再对应强制质量，必须整图重编码
+    assert out.headers["X-Export-Mode"] == "full"
+
+
+def test_export_force_passes_png_and_webp_encoder_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import iopaint.api as api_mod
+
+    captured: dict[str, Any] = {}
+    real = api_mod.pil_to_bytes
+
+    def spy(*args: Any, **kwargs: Any) -> bytes:
+        captured.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(api_mod, "pil_to_bytes", spy)
+    arr = np.full((16, 16, 3), 80, dtype=np.uint8)
+    source = _encode_jpeg(arr)
+    _, client = _client(
+        tmp_path,
+        export_force=True,
+        export_format="png",
+        export_png_compress_level=9,
+        export_webp_lossless=True,
+    )
+    out = _export(client, image=_b64(source), format="jpeg")
+    assert out.status_code == 200
+    assert out.headers["content-type"].startswith("image/png")
+    assert captured["png_compress_level"] == 9
+    assert captured["webp_lossless"] is True
+
+
+def test_export_force_without_format_keeps_source_format(tmp_path: Path) -> None:
+    arr = np.full((16, 16, 3), 80, dtype=np.uint8)
+    source = _encode_jpeg(arr)
+    _, client = _client(tmp_path, export_force=True, export_format=None)
+    out = _export(client, image=_b64(source), format="png")
+    assert out.status_code == 200
+    assert out.headers["content-type"].startswith("image/jpeg")
+
+
+def test_export_force_webp_lossless_flag_controls_encoder(tmp_path: Path) -> None:
+    arr = np.zeros((32, 32, 3), dtype=np.uint8)
+    arr[:, :, 0] = np.tile(np.arange(32, dtype=np.uint8) * 8, (32, 1))
+    arr[:, :, 1] = np.tile(np.arange(32, dtype=np.uint8)[:, None] * 8, (1, 32))
+    arr[:, :, 2] = 70
+    buf = io.BytesIO()
+    Image.fromarray(arr).save(buf, format="PNG")
+    source = buf.getvalue()
+
+    def export_as_webp(lossless: bool) -> np.ndarray:
+        _, client = _client(
+            tmp_path,
+            export_force=True,
+            export_format="webp",
+            export_quality=50,
+            export_webp_lossless=lossless,
+        )
+        out = _export(client, image=_b64(source, "image/png"), format="png")
+        assert out.status_code == 200
+        assert out.headers["content-type"].startswith("image/webp")
+        return _decode(out.content)
+
+    assert np.array_equal(export_as_webp(True), arr)
+    assert not np.array_equal(export_as_webp(False), arr)
+
+
+def test_export_force_jpeg_flattens_alpha_onto_white(tmp_path: Path) -> None:
+    rgba = np.zeros((24, 24, 4), dtype=np.uint8)
+    rgba[:, :, :3] = (10, 20, 30)
+    rgba[:, :, 3] = 0
+    buf = io.BytesIO()
+    Image.fromarray(rgba).save(buf, format="PNG")
+    _, client = _client(tmp_path, export_force=True, export_format="jpeg")
+    out = _export(client, image=_b64(buf.getvalue(), "image/png"), format="png")
+    assert out.status_code == 200
+    assert out.headers["content-type"].startswith("image/jpeg")
+    img = Image.open(io.BytesIO(out.content))
+    assert img.mode == "RGB"
+    # 全透明区域垫白底，q100 下应接近 255
+    assert np.asarray(img).mean() > 250

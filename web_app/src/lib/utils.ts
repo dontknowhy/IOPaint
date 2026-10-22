@@ -140,6 +140,7 @@ const EXT_BY_MIME: Record<string, string> = {
   "image/webp": ".webp",
   "image/gif": ".gif",
   "image/bmp": ".bmp",
+  "image/tiff": ".tiff",
 }
 
 /** 由 MIME 推扩展名（含点）；未知类型返回 undefined。 */
