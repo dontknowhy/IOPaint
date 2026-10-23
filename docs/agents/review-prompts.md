@@ -49,7 +49,7 @@ rm -rf mutants                # scratch dir; safe to delete at any time
 ```
 
 Measured on `only_mutate = ["iopaint/helper.py"]` (2026-10, one 8-core machine): 662 mutants in **70 s**
-(19.8 mutations/s), 517 killed / 143 survived / 2 timeout → **78.4 % kill rate**. Survivors cluster in
+(9.5 mutations/s), 517 killed / 143 survived / 2 timeout → **78.1 % kill rate**. Survivors cluster in
 `adjust_mask` (29), `only_keep_largest_contour` (20), `download_model` (14), `gen_frontend_mask` (12) — image-path
 and network-path code where tests assert the happy path only.
 
@@ -60,7 +60,7 @@ One hard-won config constraint and one now-fixed isolation pitfall, both explain
   a decorator (except a bare `@staticmethod`/`@classmethod`), see the `FunctionDef` branch in
   `mutmut/mutation/file_mutation.py`. `iopaint/schema.py` is nearly all `@property`/`@computed_field`/
   `@model_validator`, so it yields **0 usable mutants** and the run aborts with "could not find any test case for
-  any mutant". `iopaint/helper.py` (22 top-level plain functions) works.
+  any mutant". `iopaint/helper.py` (26 top-level plain functions) works.
 - **The `importlib.reload(runtime)` pollution is fixed — background only, no deselect remains.** reload shares the
   module dict but rebuilds the classes inside it, so `list_gpus()` returned instances of a *new* `GpuInfo` while the
   test module's top-level import still held the old one; frozen-dataclass `__eq__` compares `other.__class__ is

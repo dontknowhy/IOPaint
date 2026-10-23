@@ -45,7 +45,7 @@ python -m pytest benchmarks -m bench -s      # 2 tests, ~5s
   `get_available_models()` fails both tests — the call-count assertion trips, and the backstop independently reports
   `12.1 ms > 8.4 ms`. Reverting restores 2 passed.
 
-## 2. Diffusion schedulers must not be rebuilt per call (slow)
+## 2. Diffusion schedulers must not be rebuilt per call (fast if stubbed)
 
 - **What**: `DiffusionInpaintModel.set_scheduler` (`iopaint/model/base.py:408`) must reuse `self._scheduler_cache`
   keyed by `(sd_sampler, sd_lcm_lora)`; a rebuild per inpaint request is the regression.
@@ -71,7 +71,7 @@ python -m pytest benchmarks -m bench -s      # 2 tests, ~5s
 
 ## 4. `--empty-cache-after-inpaint` stays default-off and off the hot path (fast)
 
-- **What**: `empty_cache_after_inpaint` (`iopaint/schema.py:273`, used at `iopaint/api.py:463/499/533`) defaults to
+- **What**: `empty_cache_after_inpaint` (`iopaint/schema.py:278`, used at `iopaint/api.py:618/804/844`) defaults to
   `False`, and when off the request path must not call `torch.cuda.empty_cache` at all.
 - **How**: two assertions in one fast test: (a) `ApiConfig().empty_cache_after_inpaint is False` — the default-drift
   guard; (b) monkeypatch `torch.cuda.empty_cache` with a raising stub, run one cv2 inpaint through the in-process

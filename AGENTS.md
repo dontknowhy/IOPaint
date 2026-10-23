@@ -11,6 +11,7 @@ frontend (`web_app/`) that is compiled into the Python package and served by the
 - [The backend serves the built frontend](#the-backend-serves-the-built-frontend)
 - [Tests](#tests)
 - [Architecture](#architecture)
+- [Frontend notes](#frontend-notes)
 - [Commit messages](#commit-messages)
 - [Other gotchas](#other-gotchas)
 - [Agent docs index](#agent-docs-index)
@@ -27,8 +28,10 @@ test that fails before it; a feature covers the normal path plus 1–2 edges. Be
 `bash scripts/check.sh` (see [Health check](#health-check)) and report what changed, what was skipped, and what is still
 uncertain.
 
-Full text, including the type-annotation and check-command adaptations to this repo: docs/agents/coding-principles.md
-(trigger: writing or reviewing any code change).
+This file is part of the change: a new architecture pattern, a new mandatory check, or a recurring pitfall earns 1–2
+sentences in the matching section, and a statement that no longer matches the code is corrected on the spot — as
+current behavior, never as a changelog. Full text, including the type-annotation and check-command adaptations to this
+repo: docs/agents/coding-principles.md (trigger: writing or reviewing any code change).
 
 ## Commands
 
@@ -40,8 +43,8 @@ Backend (conda env `iopaint`, or `pip install -r requirements.txt`):
 - Others: `iopaint list`, `iopaint download --model <hf-id>` (the id is a **required option**, not a positional arg —
   bare `iopaint download <hf-id>` dies with `Missing option '--model'`), `iopaint start-web-config`,
   `iopaint install-plugins-packages`.
-- Model cache = `XDG_CACHE_HOME` (default `~/.cache`). `--model-dir` is a typer callback (`setup_model_dir`) that also sets
-  `U2NET_HOME`; it must stay a directory.
+- Model cache = `XDG_CACHE_HOME` (default `~/.cache`). `--model-dir` is a typer callback (`setup_model_dir`) that points
+  both `XDG_CACHE_HOME` and `U2NET_HOME` at the directory; it must stay a directory.
 - `bash publish.sh [upload]` = build frontend, copy `web_app/dist` → `iopaint/web_app`, `python3 -m build`, optional twine.
 
 Frontend (`cd web_app`):
@@ -56,24 +59,20 @@ Frontend (`cd web_app`):
 
 ## Health check
 
-`bash scripts/check.sh` = `pytest -m "not slow"` + `npm run lint` + `npm run test` + `npm run build` + copy
-`web_app/dist` into `iopaint/web_app` + `python scripts/check_types.py` (new-code-only mypy; skipped with a notice
-locally when mypy isn't installed, always installed in CI). Runs the same commands as `.github/workflows/ci.yml`;
-keep them in sync. Three CI jobs: `backend`
-(`pytest -m "not slow"` + "Type check (new code only)"), `frontend` (lint + test + build), `webui` (playwright against the built UI).
-
-A **separate dispatch-only workflow**, `.github/workflows/slow-smoke.yml`, is deliberately **not** wired to push/PR, so
-the PR-required set stays fast and offline. It triggers only on `workflow_dispatch` (no weekly schedule): a clean-room
-`pip install` → `iopaint download` → erase-model inference spot check that pre-downloads only lama/fcf and runs
-`iopaint/tests/test_local_models.py` (~19 cases) under a 60-minute job timeout. There is **no** persistent weight cache
-(GitHub's 10GB / 7-day cap cannot hold the SD-level assets), so `check.sh` does **not** cover it.
+`bash scripts/check.sh` runs, in this order: `npm run lint` + `npm run test` + `npm run build` (in `web_app`), copy
+`web_app/dist` into `iopaint/web_app`, `pytest -m "not slow"`, then `python scripts/check_types.py` (new-code-only mypy;
+skipped with a notice locally when mypy isn't installed, always installed in CI). The frontend comes first on purpose:
+`test_webui` drives the built UI, so running pytest before the copy makes it self-skip. Same command set as
+`.github/workflows/ci.yml` (jobs `backend` = pytest + "Type check (new code only)", `frontend` = lint + test + build,
+`webui` = playwright against the built UI) — keep them in sync. `slow-smoke.yml` is dispatch-only and never runs on
+push/PR; `check.sh` does not cover it — see docs/agents/slow-tests.md.
 
 ## The backend serves the built frontend
 
-`iopaint/api.py` mounts the UI at `/` (`WEB_APP_DIR` = `iopaint/web_app`, a gitignored build output). If that dir is
-missing the backend **still starts**: the mount is skipped and `/` answers 503 with build instructions, while every
-`/api/v1/*` route works normally. So a fresh clone is testable without touching Node. Copy the *contents* of dist, not
-the dist dir itself (the latter nests a level too deep and makes `/` 404):
+`iopaint/api.py` mounts the UI at `/` (`WEB_APP_DIR` = `iopaint/web_app`, a gitignored build output). The mount is
+unconditional: `WebAppStaticFiles` answers `/` with 503 + build instructions when that dir is missing, so the backend
+**still starts** and every `/api/v1/*` route works normally. Copy the *contents* of dist, not the dist dir itself (the
+latter nests a level too deep and makes `/` 404):
 
 ```bash
 cd web_app && npm run build && cd ..
@@ -84,12 +83,14 @@ rm -rf iopaint/web_app && cp -r web_app/dist iopaint/web_app
 
 ## Tests
 
-- `pytest -m "not slow" -q` from the repo root is the fast/offline suite (~30s, no weights, no GPU, no frontend build).
-  `pytest.ini` declares the `slow` marker; weight-heavy files opt out with a module-level
-  `pytestmark = pytest.mark.slow`, so new test files are never missed by hand-maintained lists. Drop that line only if
-  the file is genuinely weightless.
+- `pytest -m "not slow" -q` from the repo root is the fast/offline suite (719 passed, ~70s on this box; no weights, no
+  GPU, no frontend build — `test_webui` self-skips when `iopaint/web_app` is absent). `pytest.ini` declares the `slow`
+  marker; weight-heavy files opt out with a module-level `pytestmark = pytest.mark.slow`, so new test files are never
+  missed by hand-maintained lists. Drop that line only if the file is genuinely weightless.
 - `iopaint/tests/conftest.py` exposes a session-scoped `iopaint_server` that spawns `python -m iopaint start --model cv2
-  --device cpu` on a **free port** (`bind(("", 0))`, never 8080) and polls until it accepts connections.
+  --device cpu` on a **free port** (`bind(("", 0))`, never 8080) and polls until it accepts connections. It also pins
+  `IOPAINT_LOCALE=en` before any test module imports, so a test asserting non-English CLI text must set the env var
+  itself (see docs/agents/i18n.md).
 - Tests that construct `ApiConfig(port=8080)` (`test_api.py`, `test_local_models.py`) drive the app through in-process
   `TestClient`, so they do not bind a port at all.
 - `cv2` has no weights (`OpenCV2.is_downloaded()` returns `True`). The `slow` set downloads diffusion/erase/plugin
@@ -117,17 +118,25 @@ belongs on a local GPU box.
   plugins, and the static + socket.io mounts. New endpoints go through `self.add_api_route` in `__init__`.
 - Model registry: `iopaint/model/__init__.py:models` maps name → class; `ModelManager` (`iopaint/model_manager.py`) scans
   the model dir, downloads lazily, and **serializes all inference behind a `threading.Lock`** (added to fix races on
-  shared scheduler state). Call sites therefore use `await loop.run_in_executor(None, self.model_manager, ...)`; keep
-  that pattern for any new blocking work so the event loop stays responsive.
+  shared scheduler state). Request paths therefore hand the whole blocking step — inference plus decode/encode — to
+  `await loop.run_in_executor(None, self._inpaint_blocking, ...)` (`api.py`); keep that pattern for new blocking work so
+  the event loop stays responsive.
 - Model contract: each model implements `forward(image, mask, config: InpaintRequest)` and returns a **BGR** numpy array.
   Input image is RGB, mask is single-channel 0/255 with the same HxW as the image (API returns 400 on mismatch). Respect
   each class's `pad_mod` and `is_erase_model` flags.
+- Image size limits are per-source, not global: `iopaint/__init__.py` disables Pillow's `MAX_IMAGE_PIXELS`, and every
+  decode takes `max_pixels` from `_max_pixels_for_request` (`api.py`) — 100MP for external clients, unlimited for
+  loopback/RFC1918. New decode paths must pass it; don't re-enable the global Pillow check.
 - Plugins are built by `iopaint/plugins/__init__.py:build_plugins` from `--enable-*` flags. Their deps
   (`onnxruntime<=1.19.2`, `rembg[cpu]`) are **not** in `requirements.txt` — use `iopaint install-plugins-packages`.
 - Perf regressions to avoid: don't call `scan_models()` per request (`/api/v1/server-config` uses the cached
   `ModelManager.get_available_models()`; scanning costs ~2s), don't rebuild diffusion schedulers per call (cached by
   `(sampler, lcm_lora)`), don't reload ControlNet preprocessors per request (lazy singletons), and keep
   `--empty-cache-after-inpaint` default-off.
+- Revisions: a successful inpaint stores its canonical pixels in `RevisionCache` (`iopaint/revision_cache.py`, LRU,
+  `--revision-cache-mb`, optional zstd-compressed undo patches) and returns the hash as `X-Revision`; later `/inpaint`
+  and `/export` calls may send `revision` instead of image bytes. Keep `X-Revision` in the CORS `expose_headers` or the
+  browser cannot read it.
 
 ## Frontend notes
 
@@ -149,17 +158,16 @@ statement-of-current-state voice as "Other gotchas" below. Never write it as a c
     measurement (numbers + a re-runnable regression command);
   - feature / CI / docs → current behavior, key trade-offs and supporting evidence (measured numbers, test counts,
     time/memory), and the pitfalls not to undo.
-- Every claim is measured: cite the real numbers and their scope (e.g. "fast test suite: 256 passed"); anything not
-  verified is marked `待验证` — never fabricate a result.
+- Every claim is measured: cite the real numbers and their scope (e.g. the fast suite's pass count and wall time, both
+  measured in this run); anything not verified is marked `待验证` — never fabricate a result.
 - Cut session narrative: CI run IDs, "grabbed a failure / checked frame by frame / walked the call stack", "compared
   with the previous version" phrasing. Those describe the working session, not the code, and go stale the moment they
   are written.
 - The message must match the tree: `git show --stat HEAD` before pushing — a multi-path `git add` aborts wholesale
   when one pathspec matches nothing, and that once shipped a message describing files the commit didn't contain.
-- Cite only documents the tree actually carries; deleting a doc takes its explicit references with it (decision.md,
-  `37f3b22`). Commits written while a doc existed keep their historical references — but rewriting already-pushed
-  history (rebase reword + `--force-with-lease`, with `git diff <old> HEAD` empty) only ever happens on explicit
-  request.
+- Cite only documents the tree actually carries; deleting a doc takes every explicit reference to it along. Old commits
+  may still name docs that no longer exist — rewriting already-pushed history (rebase reword + `--force-with-lease`,
+  with `git diff <old> HEAD` empty) only ever happens on explicit request.
 - The same rule governs comments: yaml/code comments describe current state too, not the debugging history.
 - Comments, test docstrings, log strings and UI copy must be **self-contained**: never cite the temporary planning document or its IDs (`P0`/`D5`/`M2'`, tier labels such as `T1/T2/T3`, etc.). Those identifiers only exist in the uncommitted plan file under the harness temp dir, so a repo reader cannot resolve them. Write the behavior or mechanism directly instead.
 - Executable criterion for the subject: it must name at least one concrete symbol (class / method / file, e.g.
@@ -193,9 +201,9 @@ cases that draw on the canvas or assert on UI controls).
 Long-form topics live in `docs/agents/*.md` (all English, like this file). Each entry has the condition for when to
 read it:
 
-- `docs/agents/coding-principles.md` — the opening stance plus seven coding principles: read-before-write, minimal diff,
-  existing conventions, no over-engineering, honesty/boundaries, tests that can fail, delivery self-check (trigger:
-  writing or reviewing any code change).
+- `docs/agents/coding-principles.md` — the opening stance plus eight coding principles: read-before-write, minimal diff,
+  existing conventions, no over-engineering, honesty/boundaries, tests that can fail, delivery self-check, and keeping
+  this file itself current (trigger: writing or reviewing any code change).
 - `docs/agents/slow-tests.md` — running/extending the weight-heavy `pytest -m slow` suite; one-time weight downloads;
   `--forked`/GPU/shared-:8080 gotchas (trigger: about to run or modify slow tests).
 - `docs/agents/playwright.md` — webui test details: Radix close-animation `pointer-events`, `_wait_interactive()`,

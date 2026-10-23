@@ -64,7 +64,16 @@ Frontend tests are Vitest, under `cd web_app`.
 
 ## 7. Delivery
 
-- Self-check after finishing: does lint / type check / test pass (`bash scripts/check.sh`: fast pytest + npm lint + npm
-  test + build, then the new-code type check — see AGENTS.md → Health check)? Are there unrelated edits in the diff?
+- Self-check after finishing: does lint / type check / test pass (`bash scripts/check.sh`: frontend lint + test + build,
+  dist copy, fast pytest, then the new-code type check — see AGENTS.md → Health check)? Are there unrelated edits in the
+  diff?
 - Say what you changed, why, and what you did not do or are unsure about.
 - If the task itself is ambiguous, ask first; do not guess your way through a big pile.
+
+## 8. Documentation duty
+
+- A change that introduces a new architectural pattern, a new mandatory check/command, or a fix for a pitfall that
+  easily recurs also updates the matching section of AGENTS.md (1–2 sentences) in the same commit.
+- A statement in AGENTS.md that no longer matches the code is corrected immediately; a stale description is a bug.
+- AGENTS.md records current behavior, never the history of a change: "the system does X", not "I fixed X". The same
+  rule governs commits and code comments (see AGENTS.md → Commit messages).

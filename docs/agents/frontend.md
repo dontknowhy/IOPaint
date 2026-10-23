@@ -7,9 +7,11 @@
 - socket.io: the server mounts `/ws` **before** the `/` static mount and requires `socketio_path="/ws/socket.io"`
   (`api.py:Api.__init__`); the client hardcodes the same path in `components/DiffusionProgress.tsx`. The `/ws` mount must stay
   ahead of `/`, or the static mount shadows it and progress events 404.
-- `components/Editor.tsx` (~1900 lines) paints the mask into a separate offscreen canvas: committed strokes live in
+- `components/Editor.tsx` (~2000 lines) paints the mask into a separate offscreen canvas: committed strokes live in
   `lineGroups` while the in-progress stroke is in `strokeRef`, and the canvas is only redrawn as "committed + current
   stroke". The mask is scaled by `maskScale`, re-expanded to full image size in `generateMask` (`lib/utils.ts`) and
-  encoded with `canvasToBlob` (not `toDataURL`). Backend `gen_frontend_mask` mirrors the `ffcc00bb` brush color.
+  encoded with `canvasToBlob` (not `toDataURL`). `generateMask` asks for a `willReadFrequently` context on purpose: a
+  GPU-backed canvas loses its bitmap when Chromium's GPU process crashes, which reaches the backend as an empty mask.
+  Backend `gen_frontend_mask` mirrors the `ffcc00bb` brush color.
 - Shared hooks: `useDragResize`, `useImage`, `useInputImage`, `useHotkey`, `useResolution` (viewport breakpoints, not
   model resolution).

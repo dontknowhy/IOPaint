@@ -1,11 +1,11 @@
 # Type checking (new code only — wired into the CI `backend` job)
 
-Status: **CI gate + local script + this doc**. The Phase 1 human decision ("local-only, mypy must never enter CI")
-has been overturned by the human for Phase 2: `.github/workflows/ci.yml` installs `requirements-dev.txt` (pin
-`mypy==2.4.0`) in the `backend` job and runs `scripts/check_types.py` as its own step, and `scripts/check.sh` runs
-the same command locally. The repo's only mypy *config* is the `[tool.mypy]` stanza in `pyproject.toml`, which loads
-the pydantic plugin; every strict flag still comes from the script. `mypy==2.4.0` stays pinned only in
-`requirements-dev.txt` / `environment.yml` — never in `requirements.txt`, which remains runtime-only.
+Status: **CI gate + local script + this doc**. `.github/workflows/ci.yml` installs `requirements-dev.txt` (pin
+`mypy==2.4.0`) in the `backend` job and runs `scripts/check_types.py` as its own step; `scripts/check.sh` runs the same
+command locally. The repo's only mypy *config* is the `[tool.mypy]` stanza in `pyproject.toml`, which loads the
+pydantic plugin; every strict flag still comes from the script (`[tool.mutmut]` in the same file is unrelated).
+`mypy==2.4.0` stays pinned only in `requirements-dev.txt` / `environment.yml` — never in `requirements.txt`, which
+remains runtime-only.
 
 ## What CI runs
 

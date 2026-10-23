@@ -15,5 +15,7 @@ ms; 307 vs 311 ms). The code itself is not CUDA-version sensitive, so don't add 
 out and installs `torch==2.14.1+cpu` / `torchvision==0.29.1+cpu` instead.
 Two 2.14 warnings are expected noise, not regressions: `torch.jit.load` is deprecated (lama/zits/manga/migan still use
 it) and `torch._C._jit_set_nvfuser_enabled` is now a no-op.
-`iopaint/__init__.py` sets `PYTORCH_ENABLE_MPS_FALLBACK` and torch cache env vars, and `api.py` disables the torch JIT
-fusers at import, so keep those statements above `import torch`.
+`iopaint/__init__.py` sets `PYTORCH_ENABLE_MPS_FALLBACK` and the torch cache env vars **before** any `import torch`
+(they must be in place before torch reads them), while `api.py` calls `torch._C._jit_override_can_fuse_on_*` /
+`_jit_set_*_fuser_enabled` / `_jit_set_profiling_mode` right after its own `import torch` (those calls need torch, so
+they cannot sit above it) and before the first model import.
