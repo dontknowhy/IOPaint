@@ -3,9 +3,9 @@
 Status: **CI gate + local script + this doc**. The Phase 1 human decision ("local-only, mypy must never enter CI")
 has been overturned by the human for Phase 2: `.github/workflows/ci.yml` installs `requirements-dev.txt` (pin
 `mypy==2.4.0`) in the `backend` job and runs `scripts/check_types.py` as its own step, and `scripts/check.sh` runs
-the same command locally. No mypy/pyright *config* exists in the repo (`pyproject.toml` only declares the build
-backend), so every flag comes from the script; `mypy==2.4.0` stays pinned only in `requirements-dev.txt` /
-`environment.yml` — never in `requirements.txt`, which remains runtime-only.
+the same command locally. The repo's only mypy *config* is the `[tool.mypy]` stanza in `pyproject.toml`, which loads
+the pydantic plugin; every strict flag still comes from the script. `mypy==2.4.0` stays pinned only in
+`requirements-dev.txt` / `environment.yml` — never in `requirements.txt`, which remains runtime-only.
 
 ## What CI runs
 
@@ -27,12 +27,14 @@ backend), so every flag comes from the script; `mypy==2.4.0` stays pinned only i
 
 ## Why the whole tree is not checked
 
-The codebase carries substantial pre-existing typing debt: with the gate's own flag set, a whole-tree run reports
-**6649 errors in 179 of 225 files** (`git ls-files 'iopaint/**/*.py' | xargs mypy --disallow-untyped-defs
+The codebase carries substantial pre-existing typing debt: with the gate's own flag set and the pydantic plugin, a
+whole-tree run reports **3777 errors in 182 of 233 files** (`mypy iopaint --disallow-untyped-defs
 --check-untyped-defs --no-implicit-optional --ignore-missing-imports`), e.g. `iopaint/schema.py` alone ~10 from
-`@property` decorator stacking. A whole-tree or whole-file gate would be red on day one. The gate's diff anchoring
-is what keeps it honest instead of vacuous: it only forgives errors on lines the diff did not touch (a single-file
-run prints the rest as "pre-existing errors on unchanged lines (ignored)" — 2178 for `test_runtime_gaps.py`).
+`@property` decorator stacking. Without the plugin the same run reports 6888, because it misreads pydantic
+constructors such as `InpaintRequest()` as missing arguments. A whole-tree or whole-file gate would still be red on
+day one. The gate's diff anchoring is what keeps it honest instead of vacuous: it only forgives errors on lines the
+diff did not touch (a single-file run prints the rest as "pre-existing errors on unchanged lines (ignored)" — 2222
+for `test_runtime_gaps.py`).
 
 ## What exists now
 

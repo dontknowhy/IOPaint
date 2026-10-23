@@ -44,7 +44,7 @@ jobs:
       - name: Run fast test suite
         run: pytest -m "not slow" -q
 
-      # 只对 iopaint/** 的**新增行**卡类型，既有 ~2178 条错误不回填（docs/agents/type-check.md）。
+      # 只对 iopaint/** 的**新增行**卡类型，既有 3777 条错误不回填（docs/agents/type-check.md）。
       # PR 用 base sha，避免浅克隆里没有 origin/main 这种 stale ref；push/workflow_dispatch
       # 退回 origin/main（此时与 HEAD 相同，等于 no-op）——真正在 PR 上生效。
       - name: Type check (new code only)

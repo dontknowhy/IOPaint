@@ -2,6 +2,12 @@
 requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
+# pydantic 模型字段都有默认值，不开插件时 mypy 会把 InpaintRequest()/ApiConfig() 这类
+# 构造调用误报成 "Missing named argument"；插件按字段签名解析。strict flags 仍由
+# scripts/check_types.py 传入，这里只负责加载插件。
+[tool.mypy]
+plugins = ["pydantic.mypy"]
+
 # mutmut（本地变异测试侦察用，非 CI 门禁；见 docs/agents/review-prompts.md）。
 # source_paths 只复制 iopaint 包（测试、pytest.ini 随行），only_mutate 把变异限制在单个文件，
 # -m "not slow" 保证权重/GPU 用例不进基线。only_mutate 必须选"未被装饰器包住的函数所在的

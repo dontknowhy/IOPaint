@@ -6,5 +6,8 @@ pytest
 pytest-loguru
 # 类型检查（scripts/check_types.py，仅新增代码的门禁，见 docs/agents/type-check.md）
 mypy==2.4.0
+# pyproject.toml 的 [tool.mypy] 加载 pydantic.mypy，插件导入时需要有 pydantic；
+# 运行时依赖里已有，这里再显式列出，保证只装 dev 依赖时插件也能加载。
+pydantic>=2.5.2
 # 变异测试侦察工具（本地调查用、非 CI 门禁，见 docs/agents/review-prompts.md）
 mutmut==3.8.0
