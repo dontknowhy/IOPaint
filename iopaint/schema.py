@@ -1,7 +1,7 @@
 import random
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Literal, List, get_args
+from typing import Optional, Literal, List, Tuple, get_args
 
 from loguru import logger
 
@@ -325,12 +325,26 @@ class ApiConfig(BaseModel):
     restoreformer_device: Device
 
 
+class MaskStroke(BaseModel):
+    """一条前端笔迹：原图坐标下的折线 + 笔宽（px）。"""
+
+    pts: List[Tuple[float, float]] = Field(
+        ..., min_length=1, max_length=200_000, description="[[x, y], ...]"
+    )
+    size: float = Field(..., gt=0, le=65536, description="brush size in pixels")
+
+
 class InpaintRequest(BaseModel):
     image: Optional[str] = Field(
         None, description="base64 encoded image", max_length=64_000_000
     )
     mask: Optional[str] = Field(
         None, description="base64 encoded mask", max_length=64_000_000
+    )
+    # 交互编辑的主路径：传笔迹，由服务端按原图尺寸栅格化，省掉整图 PNG 的
+    # 生成/编解码。mask 仍是 fallback（交互分割、/adjust_mask、旧客户端）。
+    mask_strokes: Optional[List[MaskStroke]] = Field(
+        None, max_length=10_000, description="vector mask strokes in image coords"
     )
     # 服务端 canonical 的 revision。命中时 image 可省略（服务端忽略上传字节）。
     revision: Optional[str] = Field(

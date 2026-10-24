@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 import PIL.Image
 import cv2
 import torch
@@ -93,11 +95,8 @@ class ControlNet(DiffusionInpaintModel):
 
             original_config_file_name = "xl"
 
-        controlnet = ControlNetModel.from_pretrained(
-            pretrained_model_name_or_path=controlnet_method,
-            local_files_only=model_kwargs["local_files_only"],
-            torch_dtype=self.torch_dtype,
-        )
+        self._controlnet_cache = kwargs.get("controlnet_module_cache")
+        controlnet = self._load_controlnet(controlnet_method)
         if model_info.is_single_file_diffusers:
             if self.model_info.model_type == ModelType.DIFFUSERS_SD:
                 model_kwargs["num_in_channels"] = 4
@@ -137,13 +136,35 @@ class ControlNet(DiffusionInpaintModel):
 
         self.callback = kwargs.pop("callback", None)
 
-    def switch_controlnet_method(self, new_method: str):
-        self.controlnet_method = new_method
+    def _load_controlnet(self, method: str) -> ControlNetModel:
+        """按 method 取 ControlNet 模块，命中 manager 级缓存就不读盘。
+
+        缓存只留最近一个 method：开关切换会重建 pipeline（类不同，无法只换引用），
+        但模块本身可跨 pipeline 复用。dtype 不匹配（fp32 加载失败后回退 fp16）
+        直接丢弃重载，避免把 fp32 权重挂到 fp16 pipeline 上。
+        """
+        cache = self._controlnet_cache
+        if cache is not None:
+            cached = cache.get(method)
+            if cached is not None and cached.dtype == self.torch_dtype:
+                logger.info(f"Reuse cached ControlNet module: {method}")
+                return cached
+            cache.pop(method, None)
         controlnet = ControlNetModel.from_pretrained(
-            new_method,
+            pretrained_model_name_or_path=method,
             local_files_only=self.local_files_only,
             torch_dtype=self.torch_dtype,
-        ).to(self.model.device)
+        )
+        if cache is not None:
+            cache.clear()
+            cache[method] = controlnet
+        return controlnet
+
+    def switch_controlnet_method(self, new_method: str) -> None:
+        self.controlnet_method = new_method
+        controlnet = cast(Any, self._load_controlnet(new_method)).to(
+            self.model.device
+        )
         self.model.controlnet = controlnet
 
     def _get_control_image(self, image, mask):

@@ -567,6 +567,57 @@ def boxes_from_mask(mask: np.ndarray) -> List[np.ndarray]:
     return boxes
 
 
+def rasterize_mask_strokes(
+    shape: Tuple[int, ...], strokes: List[Any]
+) -> np.ndarray:
+    """把前端笔迹栅格化成 HxW 的 0/255 掩膜。
+
+    前端原来按原图分辨率建画布再 toBlob 成 PNG，大图上这一步在 WebKit 要
+    0.7~1.8s（12/30MP），而掩膜本身只有 0.2~0.8MB。笔迹本来就是矢量数据，
+    直接在这里画到 `np.zeros((H, W), uint8)` 上，几毫秒即可。
+
+    语义对齐 canvas 的 round cap / round join：`LINE_8` 折线负责线段，每个顶点
+    再补一个实心圆。不要换成 `LINE_AA` —— 抗锯齿灰度再按 127 二值化会让边缘
+    缩进约 0.5px，1px 笔刷会被吃掉。
+    """
+    height, width = shape[:2]
+    mask = np.zeros((height, width), dtype=np.uint8)
+    if not strokes:
+        return mask
+
+    for stroke in strokes:
+        pts = np.asarray(getattr(stroke, "pts", stroke), dtype=np.float64).reshape(
+            -1, 2
+        )
+        if pts.size == 0:
+            continue
+        pts[:, 0] = np.clip(pts[:, 0], 0, max(0, width - 1))
+        pts[:, 1] = np.clip(pts[:, 1], 0, max(0, height - 1))
+        int_pts = np.round(pts).astype(np.int32)
+        thickness = max(1, int(round(float(getattr(stroke, "size", 1)))))
+        if len(int_pts) >= 2:
+            cv2.polylines(
+                mask,
+                [int_pts.reshape(-1, 1, 2)],
+                isClosed=False,
+                color=255,
+                thickness=thickness,
+                lineType=cv2.LINE_8,
+            )
+        # 圆头端点 + 圆角接点。半径取 thickness//2，单点笔迹就是这里画的圆点。
+        radius = thickness // 2
+        for x, y in int_pts:
+            cv2.circle(
+                mask,
+                (int(x), int(y)),
+                radius,
+                255,
+                thickness=-1,
+                lineType=cv2.LINE_8,
+            )
+    return mask
+
+
 def only_keep_largest_contour(mask: np.ndarray) -> List[np.ndarray]:
     """
     Args:

@@ -112,6 +112,25 @@ export interface Line {
 
 export type LineGroup = Array<Line>
 
+/** 后端 `/inpaint` 的矢量掩膜：原图坐标下的折线 + 笔宽。 */
+export interface MaskStroke {
+  pts: number[][]
+  size: number
+}
+
+/**
+ * 显示用图片：`bitmap` 最多 IMAGE_CANVAS_MAX_PIXELS，`src` 保留源字节的
+ * blob URL（revision 失效时回传），逻辑尺寸仍是原图全分辨率。
+ */
+export interface DisplayImage {
+  src: string
+  bitmap: CanvasImageSource
+  width: number
+  height: number
+  logicalWidth: number
+  logicalHeight: number
+}
+
 export interface Size {
   width: number
   height: number

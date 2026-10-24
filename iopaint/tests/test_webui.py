@@ -17,7 +17,13 @@ from typing import Any
 import pytest
 
 pw = pytest.importorskip("playwright", reason="playwright not installed")
-from playwright.sync_api import Browser, BrowserContext, expect, sync_playwright  # noqa: E402
+from playwright.sync_api import (  # noqa: E402
+    Browser,
+    BrowserContext,
+    Page,
+    expect,
+    sync_playwright,
+)
 
 from iopaint.api import WEB_APP_DIR
 
@@ -281,15 +287,15 @@ class TestSetFileTiming:
 
 
 class TestMaskContract:
-    """掩膜从 canvas 一路到后端的契约：PNG / 全尺寸 / 笔画真的在上面。
+    """掩膜从 canvas 一路到后端的契约：矢量笔迹 / 原图坐标 / 不再传整图 PNG。
 
-    generateMask → canvasToBlob 是异步的（原来用同步的 toDataURL），
-    这条测试卡住「异步化之后拿到的东西还是不是那张掩膜」。
+    交互编辑的请求里只有 `mask_strokes`，服务端负责按原图尺寸栅格化；
+    `mask` 仅作为 extraMasks（交互分割、调整掩膜）和旧客户端的 fallback。
     """
 
-    def test_mask_sent_to_backend_is_full_size_png(self, page, tmp_path):
-        from PIL import Image
-
+    def test_mask_sent_to_backend_is_strokes_in_image_coords(
+        self, page: Page, tmp_path: Path
+    ) -> None:
         _upload_image(page, tmp_path)
         captured = {}
 
@@ -315,16 +321,18 @@ class TestMaskContract:
         assert "body" in captured, "画完一笔却没有发出 /inpaint 请求"
 
         payload = json.loads(captured["body"].decode("utf-8"))
-        mask = payload["mask"]
-        assert mask.startswith("data:image/png;base64,"), mask[:80]
+        strokes = payload.get("mask_strokes")
+        assert strokes, "请求里没有 mask_strokes"
+        assert "mask" not in payload, "交互笔迹不该再附带整图 PNG"
 
-        raw = base64.b64decode(mask.split(",", 1)[1])
-        im = Image.open(io.BytesIO(raw))
-        assert im.size == (256, 256), f"掩膜是 {im.size}，应该是原图的 (256, 256)"
-
-        # 笔画必须真的落到掩膜上（背景是透明的）
-        _lo, alpha_max = im.convert("RGBA").split()[-1].getextrema()
-        assert alpha_max > 0, "掩膜全透明 —— 笔画没画进去"
+        pts = [pt for stroke in strokes for pt in stroke["pts"]]
+        assert len(pts) >= 2, "笔迹至少要有起点和终点"
+        assert all(stroke["size"] > 0 for stroke in strokes)
+        # 坐标必须是原图像素坐标（测试图 256x256），不是显示位图或 CSS 像素
+        assert all(0 <= x <= 256 and 0 <= y <= 256 for x, y in pts), pts[:5]
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        assert max(xs) - min(xs) > 10 and max(ys) - min(ys) > 10
 
 
 class TestDeviceNoticeToast:
@@ -432,10 +440,10 @@ class TestInpaintRoundTrip:
 
 
 class TestLosslessRevision:
-    """第二轮开始只传 revision + mask；undo 后回到原始文件字节。
+    """第二轮开始只传 revision + strokes；undo 后回到原始文件字节。
 
     无损依赖两层契约：
-    1. 有 revision 的 render 不再把上一轮（有损）响应字节当输入；
+    1. 有 revision 的 render 不再把上一轮（有损的）显示字节当输入；
     2. undo 撤掉 render 后，原始上传文件仍是唯一输入源，而不是最后一帧的 JPEG。
     """
 

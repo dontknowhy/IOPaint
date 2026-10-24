@@ -137,6 +137,11 @@ belongs on a local GPU box.
   `--revision-cache-mb`, optional zstd-compressed undo patches) and returns the hash as `X-Revision`; later `/inpaint`
   and `/export` calls may send `revision` instead of image bytes. Keep `X-Revision` in the CORS `expose_headers` or the
   browser cannot read it.
+- Interactive masks travel as `mask_strokes` (image-coordinate polylines, rasterized by
+  `helper.rasterize_mask_strokes` with `LINE_8` + round caps); `mask` stays as the fallback for extraMasks and old
+  clients. When a canonical revision exists and the result exceeds 16Mi pixels, `/inpaint` answers with a ≤16Mi JPEG
+  display preview and the logical size in `X-Image-Width`/`X-Image-Height` (both CORS-exposed); `/export`, later edits
+  and plugin/interactive-seg inputs still read canonical pixels, never the preview bytes.
 
 ## Frontend notes
 

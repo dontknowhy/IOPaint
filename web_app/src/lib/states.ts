@@ -7,6 +7,7 @@ import i18n from "./i18n"
 import {
   AdjustMaskOperate,
   CV2Flag,
+  DisplayImage,
   ExtenderDirection,
   LDMSampler,
   Line,
@@ -31,12 +32,16 @@ import {
   blobToImage,
   canvasToBlob,
   canvasToImage,
+  createDisplayImage,
   generateMask,
+  generateMaskPreview,
   getErrorMessage,
+  lineGroupToMaskStrokes,
   loadImage,
   srcToFile,
 } from "./utils"
 import inpaint, {
+  exportImage,
   getGenInfo,
   httpStatus,
   postAdjustMask,
@@ -148,7 +153,7 @@ type InteractiveSegState = {
 type EditorState = {
   baseBrushSize: number
   brushSizeScale: number
-  renders: HTMLImageElement[]
+  renders: DisplayImage[]
   lineGroups: LineGroup[]
   lastLineGroup: LineGroup
   curLineGroup: LineGroup
@@ -159,7 +164,7 @@ type EditorState = {
 
   temporaryMasks: HTMLImageElement[]
   // redo 相关
-  redoRenders: HTMLImageElement[]
+  redoRenders: DisplayImage[]
   redoCurLines: Line[]
   redoLineGroups: LineGroup[]
 }
@@ -410,7 +415,9 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           return
         }
 
-        const maskCanvas = generateMask(
+        // 只用于屏幕预览，按 4Mi 显示上限生成；全分辨率画布 + toBlob 在
+        // WebKit 上 30MP 要 1.6s，悬停一次就冻一下。
+        const maskCanvas = generateMaskPreview(
           imageWidth,
           imageHeight,
           [lastLineGroup],
@@ -448,11 +455,17 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         let targetFile = file
         if (renders.length > 0) {
           const lastRender = renders[renders.length - 1]
-          targetFile = await srcToFile(
-            lastRender.currentSrc,
-            file.name,
-            file.type
-          )
+          const revision = getRenderRevision(lastRender.src)
+          if (revision) {
+            // 插件/交互分割要处理 canonical 像素，不能拿 /inpaint 的显示预览
+            //（有损、可能已缩到 16Mi）当输入。
+            const { blob, mimeType } = await exportImage(revision, () =>
+              srcToFile(lastRender.src, file.name, file.type)
+            )
+            targetFile = new File([blob], file.name, { type: mimeType })
+          } else {
+            targetFile = await srcToFile(lastRender.src, file.name, file.type)
+          }
         }
         return targetFile
       },
@@ -530,7 +543,7 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           // 有 revision 的 render 不再把它的（有损）字节当下一轮输入；
           // 服务端直接在 canonical 像素上继续编辑。没有 revision 的 render
           //（插件产物 / 老结果）才回退到字节上传。
-          let targetRender: HTMLImageElement | null = null
+          let targetRender: DisplayImage | null = null
           if (useLastLineGroup === true) {
             // renders.length == 1 还是用原来的
             if (renders.length > 1) {
@@ -541,31 +554,49 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           }
 
           let targetFile: File | null = file
-          const revision = getRenderRevision(targetRender?.currentSrc)
+          const revision = getRenderRevision(targetRender?.src)
           if (targetRender && !revision) {
             targetFile = await srcToFile(
-              targetRender.currentSrc,
+              targetRender.src,
               file.name,
               file.type
             )
           }
 
-          const maskCanvas = generateMask(
-            imageWidth,
-            imageHeight,
-            [maskLineGroup],
-            maskImages,
-            BRUSH_COLOR
-          )
+          // 没有 extraMasks（交互分割/插件/调整掩膜）时只传矢量笔迹：
+          // 服务端按原图尺寸栅格化，省掉整图 canvas + PNG 编码。
+          const strokes =
+            maskImages.length === 0
+              ? lineGroupToMaskStrokes(maskLineGroup)
+              : null
+          let maskBlob: Blob | null = null
+          if (strokes === null) {
+            const maskCanvas = generateMask(
+              imageWidth,
+              imageHeight,
+              [maskLineGroup],
+              maskImages,
+              BRUSH_COLOR
+            )
+            maskBlob = await canvasToBlob(maskCanvas, "image/png")
+          }
           if (useLastLineGroup) {
-            const temporaryMask = await canvasToImage(maskCanvas)
+            // 临时掩膜只用于显示，按 4Mi 上限生成（与 showPrevMask 一致）
+            const temporaryMask = await canvasToImage(
+              generateMaskPreview(
+                imageWidth,
+                imageHeight,
+                [maskLineGroup],
+                maskImages,
+                BRUSH_COLOR
+              )
+            )
             set((state) => {
               state.editorState.temporaryMasks = castDraft([temporaryMask])
             })
           }
 
           try {
-            const maskBlob = await canvasToBlob(maskCanvas, "image/png")
             const request = (img: File | null, rev: string | null) =>
               inpaint(
                 img,
@@ -573,6 +604,7 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
                 cropperState,
                 extenderState,
                 maskBlob,
+                strokes,
                 paintByExampleFile,
                 rev
               )
@@ -584,11 +616,7 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
               // 这是唯一允许的回退分支，首次导入也走这里。
               if (revision && httpStatus(e) === 410) {
                 const fallback = targetRender
-                  ? await srcToFile(
-                      targetRender.currentSrc,
-                      file.name,
-                      file.type
-                    )
+                  ? await srcToFile(targetRender.src, file.name, file.type)
                   : file
                 res = await request(fallback, null)
               } else {
@@ -596,7 +624,13 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
               }
             }
 
-            const { blob, seed, revision: newRevision } = res
+            const {
+              blob,
+              seed,
+              revision: newRevision,
+              width,
+              height,
+            } = res
             if (seed) {
               get().setSeed(parseInt(seed, 10))
             }
@@ -605,8 +639,13 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
             if (newRevision) {
               _renderRevisions.set(blobUrl, newRevision)
             }
-            const newRender = new Image()
-            await loadImage(newRender, blobUrl)
+            // 响应可能是 ≤16Mi 的显示预览（有 revision 时），逻辑尺寸以响应头
+            // 为准；解码也按显示位图尺寸做，别先落一张全分辨率位图。
+            const newRender = await createDisplayImage(
+              blobUrl,
+              blob,
+              width && height ? { width, height } : null
+            )
             // 若期间用户切换了图片，丢弃过期结果，避免污染新图片的编辑器状态
             // （否则会出现新图片上显示旧图渲染结果 / 画布尺寸错乱等"画笔消失"现象）
             if (get().file !== file) {
@@ -616,7 +655,10 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
               return
             }
             const newRenders = [...renders, newRender]
-            get().setImageSize(newRender.width, newRender.height)
+            get().setImageSize(
+              newRender.logicalWidth,
+              newRender.logicalHeight
+            )
             get().updateEditorState({
               renders: newRenders,
               lineGroups: newLineGroups,
@@ -674,15 +716,19 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           if (!genMask) {
             const blobUrl = URL.createObjectURL(blob)
             _activeBlobUrls.add(blobUrl)
-            const newRender = new Image()
-            await loadImage(newRender, blobUrl)
+            // 插件产物（放大/抠图）没有预览响应，但仍可按显示尺寸解码；
+            // 逻辑尺寸从图片头解析。
+            const newRender = await createDisplayImage(blobUrl, blob)
             if (get().file !== file) {
               URL.revokeObjectURL(blobUrl)
               _activeBlobUrls.delete(blobUrl)
               forgetRenderRevision(blobUrl)
               return
             }
-            get().setImageSize(newRender.width, newRender.height)
+            get().setImageSize(
+              newRender.logicalWidth,
+              newRender.logicalHeight
+            )
             const newRenders = [...renders, newRender]
             const newLineGroups = [...lineGroups, []]
             get().updateEditorState({
@@ -864,10 +910,10 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         // 只回收「即将被丢弃的 redo 栈」所持有的 blob URL。
         // 之前会遍历 _activeBlobUrls 全部 revoke，其中包含 renders（当前显示
         // 的结果、undo 历史）以及刚刚 runInpainting 生成的最新结果 URL，
-        // 导致 renders[last].currentSrc 变成已失效的 blob URL，
+        // 导致 renders[last].src 变成已失效的 blob URL，
         // 下载产物时浏览器报网络错误 / 下载被取消。
         const staleUrls = get().editorState.redoRenders
-          .map((render) => render.currentSrc)
+          .map((render) => render.src)
           .filter((url): url is string => !!url && url.startsWith("blob:"))
         set((state) => {
           state.editorState.redoCurLines = []

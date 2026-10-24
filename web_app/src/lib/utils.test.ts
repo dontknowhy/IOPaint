@@ -9,14 +9,17 @@ import {
   extFromMime,
   fitCanvasBitmap,
   generateMask,
+  generateMaskPreview,
   getErrorMessage,
   isMidClick,
   isRightClick,
+  lineGroupToMaskStrokes,
   mouseXY,
+  parseImageSize,
   strokeBounds,
   touchPointXY,
 } from "./utils"
-import { BRUSH_COLOR } from "./const"
+import { BRUSH_COLOR, MASK_CANVAS_MAX_PIXELS } from "./const"
 import type { Line, Point } from "./types"
 
 describe("getErrorMessage", () => {
@@ -356,5 +359,168 @@ describe("generateMask guard", () => {
     } finally {
       spy.mockRestore()
     }
+  })
+})
+
+describe("lineGroupToMaskStrokes", () => {
+  it("converts image-coordinate points and brush size", () => {
+    expect(
+      lineGroupToMaskStrokes([
+        { size: 12, pts: [{ x: 1.5, y: 2 }, { x: 3, y: 4.25 }] },
+      ])
+    ).toEqual([{ pts: [[1.5, 2], [3, 4.25]], size: 12 }])
+  })
+
+  it("drops entries drawLines would skip", () => {
+    expect(
+      lineGroupToMaskStrokes([
+        { size: 4, pts: [] },
+        { size: 0, pts: [{ x: 1, y: 1 }] },
+        { pts: [{ x: 1, y: 1 }] },
+        { size: 5, pts: [{ x: 2, y: 2 }] },
+      ])
+    ).toEqual([{ pts: [[2, 2]], size: 5 }])
+  })
+
+  it("returns an empty list for an empty group", () => {
+    expect(lineGroupToMaskStrokes([])).toEqual([])
+  })
+})
+
+describe("generateMaskPreview", () => {
+  function fakeCtx() {
+    const calls: unknown[][] = []
+    const ctx = {
+      strokeStyle: "",
+      lineCap: "",
+      lineJoin: "",
+      lineWidth: 0,
+      setTransform: (...args: number[]) => calls.push(["setTransform", ...args]),
+      drawImage: (...args: unknown[]) => calls.push(["drawImage", ...args]),
+      beginPath: () => calls.push(["beginPath"]),
+      moveTo: (...args: number[]) => calls.push(["moveTo", ...args]),
+      lineTo: (...args: number[]) => calls.push(["lineTo", ...args]),
+      stroke: () => calls.push(["stroke"]),
+    } as unknown as CanvasRenderingContext2D
+    return { calls, ctx }
+  }
+
+  it("caps the canvas at MASK_CANVAS_MAX_PIXELS and scales the context", () => {
+    const { calls, ctx } = fakeCtx()
+    const spy = vi
+      .spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockReturnValue(ctx)
+    try {
+      const canvas = generateMaskPreview(4000, 3000, [
+        [{ size: 10, pts: [{ x: 0, y: 0 }, { x: 4000, y: 3000 }] }],
+      ])
+      // 位图尺寸取整会多出几百像素（4Mi 是近似上限，Editor 的显示画布同理）
+      expect(canvas.width * canvas.height).toBeLessThanOrEqual(
+        MASK_CANVAS_MAX_PIXELS * 1.001
+      )
+      expect(calls[0]).toEqual([
+        "setTransform",
+        canvas.width / 4000,
+        0,
+        0,
+        canvas.height / 3000,
+        0,
+        0,
+      ])
+      // 笔迹仍按原图坐标进入绘制路径（由变换矩阵缩放）
+      expect(calls).toContainEqual(["moveTo", 0, 0])
+      expect(calls).toContainEqual(["lineTo", 4000, 3000])
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it("keeps 1:1 for small images", () => {
+    const { ctx } = fakeCtx()
+    const spy = vi
+      .spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockReturnValue(ctx)
+    try {
+      const canvas = generateMaskPreview(320, 200, [])
+      expect(canvas.width).toBe(320)
+      expect(canvas.height).toBe(200)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+})
+
+describe("parseImageSize", () => {
+  const ascii = (s: string) => [...s].map((c) => c.charCodeAt(0))
+
+  it("reads PNG IHDR", () => {
+    const bytes = new Uint8Array(24)
+    bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    bytes.set([0x49, 0x48, 0x44, 0x52], 12)
+    bytes.set([0x00, 0x00, 0x0d, 0x80], 16) // 3456
+    bytes.set([0x00, 0x00, 0x07, 0xd0], 20) // 2000
+    expect(parseImageSize(bytes)).toEqual({ width: 3456, height: 2000 })
+  })
+
+  it("reads JPEG SOF and applies EXIF orientation", () => {
+    // SOI + APP1(Exif orientation=6) + SOF0(32x16 raw) + EOI
+    const tiff = [
+      0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // II*\0, IFD @8
+      0x01, 0x00, // 1 entry
+      0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, // tag 0x0112 SHORT 1
+      0x06, 0x00, 0x00, 0x00, // orientation 6
+      0x00, 0x00, 0x00, 0x00, // next IFD
+    ]
+    const app1 = [...ascii("Exif"), 0, 0, ...tiff]
+    const sof = [0x08, 0x00, 0x10, 0x00, 0x20, 0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01]
+    const bytes = new Uint8Array([
+      0xff, 0xd8,
+      0xff, 0xe1, (app1.length + 2) >> 8, (app1.length + 2) & 0xff, ...app1,
+      0xff, 0xc0, 0x00, (sof.length + 2), ...sof,
+      0xff, 0xd9,
+    ])
+    expect(parseImageSize(bytes)).toEqual({
+      width: 16,
+      height: 32,
+      orientation: 6,
+    })
+  })
+
+  it("reads JPEG without EXIF", () => {
+    const sof = [0x08, 0x00, 0x10, 0x00, 0x20]
+    const bytes = new Uint8Array([
+      0xff, 0xd8, 0xff, 0xc0, 0x00, (sof.length + 2), ...sof, 0xff, 0xd9,
+    ])
+    expect(parseImageSize(bytes)).toEqual({
+      width: 32,
+      height: 16,
+      orientation: 1,
+    })
+  })
+
+  it("reads GIF / BMP / WebP dimensions", () => {
+    const gif = new Uint8Array([
+      ...ascii("GIF89a"), 100, 0, 50, 0, 0, 0, 0,
+    ])
+    expect(parseImageSize(gif)).toEqual({ width: 100, height: 50 })
+
+    const bmp = new Uint8Array(26)
+    bmp.set([0x42, 0x4d])
+    bmp.set([100, 0, 0, 0], 18)
+    bmp.set([0x38, 0xff, 0xff, 0xff], 22) // -200 => 200
+    expect(parseImageSize(bmp)).toEqual({ width: 100, height: 200 })
+
+    const webp = new Uint8Array(30)
+    webp.set([...ascii("RIFF"), 0, 0, 0, 0, ...ascii("WEBP")])
+    webp.set(ascii("VP8X"), 12)
+    webp.set([0, 0, 0, 0], 20)
+    webp.set([99, 0, 0], 24) // width - 1
+    webp.set([49, 0, 0], 27) // height - 1
+    expect(parseImageSize(webp)).toEqual({ width: 100, height: 50 })
+  })
+
+  it("returns null for unknown/short input", () => {
+    expect(parseImageSize(new Uint8Array([1, 2, 3]))).toBeNull()
+    expect(parseImageSize(new Uint8Array([0xff, 0xd8]))).toBeNull()
   })
 })

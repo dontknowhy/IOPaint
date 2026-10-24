@@ -48,6 +48,14 @@ class ModelManager:
 
         self.enable_powerpaint_v2 = kwargs.get("enable_powerpaint_v2", False)
 
+        # 按 method 缓存 ControlNet / BrushNet 模块：开关切换会重建 pipeline
+        # （类不同，无法只换引用），但被缓存的模块不必再从磁盘加载。只保留
+        # 最近一个方法，避免常驻多份权重把低显存卡撑爆。
+        self.controlnet_module_cache: Dict[str, object] = {}
+        self.brushnet_module_cache: Dict[str, object] = {}
+        self.kwargs["controlnet_module_cache"] = self.controlnet_module_cache
+        self.kwargs["brushnet_module_cache"] = self.brushnet_module_cache
+
         self.model, self.device = self._load(name, self.device)
 
     @property

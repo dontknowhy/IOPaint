@@ -1,8 +1,12 @@
 import { type ClassValue, clsx } from "clsx"
 import { SyntheticEvent } from "react"
 import { twMerge } from "tailwind-merge"
-import { Line, LineGroup, Point } from "./types"
-import { BRUSH_COLOR } from "./const"
+import { DisplayImage, Line, LineGroup, MaskStroke, Point } from "./types"
+import {
+  BRUSH_COLOR,
+  IMAGE_CANVAS_MAX_PIXELS,
+  MASK_CANVAS_MAX_PIXELS,
+} from "./const"
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
@@ -128,6 +132,293 @@ export function fitCanvasBitmap(
     bitmapHeight,
     scaleX: bitmapWidth / width,
     scaleY: bitmapHeight / height,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 图片 header 解析：打开大图时先按显示尺寸解码，必须先知道原图尺寸（和 EXIF
+// 方向），而 `createImageBitmap(file, {resizeWidth})` 又需要目标尺寸。这里只读
+// 文件头（JPEG SOF / PNG IHDR / WebP / GIF / BMP），不触发整图解码。
+// ---------------------------------------------------------------------------
+
+export interface ParsedImageSize {
+  width: number
+  height: number
+  /** EXIF orientation（只有 JPEG 会解析），已作用到 width/height。 */
+  orientation?: number
+}
+
+function u16be(b: Uint8Array, o: number) {
+  return (b[o] << 8) | b[o + 1]
+}
+
+function u16le(b: Uint8Array, o: number) {
+  return b[o] | (b[o + 1] << 8)
+}
+
+function u32be(b: Uint8Array, o: number) {
+  return ((b[o] << 24) >>> 0) + (b[o + 1] << 16) + (b[o + 2] << 8) + b[o + 3]
+}
+
+function ascii(b: Uint8Array, o: number, len: number) {
+  return String.fromCharCode(...b.subarray(o, o + len))
+}
+
+function isJpegSof(marker: number) {
+  return (
+    (marker >= 0xc0 && marker <= 0xc3) ||
+    (marker >= 0xc5 && marker <= 0xc7) ||
+    (marker >= 0xc9 && marker <= 0xcb) ||
+    (marker >= 0xcd && marker <= 0xcf)
+  )
+}
+
+/** 从 APP1 EXIF 里读 orientation（1~8），没有则返回 undefined。 */
+function readExifOrientation(b: Uint8Array, off: number, len: number) {
+  if (len < 14 || ascii(b, off, 6) !== "Exif\u0000\u0000") {
+    return undefined
+  }
+  const tiff = off + 6
+  const end = Math.min(b.length, off + len)
+  const order = ascii(b, tiff, 2)
+  if (order !== "II" && order !== "MM") {
+    return undefined
+  }
+  const le = order === "II"
+  const read16 = (o: number) => (le ? u16le(b, o) : u16be(b, o))
+  const read32 = (o: number) =>
+    le
+      ? b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | ((b[o + 3] << 24) >>> 0)
+      : u32be(b, o)
+  if (read16(tiff + 2) !== 42) {
+    return undefined
+  }
+  const ifd = tiff + read32(tiff + 4)
+  if (ifd + 2 > end) {
+    return undefined
+  }
+  const count = read16(ifd)
+  for (let i = 0; i < count; i++) {
+    const entry = ifd + 2 + i * 12
+    if (entry + 12 > end) {
+      return undefined
+    }
+    if (read16(entry) === 0x0112) {
+      const value = read16(entry + 8)
+      return value >= 1 && value <= 8 ? value : undefined
+    }
+  }
+  return undefined
+}
+
+function parseJpeg(b: Uint8Array): ParsedImageSize | null {
+  let off = 2
+  let orientation = 1
+  while (off + 4 <= b.length) {
+    if (b[off] !== 0xff) {
+      return null
+    }
+    let marker = b[off + 1]
+    // 允许 FF 填充字节
+    while (marker === 0xff && off + 2 < b.length) {
+      off++
+      marker = b[off + 1]
+    }
+    // SOI / TEM / RSTn 没有长度字段
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      off += 2
+      continue
+    }
+    // EOI / SOS 之后不会再有 SOF
+    if (marker === 0xd9 || marker === 0xda || off + 4 > b.length) {
+      return null
+    }
+    const len = u16be(b, off + 2)
+    if (len < 2) {
+      return null
+    }
+    if (isJpegSof(marker)) {
+      if (off + 9 > b.length) {
+        return null
+      }
+      const height = u16be(b, off + 5)
+      const width = u16be(b, off + 7)
+      if (!width || !height) {
+        return null
+      }
+      // orientation 5~8 把宽高交换（浏览器显示的是旋转后的图）
+      const swap = orientation >= 5 && orientation <= 8
+      return {
+        width: swap ? height : width,
+        height: swap ? width : height,
+        orientation,
+      }
+    }
+    if (marker === 0xe1) {
+      orientation = readExifOrientation(b, off + 4, len - 2) ?? orientation
+    }
+    off += 2 + len
+  }
+  return null
+}
+
+function parseWebp(b: Uint8Array): ParsedImageSize | null {
+  if (b.length < 30 || ascii(b, 8, 4) !== "WEBP") {
+    return null
+  }
+  const chunk = ascii(b, 12, 4)
+  if (chunk === "VP8X") {
+    const width = 1 + (b[24] | (b[25] << 8) | (b[26] << 16))
+    const height = 1 + (b[27] | (b[28] << 8) | (b[29] << 16))
+    return { width, height }
+  }
+  if (chunk === "VP8 " && b.length >= 30) {
+    if (b[23] !== 0x9d || b[24] !== 0x01 || b[25] !== 0x2a) {
+      return null
+    }
+    return {
+      width: u16le(b, 26) & 0x3fff,
+      height: u16le(b, 28) & 0x3fff,
+    }
+  }
+  if (chunk === "VP8L" && b.length >= 25 && b[20] === 0x2f) {
+    const bits =
+      b[21] | (b[22] << 8) | (b[23] << 16) | ((b[24] << 24) >>> 0)
+    return {
+      width: 1 + (bits & 0x3fff),
+      height: 1 + ((bits >>> 14) & 0x3fff),
+    }
+  }
+  return null
+}
+
+/** 解析图片头字节；不认识的格式返回 null。 */
+export function parseImageSize(b: Uint8Array): ParsedImageSize | null {
+  if (b.length >= 24 && b[0] === 0x89 && ascii(b, 1, 3) === "PNG") {
+    return { width: u32be(b, 16), height: u32be(b, 20) }
+  }
+  if (b.length >= 10 && ascii(b, 0, 3) === "GIF") {
+    return { width: u16le(b, 6), height: u16le(b, 8) }
+  }
+  if (b.length >= 26 && b[0] === 0x42 && b[1] === 0x4d) {
+    return {
+      width: Math.abs(
+        b[18] | (b[19] << 8) | (b[20] << 16) | ((b[21] << 24) >>> 0)
+      ),
+      height: Math.abs(
+        b[22] | (b[23] << 8) | (b[24] << 16) | ((b[25] << 24) >>> 0)
+      ),
+    }
+  }
+  if (b.length >= 4 && b[0] === 0xff && b[1] === 0xd8) {
+    return parseJpeg(b)
+  }
+  return parseWebp(b)
+}
+
+/** 只读文件头（最多 2MB，找不到 SOF 才回退整文件）拿原图尺寸。 */
+export async function readImageSize(blob: Blob): Promise<ParsedImageSize | null> {
+  const HEAD_BYTES = 2 * 1024 * 1024
+  const head = new Uint8Array(
+    await blob.slice(0, Math.min(blob.size, HEAD_BYTES)).arrayBuffer()
+  )
+  const parsed = parseImageSize(head)
+  if (parsed || blob.size <= HEAD_BYTES) {
+    return parsed
+  }
+  return parseImageSize(new Uint8Array(await blob.arrayBuffer()))
+}
+
+function loadImageFromSrc(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = reject
+    image.src = src
+  })
+}
+
+function drawToCanvas(
+  source: CanvasImageSource,
+  width: number,
+  height: number
+): HTMLCanvasElement {
+  const canvas = document.createElement("canvas")
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext("2d")
+  if (!ctx) {
+    throw new Error("could not retrieve display canvas")
+  }
+  ctx.drawImage(source, 0, 0, width, height)
+  return canvas
+}
+
+/**
+ * 按显示位图尺寸解码一张图片。
+ *
+ * `createImageBitmap(blob, {resizeWidth, resizeHeight})` 在解码阶段就缩放，
+ * 不会先落一张全分辨率位图；Safari/旧浏览器不支持时回退到 `<img>` 全解码后
+ * 画进目标尺寸的画布（结果一致，只是慢一点）。`src` 保留源字节的 blob URL，
+ * 供 revision 失效时回传。
+ */
+export async function createDisplayImage(
+  src: string,
+  blob: Blob,
+  logicalSize?: { width: number; height: number } | null
+): Promise<DisplayImage> {
+  const parsed = logicalSize ?? (await readImageSize(blob))
+  if (!parsed) {
+    const full = await loadImageFromSrc(src)
+    const logical = {
+      width: full.naturalWidth,
+      height: full.naturalHeight,
+    }
+    const fit = fitCanvasBitmap(
+      logical.width,
+      logical.height,
+      IMAGE_CANVAS_MAX_PIXELS
+    )
+    return {
+      src,
+      bitmap: drawToCanvas(full, fit.bitmapWidth, fit.bitmapHeight),
+      width: fit.bitmapWidth,
+      height: fit.bitmapHeight,
+      logicalWidth: logical.width,
+      logicalHeight: logical.height,
+    }
+  }
+
+  const fit = fitCanvasBitmap(
+    parsed.width,
+    parsed.height,
+    IMAGE_CANVAS_MAX_PIXELS
+  )
+  let bitmap: CanvasImageSource
+  if (typeof createImageBitmap === "function") {
+    try {
+      bitmap = await createImageBitmap(blob, {
+        resizeWidth: fit.bitmapWidth,
+        resizeHeight: fit.bitmapHeight,
+        resizeQuality: "high",
+        imageOrientation: "from-image",
+      })
+    } catch (e) {
+      console.warn("createImageBitmap resize failed, falling back", e)
+      const full = await loadImageFromSrc(src)
+      bitmap = drawToCanvas(full, fit.bitmapWidth, fit.bitmapHeight)
+    }
+  } else {
+    const full = await loadImageFromSrc(src)
+    bitmap = drawToCanvas(full, fit.bitmapWidth, fit.bitmapHeight)
+  }
+  return {
+    src,
+    bitmap,
+    width: fit.bitmapWidth,
+    height: fit.bitmapHeight,
+    logicalWidth: parsed.width,
+    logicalHeight: parsed.height,
   }
 }
 
@@ -318,6 +609,24 @@ export function touchPointXY(touch: Touch, target: HTMLElement): Point {
   }
 }
 
+/**
+ * 把画布笔迹转成后端 `mask_strokes`。与 drawLines 的过滤条件保持一致：
+ * 空笔迹和没笔宽的条目本来就不产生像素。
+ */
+export function lineGroupToMaskStrokes(lineGroup: LineGroup): MaskStroke[] {
+  const strokes: MaskStroke[] = []
+  for (const line of lineGroup) {
+    if (!line?.pts.length || !line.size || line.size <= 0) {
+      continue
+    }
+    strokes.push({
+      pts: line.pts.map((pt) => [pt.x, pt.y]),
+      size: line.size,
+    })
+  }
+  return strokes
+}
+
 // 描一条笔迹。坐标/线宽都按 ctx 当前的变换矩阵解释，
 // 因此显示画布可以用 ctx.setTransform(scale,0,0,scale,0,0) 缩小后仍按原图坐标绘制。
 export function drawLines(
@@ -455,6 +764,42 @@ export const generateMask = (
   })
 
   return maskCanvas
+}
+
+/**
+ * 生成只用于显示的掩膜预览（最多 MASK_CANVAS_MAX_PIXELS）。
+ *
+ * 坐标与笔宽仍是原图单位，通过 `ctx.scale` 映射到位图；显示画布本来也按同一
+ * 上限缩小，所以视觉上与全分辨率掩膜一致。`showPrevMask` 只把它画到屏幕上，
+ * 从不发给服务端，没必要生成整张原图大小的画布再 toBlob（WebKit 上 30MP 要 1.6s）。
+ */
+export const generateMaskPreview = (
+  imageWidth: number,
+  imageHeight: number,
+  lineGroups: LineGroup[],
+  maskImages: HTMLImageElement[] = [],
+  lineGroupsColor: string = BRUSH_COLOR
+): HTMLCanvasElement => {
+  const fit = fitCanvasBitmap(
+    imageWidth,
+    imageHeight,
+    MASK_CANVAS_MAX_PIXELS
+  )
+  const canvas = document.createElement("canvas")
+  canvas.width = fit.bitmapWidth
+  canvas.height = fit.bitmapHeight
+  const ctx = canvas.getContext("2d", { willReadFrequently: true })
+  if (!ctx) {
+    throw new Error("could not retrieve mask canvas")
+  }
+  ctx.setTransform(fit.scaleX, 0, 0, fit.scaleY, 0, 0)
+  maskImages.forEach((maskImage) => {
+    ctx.drawImage(maskImage, 0, 0, imageWidth, imageHeight)
+  })
+  lineGroups.forEach((lineGroup) => {
+    drawLines(ctx, lineGroup, lineGroupsColor)
+  })
+  return canvas
 }
 
 export const convertToBase64 = (fileOrBlob: File | Blob): Promise<string> => {

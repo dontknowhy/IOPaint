@@ -37,15 +37,17 @@ import {
 } from "@/lib/utils"
 import { Eraser, Eye, Redo, Undo, Expand, Download } from "lucide-react"
 import { useTranslation } from "react-i18next"
-import { useImage } from "@/hooks/useImage"
+import { useDisplayImage } from "@/hooks/useImage"
 import { Slider } from "./ui/slider"
-import { Line, PluginName, Point } from "@/lib/types"
+import { DisplayImage, Line, PluginName, Point } from "@/lib/types"
 import { getRenderRevision, useStore } from "@/lib/states"
 import Cropper from "./Cropper"
 import { InteractiveSegPoints } from "./InteractiveSeg"
 import useHotKey from "@/hooks/useHotkey"
 import Extender from "./Extender"
 import {
+  IMAGE_CANVAS_MAX_PIXELS,
+  MASK_CANVAS_MAX_PIXELS,
   MAX_BRUSH_SIZE,
   MIN_BRUSH_SIZE,
   SHORTCUT_KEY_CHANGE_BRUSH_SIZE,
@@ -63,21 +65,6 @@ const MAX_SCALE = 50
 const TOUCH_MOVE_THRESHOLD = 10
 // 判定“哪根手指按住了没动”的阈值（px），避免把捏合开始阶段误判成锚定绘制
 const TOUCH_ANCHOR_THRESHOLD = 6
-// 显示用掩膜画布的像素上限。笔迹是矢量数据，提交时按原图分辨率重新栅格化，
-// 所以屏幕上的画布不需要跟原图一样大。如果按原分辨率逐帧
-// clearRect + drawImage + stroke()，6000x4000 这种图每帧要处理 2400 万像素，
-// 是画笔掉帧的主因（代价随图片分辨率线性增长）。按上限等比缩小后，
-// 每帧的重绘量被限制住，画笔手感与图片分辨率无关。
-const MASK_CANVAS_MAX_PIXELS = 4 * 1024 * 1024
-// 显示用原图/渲染画布（非掩膜）的像素上限。这张画布的内容绘制时并不变化，
-// 但它每帧都会被合成为一张 GPU 共享纹理（trace 里的
-// Canvas2DResourceProviderSharedImage::ProduceCanvasResource），代价随位图面积增长：
-// 6000x6000（36M px / 144MB）时主线程 Commit 约 19ms/帧，画笔画 120 帧有 21 帧掉到
-// 33ms 以上，平移/缩放同样卡；位图压到 16M px 以内后掉帧归零。坐标仍用原图单位
-// （scaleX/scaleY 经 ctx.setTransform 映射），配合 CSS width/height 撑回原图大小，
-// 布局盒子与缩放行为都不变，掩膜那套（MASK_CANVAS_MAX_PIXELS）同理。
-const IMAGE_CANVAS_MAX_PIXELS = 16 * 1024 * 1024
-
 interface EditorProps {
   file: File
 }
@@ -182,7 +169,7 @@ export default function Editor(props: EditorProps) {
 
   // Local State
   const [showOriginal, setShowOriginal] = useState(false)
-  const [original, isOriginalLoaded] = useImage(file)
+  const [original, isOriginalLoaded] = useDisplayImage(file)
   const [context, setContext] = useState<CanvasRenderingContext2D>()
   const [imageContext, setImageContext] = useState<CanvasRenderingContext2D>()
   const [showBrush, setShowBrush] = useState(false)
@@ -190,6 +177,7 @@ export default function Editor(props: EditorProps) {
   const [isPanning, setIsPanning] = useState<boolean>(false)
 
   const containerRef = useRef<HTMLDivElement>(null)
+  const originalCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const strokeRef = useRef<Line | null>(null)
   // 当前笔画已经画到第几个点（后面这些点等下一帧再画）
   const strokeDrawnCountRef = useRef(0)
@@ -266,6 +254,9 @@ export default function Editor(props: EditorProps) {
       return
     }
     const render = renders.length === 0 ? original : renders[renders.length - 1]
+    if (!render) {
+      return
+    }
     // 位图按上限等比缩小（见 IMAGE_CANVAS_MAX_PIXELS），坐标仍用原图单位。
     // 改 width/height 会清空位图并重置变换，所以之后必须重新 setTransform。
     if (imageContext.canvas.width !== imageCanvasWidth) {
@@ -280,7 +271,7 @@ export default function Editor(props: EditorProps) {
     imageContext.setTransform(1, 0, 0, 1, 0, 0)
     imageContext.clearRect(0, 0, imageCanvasWidth, imageCanvasHeight)
     imageContext.setTransform(imageScaleX, 0, 0, imageScaleY, 0, 0)
-    imageContext.drawImage(render, 0, 0, imageWidth, imageHeight)
+    imageContext.drawImage(render.bitmap, 0, 0, imageWidth, imageHeight)
   }, [
     renders,
     original,
@@ -293,6 +284,21 @@ export default function Editor(props: EditorProps) {
     imageScaleX,
     imageScaleY,
   ])
+
+  // 对比滑块的「原图」直接用 useDisplayImage 解好的显示位图，避免再解一次
+  // 全分辨率原图（12/30MP 约 48/120MB）。
+  useEffect(() => {
+    if (!showOriginal || !original) {
+      return
+    }
+    const canvas = originalCanvasRef.current
+    if (!canvas) {
+      return
+    }
+    canvas.width = original.width
+    canvas.height = original.height
+    canvas.getContext("2d")?.drawImage(original.bitmap, 0, 0)
+  }, [showOriginal, original])
 
   // 显示用掩膜画布的分辨率：不超过 MASK_CANVAS_MAX_PIXELS，坐标仍用原图坐标，
   // 靠 ctx.setTransform 映射。maskScale === 1 时与原来完全一致。
@@ -469,11 +475,12 @@ export default function Editor(props: EditorProps) {
       return [width, height]
     }
     if (renders.length === 0) {
-      width = original.naturalWidth
-      height = original.naturalHeight
-    } else if (renders.length !== 0) {
-      width = renders[renders.length - 1].width
-      height = renders[renders.length - 1].height
+      width = original?.logicalWidth ?? 512
+      height = original?.logicalHeight ?? 512
+    } else {
+      // 显示位图可能只有 16Mi，坐标/导出必须用逻辑尺寸（响应头 / 图片头）
+      width = renders[renders.length - 1].logicalWidth
+      height = renders[renders.length - 1].logicalHeight
     }
 
     return [width, height]
@@ -891,7 +898,7 @@ export default function Editor(props: EditorProps) {
     if (isPanning) {
       return
     }
-    if (!original.src) {
+    if (!original) {
       return
     }
     const canvas = context?.canvas
@@ -1113,9 +1120,9 @@ export default function Editor(props: EditorProps) {
     }
     // 导出走 /export 的唯一编码出口。revision 可用时直接用服务端
     // canonical 像素（掩膜外零重压缩），失效才回传 render 字节。
-    const exportRender = (render: HTMLImageElement) =>
-      exportImage(getRenderRevision(render.currentSrc), () =>
-        srcToFile(render.currentSrc, file.name, file.type)
+    const exportRender = (render: DisplayImage) =>
+      exportImage(getRenderRevision(render.src), () =>
+        srcToFile(render.src, file.name, file.type)
       )
 
     if (enableAutoSaving && renders.length > 0) {
@@ -1147,7 +1154,7 @@ export default function Editor(props: EditorProps) {
       setTimeout(() => URL.revokeObjectURL(url), 10_000)
     } else {
       // FE-2/D-14：还没有任何渲染结果（例如刚打开图片就按 Ctrl+S）时
-      // 回落下载原图，而不是读 undefined.currentSrc 抛 TypeError
+      // 回落下载原图，而不是读 undefined.src 抛 TypeError
       const originalUrl = URL.createObjectURL(file)
       downloadImage(
         originalUrl,
@@ -1481,10 +1488,10 @@ export default function Editor(props: EditorProps) {
                       transition: `margin-right ${COMPARE_SLIDER_DURATION_MS}ms`,
                     }}
                   />
-                  <img
+                  <canvas
                     className="[grid-area:original-image-content]"
-                    src={original.src}
-                    alt="original"
+                    aria-label="original"
+                    ref={originalCanvasRef}
                     style={{
                       width: `${imageWidth}px`,
                       height: `${imageHeight}px`,

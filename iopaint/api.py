@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import math
 import os
 import time
 import traceback
@@ -43,6 +44,7 @@ from iopaint.helper import (
     adjust_mask,
     is_private_host,
     jpeg_sampling_from_bytes,
+    rasterize_mask_strokes,
     EXTERNAL_MAX_IMAGE_PIXELS,
     PRIVATE_MAX_IMAGE_PIXELS,
 )
@@ -77,6 +79,40 @@ WEB_APP_DIR = CURRENT_DIR / "web_app"
 # 单个请求体上限（256MB）。12MP PNG 的 base64 约 15MB，留足余量；
 # 超过则 413，避免超大 body 打爆内存（DOS-1）。
 MAX_REQUEST_BODY_BYTES = 256 * 1024 * 1024
+
+# /inpaint 的显示预览上限，与前端 Editor 的 IMAGE_CANVAS_MAX_PIXELS 一致：
+# 编辑器最终只把这些像素画进显示画布，多出来的分辨率只会在网络上和浏览器
+# 解码/缩放里浪费。超过这个值的图返回缩放后的 JPEG，逻辑尺寸放在响应头里。
+PREVIEW_MAX_PIXELS = 16 * 1024 * 1024
+PREVIEW_QUALITY = 92
+
+
+def _display_preview_jpeg(
+    rgb: np.ndarray, alpha_channel: Optional[np.ndarray]
+) -> Optional[bytes]:
+    """超过 PREVIEW_MAX_PIXELS 时返回显示用 JPEG，否则 None。
+
+    只在 revision 可用时调用：canonical 像素仍在服务端，/export 与后续编辑
+    都不依赖这份有损字节；revision 不可用时继续回全分辨率源格式。
+    """
+    height, width = rgb.shape[:2]
+    if height * width <= PREVIEW_MAX_PIXELS:
+        return None
+    scale = math.sqrt(PREVIEW_MAX_PIXELS / (height * width))
+    new_w = max(1, int(round(width * scale)))
+    new_h = max(1, int(round(height * scale)))
+    arr = rgb
+    if alpha_channel is not None:
+        alpha = alpha_channel
+        if alpha.shape[:2] != (height, width):
+            alpha = cv2.resize(alpha, dsize=(width, height))
+        # JPEG 不支持 alpha，透明区域垫白底（与 /export 的 JPEG 分支一致）
+        a = alpha.astype(np.float32)[:, :, np.newaxis] / 255.0
+        arr = np.clip(
+            rgb.astype(np.float32) * a + 255.0 * (1.0 - a), 0, 255
+        ).astype(np.uint8)
+    arr = cv2.resize(arr, dsize=(new_w, new_h), interpolation=cv2.INTER_AREA)
+    return pil_to_bytes(Image.fromarray(arr), ext="jpeg", quality=PREVIEW_QUALITY)
 
 
 def _max_pixels_for_request(request: Optional[Request]) -> Optional[int]:
@@ -247,7 +283,13 @@ def api_middleware(app: FastAPI):
         # 全站无 cookie/鉴权，credentials 没有用途；且 "origins=* + credentials=true"
         # 是规范禁止的组合（浏览器会直接拒绝响应）。见 SEC-3。
         "allow_credentials": False,
-        "expose_headers": ["X-Seed", "X-Revision", "X-Internal-Format"],
+        "expose_headers": [
+            "X-Seed",
+            "X-Revision",
+            "X-Internal-Format",
+            "X-Image-Width",
+            "X-Image-Height",
+        ],
     }
     app.add_middleware(CORSMiddleware, **cors_options)
 
@@ -442,8 +484,10 @@ class Api:
         return GenInfoResponse(prompt=prompt, negative_prompt=negative_prompt)
 
     async def api_inpaint(self, req: InpaintRequest, request: Request) -> Response:
-        if not req.mask:
-            raise HTTPException(status_code=400, detail="mask is required")
+        if not req.mask and req.mask_strokes is None:
+            raise HTTPException(
+                status_code=400, detail="mask or mask_strokes is required"
+            )
         if not req.image and not req.revision:
             raise HTTPException(
                 status_code=400, detail="image or revision is required"
@@ -454,13 +498,24 @@ class Api:
         # 期间整个服务（含 /api/v1/samplers 等轻请求）都会被卡住。
         # 连同模型推理一起整体放进线程池。
         loop = asyncio.get_running_loop()
-        res_img_bytes, ext, revision, internal_format = await loop.run_in_executor(
+        (
+            res_img_bytes,
+            ext,
+            revision,
+            internal_format,
+            image_width,
+            image_height,
+        ) = await loop.run_in_executor(
             None, self._inpaint_blocking, req, _max_pixels_for_request(request)
         )
 
         await self.sio.emit("diffusion_finish")
 
-        headers = {"X-Seed": str(req.sd_seed)}
+        headers = {
+            "X-Seed": str(req.sd_seed),
+            "X-Image-Width": str(image_width),
+            "X-Image-Height": str(image_height),
+        }
         if revision:
             headers["X-Revision"] = revision
         if internal_format:
@@ -504,11 +559,12 @@ class Api:
         """
         # 裁剪边距以服务端 config.json 为准（前端下发的是常量，不暴露给用户）
         req.hd_strategy_crop_margin = self.config.hd_strategy_crop_margin
-        assert req.mask is not None
-        mask, _, _, _ = decode_base64_to_image(
-            req.mask, gray=True, max_pixels=max_pixels
-        )
-        mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)[1]
+        mask: Optional[np.ndarray] = None
+        if req.mask:
+            mask, _, _, _ = decode_base64_to_image(
+                req.mask, gray=True, max_pixels=max_pixels
+            )
+            mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)[1]
 
         raw_bytes: Optional[bytes] = None
         source_hash: Optional[str] = None
@@ -576,7 +632,11 @@ class Api:
 
         logger.debug(f"image ext: {ext}")
 
-        if image.shape[:2] != mask.shape[:2]:
+        if mask is None:
+            # 笔迹按原图尺寸栅格化，天然与 image 同尺寸。
+            assert req.mask_strokes is not None
+            mask = rasterize_mask_strokes(image.shape, req.mask_strokes)
+        elif image.shape[:2] != mask.shape[:2]:
             if lease is not None:
                 lease.release()
             raise HTTPException(
@@ -628,24 +688,41 @@ class Api:
             if lease is not None:
                 lease.release()
 
-        rgb_res = concat_alpha_channel(result_rgb, alpha_channel)
-        wire_ext: str
-        if self.config.stateless_lossless:
-            wire_ext = self.config.wire_format
+        image_height, image_width = result_rgb.shape[:2]
+        # 大图只在 canonical revision 可用时才回显示预览：此时 /export 和后续
+        # 编辑都从服务端 canonical 像素出发，响应字节只负责「看得见」。
+        preview = None
+        if revision and not self.config.stateless_lossless:
+            preview = _display_preview_jpeg(result_rgb, alpha_channel)
+
+        if preview is not None:
+            wire_ext = "jpeg"
+            internal_format = None
+            res_img_bytes = preview
         else:
-            wire_ext = ext
-        internal_format = wire_ext if self.config.stateless_lossless else None
-        res_img_bytes = pil_to_bytes(
-            Image.fromarray(rgb_res),
-            ext=wire_ext,
-            quality=self.config.quality,
-            infos=infos,
-        )
+            rgb_res = concat_alpha_channel(result_rgb, alpha_channel)
+            wire_ext = (
+                self.config.wire_format if self.config.stateless_lossless else ext
+            )
+            internal_format = wire_ext if self.config.stateless_lossless else None
+            res_img_bytes = pil_to_bytes(
+                Image.fromarray(rgb_res),
+                ext=wire_ext,
+                quality=self.config.quality,
+                infos=infos,
+            )
         if revision:
             # 把响应字节的 sha256 也登记为该 revision 的别名，老客户端
             # 下一轮原样上传上一轮响应时也能命中（无需前端改动）。
             self.revision_cache.alias(sha256_bytes(res_img_bytes), revision)
-        return res_img_bytes, wire_ext, revision, internal_format
+        return (
+            res_img_bytes,
+            wire_ext,
+            revision,
+            internal_format,
+            image_width,
+            image_height,
+        )
 
     def api_export(self, req: ExportRequest, request: Request) -> Response:
         """唯一编码出口：canonical/上传像素 → 源格式的交付字节。"""

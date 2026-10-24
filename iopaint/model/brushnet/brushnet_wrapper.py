@@ -1,3 +1,5 @@
+from typing import Any, Dict, Optional
+
 import PIL.Image
 import cv2
 import torch
@@ -23,6 +25,31 @@ from .unet_2d_blocks import (
     UpBlock2D_forward,
 )
 from ...schema import InpaintRequest, ModelType
+
+
+def load_brushnet_module(
+    method: str,
+    cache: Optional[Dict[str, Any]],
+    torch_dtype: torch.dtype,
+    local_files_only: bool,
+) -> BrushNetModel:
+    """按 method 取 BrushNet 模块，命中 manager 级缓存就不读盘。
+
+    与 ControlNet 一致：只保留最近一个 method，dtype 不匹配时丢弃重载。
+    """
+    if cache is not None:
+        cached = cache.get(method)
+        if cached is not None and cached.dtype == torch_dtype:
+            logger.info(f"Reuse cached BrushNet module: {method}")
+            return cached
+        cache.pop(method, None)
+    brushnet = BrushNetModel.from_pretrained(
+        method, local_files_only=local_files_only, torch_dtype=torch_dtype
+    )
+    if cache is not None:
+        cache.clear()
+        cache[method] = brushnet
+    return brushnet
 
 
 class BrushNetWrapper(DiffusionInpaintModel):
@@ -58,8 +85,12 @@ class BrushNetWrapper(DiffusionInpaintModel):
             )
 
         logger.info(f"Loading BrushNet model from {self.brushnet_method}")
-        brushnet = BrushNetModel.from_pretrained(
-            self.brushnet_method, torch_dtype=torch_dtype
+        self._brushnet_cache = kwargs.get("brushnet_module_cache")
+        brushnet = load_brushnet_module(
+            self.brushnet_method,
+            self._brushnet_cache,
+            torch_dtype,
+            self.local_files_only,
         )
 
         if self.model_info.is_single_file_diffusers:
@@ -136,10 +167,11 @@ class BrushNetWrapper(DiffusionInpaintModel):
 
     def switch_brushnet_method(self, new_method: str):
         self.brushnet_method = new_method
-        brushnet = BrushNetModel.from_pretrained(
+        brushnet = load_brushnet_module(
             new_method,
-            local_files_only=self.local_files_only,
-            torch_dtype=self.torch_dtype,
+            self._brushnet_cache,
+            self.torch_dtype,
+            self.local_files_only,
         ).to(self.model.device)
         self.model.brushnet = brushnet
 

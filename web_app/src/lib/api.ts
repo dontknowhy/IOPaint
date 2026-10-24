@@ -4,6 +4,7 @@ import i18n from "./i18n"
 import {
   Filename,
   GenInfo,
+  MaskStroke,
   ModelInfo,
   PowerPaintTask,
   Rect,
@@ -94,6 +95,17 @@ export interface InpaintResponse {
   blob: Blob
   seed?: string
   revision?: string
+  /** 逻辑尺寸（crop/extender 之后的全分辨率），预览响应里是必填。 */
+  width?: number
+  height?: number
+}
+
+function headerInt(value: unknown): number | undefined {
+  if (typeof value !== "string" && typeof value !== "number") {
+    return undefined
+  }
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
 }
 
 export default async function inpaint(
@@ -101,12 +113,13 @@ export default async function inpaint(
   settings: Settings,
   croperRect: Rect,
   extenderState: Rect,
-  mask: File | Blob,
+  mask: File | Blob | null,
+  maskStrokes: MaskStroke[] | null = null,
   paintByExampleImage: File | null = null,
   revision: string | null = null
 ): Promise<InpaintResponse> {
   const imageBase64 = imageFile ? await convertToBase64(imageFile) : null
-  const maskBase64 = await convertToBase64(mask)
+  const maskBase64 = mask ? await convertToBase64(mask) : null
   const exampleImageBase64 = paintByExampleImage
     ? await convertToBase64(paintByExampleImage)
     : null
@@ -117,7 +130,10 @@ export default async function inpaint(
       // revision 命中时服务端忽略 image；省略它可以把上传字节降到 0。
       ...(imageBase64 ? { image: imageBase64 } : {}),
       ...(revision ? { revision } : {}),
-      mask: maskBase64,
+      // 交互编辑优先传笔迹，服务端按原图尺寸栅格化；只有插件/调整掩膜
+      //（extraMasks 非空）才回退到整图 PNG。
+      ...(maskStrokes !== null ? { mask_strokes: maskStrokes } : {}),
+      ...(maskBase64 ? { mask: maskBase64 } : {}),
       ldm_steps: settings.ldmSteps,
       ldm_sampler: settings.ldmSampler,
       zits_wireframe: settings.zitsWireframe,
@@ -167,6 +183,8 @@ export default async function inpaint(
     blob: res.data as Blob,
     seed: res.headers["x-seed"] as string | undefined,
     revision: res.headers["x-revision"] as string | undefined,
+    width: headerInt(res.headers["x-image-width"]),
+    height: headerInt(res.headers["x-image-height"]),
   }
 }
 

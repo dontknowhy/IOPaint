@@ -14,7 +14,7 @@ from ..utils import (
     enable_low_mem,
     is_local_files_only,
 )
-from .brushnet import BrushNetModel
+from .brushnet_wrapper import load_brushnet_module
 from .brushnet_unet_forward import brushnet_unet_forward
 from .unet_2d_blocks import (
     CrossAttnDownBlock2D_forward,
@@ -62,8 +62,12 @@ class BrushNetXLWrapper(DiffusionInpaintModel):
             )
 
         logger.info(f"Loading BrushNet model from {self.brushnet_xl_method}")
-        brushnet = BrushNetModel.from_pretrained(
-            self.brushnet_xl_method, torch_dtype=torch_dtype
+        self._brushnet_cache = kwargs.get("brushnet_module_cache")
+        brushnet = load_brushnet_module(
+            self.brushnet_xl_method,
+            self._brushnet_cache,
+            torch_dtype,
+            self.local_files_only,
         )
 
         if self.model_info.is_single_file_diffusers:
@@ -140,10 +144,11 @@ class BrushNetXLWrapper(DiffusionInpaintModel):
 
     def switch_brushnet_method(self, new_method: str):
         self.brushnet_method = new_method
-        brushnet_xl = BrushNetModel.from_pretrained(
+        brushnet_xl = load_brushnet_module(
             new_method,
-            local_files_only=self.local_files_only,
-            torch_dtype=self.torch_dtype,
+            self._brushnet_cache,
+            self.torch_dtype,
+            self.local_files_only,
         ).to(self.model.device)
         self.model.brushnet = brushnet_xl
 
