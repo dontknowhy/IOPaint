@@ -1,11 +1,13 @@
 // utils.ts 纯逻辑单测（vitest + jsdom）。只测不依赖真实 canvas/网络的部分：
-// 错误消息格式化、保存文件名、包围盒、笔迹绘制（fake ctx）、点击类型判定、坐标换算。
+// 错误消息格式化、保存文件名、包围盒、笔迹绘制（fake ctx）、点击类型判定、坐标换算、
+// 显示画布位图缩放。
 import { describe, expect, it, vi } from "vitest"
 import {
   buildDownloadName,
   drawLineWithinRect,
   drawLines,
   extFromMime,
+  fitCanvasBitmap,
   generateMask,
   getErrorMessage,
   isMidClick,
@@ -278,6 +280,44 @@ describe("mouseXY", () => {
     expect(touchPointXY(touch as Touch, target as never)).toEqual({
       x: 200, // (200-100)/200*400
       y: 100, // (100-50)/100*200
+    })
+  })
+})
+
+describe("fitCanvasBitmap", () => {
+  // 4032x6048 的真实照片超过 16Mi px 上限，位图按 sqrt(maxPixels/px) 缩小到 3344x5017。
+  const MAX = 16 * 1024 * 1024
+
+  it("covers every bitmap pixel at the exact drawn size", () => {
+    const fit = fitCanvasBitmap(4032, 6048, MAX)
+    expect(fit.bitmapWidth).toBe(3344)
+    expect(fit.bitmapHeight).toBe(5017)
+    // 反算缩放让 drawImage 的目标矩形正好铺满位图：用统一 scale 时会差
+    // 5017 - 6048*0.829456844 = 0.445px，Firefox/WebKit 把最后一行画成半透明。
+    expect(4032 * fit.scaleX).toBeCloseTo(fit.bitmapWidth, 10)
+    expect(6048 * fit.scaleY).toBeCloseTo(fit.bitmapHeight, 10)
+  })
+
+  it("keeps the bitmap within maxPixels", () => {
+    const fit = fitCanvasBitmap(4032, 6048, MAX)
+    expect(fit.bitmapWidth * fit.bitmapHeight).toBeLessThanOrEqual(MAX)
+  })
+
+  it("leaves images under the limit untouched", () => {
+    expect(fitCanvasBitmap(640, 480, MAX)).toEqual({
+      bitmapWidth: 640,
+      bitmapHeight: 480,
+      scaleX: 1,
+      scaleY: 1,
+    })
+  })
+
+  it("falls back to 1x1 for empty sizes", () => {
+    expect(fitCanvasBitmap(0, 0, MAX)).toEqual({
+      bitmapWidth: 1,
+      bitmapHeight: 1,
+      scaleX: 1,
+      scaleY: 1,
     })
   })
 })

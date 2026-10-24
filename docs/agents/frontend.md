@@ -15,3 +15,8 @@
   Backend `gen_frontend_mask` mirrors the `ffcc00bb` brush color.
 - Shared hooks: `useDragResize`, `useImage`, `useInputImage`, `useHotkey`, `useResolution` (viewport breakpoints, not
   model resolution).
+- The display canvas is capped by `IMAGE_CANVAS_MAX_PIXELS` (16Mi), so `ctx.setTransform` maps image coordinates onto a
+  smaller bitmap that CSS stretches back to the original size. Take the transform from `fitCanvasBitmap` (`lib/utils.ts`),
+  never from a single uniform scale: when the bitmap size rounds up but the drawn rect stays `width*scale`, the last row
+  ends up ~55% covered and Firefox/WebKit paint it semi-transparent (alpha 142/128), which reads as a 1–2px transparent
+  gradient strip along the image edge once CSS scales it back up.

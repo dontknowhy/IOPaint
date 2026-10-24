@@ -25,6 +25,7 @@ import {
   downloadImage,
   drawLineWithinRect,
   drawLines,
+  fitCanvasBitmap,
   generateMask,
   getErrorMessage,
   isMidClick,
@@ -73,7 +74,7 @@ const MASK_CANVAS_MAX_PIXELS = 4 * 1024 * 1024
 // Canvas2DResourceProviderSharedImage::ProduceCanvasResource），代价随位图面积增长：
 // 6000x6000（36M px / 144MB）时主线程 Commit 约 19ms/帧，画笔画 120 帧有 21 帧掉到
 // 33ms 以上，平移/缩放同样卡；位图压到 16M px 以内后掉帧归零。坐标仍用原图单位
-// （imageScale 经 ctx.setTransform 映射），配合 CSS width/height 撑回原图大小，
+// （scaleX/scaleY 经 ctx.setTransform 映射），配合 CSS width/height 撑回原图大小，
 // 布局盒子与缩放行为都不变，掩膜那套（MASK_CANVAS_MAX_PIXELS）同理。
 const IMAGE_CANVAS_MAX_PIXELS = 16 * 1024 * 1024
 
@@ -244,19 +245,16 @@ export default function Editor(props: EditorProps) {
   }, [curLineGroup])
 
   // 显示用原图/渲染画布的分辨率：不超过 IMAGE_CANVAS_MAX_PIXELS，坐标仍用原图坐标，
-  // 靠 ctx.setTransform 映射。imageScale === 1 时与原来完全一致。
-  const imageScale = useMemo(() => {
-    if (imageWidth === 0 || imageHeight === 0) {
-      return 1
-    }
-    const pixels = imageWidth * imageHeight
-    if (pixels <= IMAGE_CANVAS_MAX_PIXELS) {
-      return 1
-    }
-    return Math.sqrt(IMAGE_CANVAS_MAX_PIXELS / pixels)
-  }, [imageWidth, imageHeight])
-  const imageCanvasWidth = Math.max(1, Math.round(imageWidth * imageScale))
-  const imageCanvasHeight = Math.max(1, Math.round(imageHeight * imageScale))
+  // 靠 ctx.setTransform 映射。位图不小于原图时缩放为 1，与原来完全一致。
+  const {
+    bitmapWidth: imageCanvasWidth,
+    bitmapHeight: imageCanvasHeight,
+    scaleX: imageScaleX,
+    scaleY: imageScaleY,
+  } = useMemo(
+    () => fitCanvasBitmap(imageWidth, imageHeight, IMAGE_CANVAS_MAX_PIXELS),
+    [imageWidth, imageHeight]
+  )
 
   useEffect(() => {
     if (
@@ -277,10 +275,11 @@ export default function Editor(props: EditorProps) {
       imageContext.canvas.height = imageCanvasHeight
     }
     // clearRect / drawImage 分两次设置变换：先在 identity 下清整块位图，
-    // 再缩放绘制（与掩膜画布同一套，绘制后目标矩形按 imageScale 映射到位图）
+    // 再按位图实际尺寸反算的 scaleX/scaleY 绘制。两个轴各自取整后再反算，
+    // 目标矩形正好铺满位图，不会留下未被覆盖的半透明像素行。
     imageContext.setTransform(1, 0, 0, 1, 0, 0)
     imageContext.clearRect(0, 0, imageCanvasWidth, imageCanvasHeight)
-    imageContext.setTransform(imageScale, 0, 0, imageScale, 0, 0)
+    imageContext.setTransform(imageScaleX, 0, 0, imageScaleY, 0, 0)
     imageContext.drawImage(render, 0, 0, imageWidth, imageHeight)
   }, [
     renders,
@@ -291,7 +290,8 @@ export default function Editor(props: EditorProps) {
     imageWidth,
     imageCanvasWidth,
     imageCanvasHeight,
-    imageScale,
+    imageScaleX,
+    imageScaleY,
   ])
 
   // 显示用掩膜画布的分辨率：不超过 MASK_CANVAS_MAX_PIXELS，坐标仍用原图坐标，

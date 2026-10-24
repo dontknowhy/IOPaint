@@ -100,6 +100,37 @@ export function canvasToImage(
   })
 }
 
+// 显示用画布的位图尺寸与绘制缩放（大图会被缩到 maxPixels 以内，见 Editor 的
+// IMAGE_CANVAS_MAX_PIXELS）。位图尺寸要取整，而 drawImage 的目标矩形是
+// width*scale 这样的分数；若两者用同一个等比 scale，取整后位图可能比目标矩形
+// 高出不到 1px（4032x6048 → 位图 5017 行，目标矩形 5016.55 行）。Firefox/WebKit
+// 会按覆盖率把这一行画成半透明（实测 alpha 142/128），再被 CSS 拉回原图尺寸，
+// 就是底部 1~2px 的透明渐变条。所以缩放按位图实际尺寸反算，保证整块位图被填满。
+export function fitCanvasBitmap(
+  width: number,
+  height: number,
+  maxPixels: number
+): {
+  bitmapWidth: number
+  bitmapHeight: number
+  scaleX: number
+  scaleY: number
+} {
+  if (width <= 0 || height <= 0) {
+    return { bitmapWidth: 1, bitmapHeight: 1, scaleX: 1, scaleY: 1 }
+  }
+  const pixels = width * height
+  const scale = pixels > maxPixels ? Math.sqrt(maxPixels / pixels) : 1
+  const bitmapWidth = Math.max(1, Math.round(width * scale))
+  const bitmapHeight = Math.max(1, Math.round(height * scale))
+  return {
+    bitmapWidth,
+    bitmapHeight,
+    scaleX: bitmapWidth / width,
+    scaleY: bitmapHeight / height,
+  }
+}
+
 export function getErrorMessage(e: unknown): string {
   if (e instanceof Error) {
     return e.message
