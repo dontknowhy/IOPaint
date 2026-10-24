@@ -7,7 +7,7 @@ import math
 import cv2
 import numpy as np
 import pytest
-from PIL import Image, JpegImagePlugin
+from PIL import Image, JpegImagePlugin, PngImagePlugin
 from pydantic import ValidationError
 
 from iopaint.exceptions import ModelLoadError
@@ -97,6 +97,84 @@ class TestPilCompressLevel:
         default_bytes = pil_to_bytes(img, "jpg")
         q95 = pil_to_bytes(img, "jpg", quality=95)
         assert default_bytes == q95
+
+
+# ---------------------------------------------------------------------------
+# pil_to_bytes: RGB/RGBA 的 PNG 快速编码器
+# ---------------------------------------------------------------------------
+
+def _png_chunks(data: bytes) -> list[tuple[bytes, bytes]]:
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    pos, out = 8, []
+    while pos < len(data):
+        length = int.from_bytes(data[pos : pos + 4], "big")
+        tag = data[pos + 4 : pos + 8]
+        out.append((tag, data[pos + 8 : pos + 8 + length]))
+        pos += 12 + length
+    return out
+
+
+class TestPngFastEncoder:
+    """自定义 PNG 写出器必须与 Pillow 逐像素一致，元数据块逐字节一致。"""
+
+    def test_rgb_rgba_roundtrip_is_exact(self) -> None:
+        rng = np.random.default_rng(3)
+        # 257 行跨越 256 行的滤波分块边界，覆盖 prior 行的接缝
+        for shape in ((1, 1, 3), (64, 64, 3), (257, 300, 3), (300, 257, 4)):
+            arr = rng.integers(0, 256, shape, dtype=np.uint8)
+            img = Image.fromarray(arr)
+            for level in (0, 1, 6, 9):
+                out = pil_to_bytes(img, "png", png_compress_level=level)
+                decoded = np.array(Image.open(io.BytesIO(out)))
+                assert np.array_equal(decoded, arr), (shape, level)
+
+    def test_metadata_chunks_match_pillow(self) -> None:
+        arr = np.zeros((5, 7, 3), dtype=np.uint8)
+        arr[:] = (10, 20, 30)
+        parameters = "prompt 参数"
+        infos = {
+            "icc_profile": b"FAKEICC" * 20,
+            "dpi": (300, 300),
+            "exif": b"Exif\x00\x00II*\x00" + b"\x00" * 10,
+            "parameters": parameters,
+        }
+        fast = pil_to_bytes(Image.fromarray(arr), "png", infos=infos)
+
+        pnginfo = PngImagePlugin.PngInfo()
+        pnginfo.add_text("parameters", parameters)
+        buf = io.BytesIO()
+        Image.fromarray(arr).save(
+            buf,
+            "PNG",
+            compress_level=1,
+            icc_profile=infos["icc_profile"],
+            dpi=infos["dpi"],
+            exif=infos["exif"],
+            pnginfo=pnginfo,
+        )
+        # IDAT 的 zlib 参数与滤波选择不同，其余块必须完全一致
+        fast_chunks = [c for c in _png_chunks(fast) if c[0] != b"IDAT"]
+        pil_chunks = [c for c in _png_chunks(buf.getvalue()) if c[0] != b"IDAT"]
+        assert [tag for tag, _ in fast_chunks] == [
+            b"IHDR",
+            b"iCCP",
+            b"iTXt",
+            b"pHYs",
+            b"eXIf",
+            b"IEND",
+        ]
+        assert fast_chunks == pil_chunks
+
+        reopened = Image.open(io.BytesIO(fast))
+        assert reopened.info["icc_profile"] == infos["icc_profile"]
+        assert reopened.info["parameters"] == parameters
+        assert reopened.info["exif"] == infos["exif"]
+        assert reopened.info["dpi"][0] == pytest.approx(300, abs=0.01)
+
+    def test_non_rgb_modes_still_use_pillow(self) -> None:
+        arr = np.arange(32 * 16, dtype=np.uint8).reshape(32, 16)
+        out = pil_to_bytes(Image.fromarray(arr, mode="L"), "png")
+        assert np.array_equal(np.array(Image.open(io.BytesIO(out))), arr)
 
 
 class TestJpegSubsampling:
