@@ -446,6 +446,23 @@ def check_image_pixels(size: Tuple[int, int], max_pixels: Optional[int]) -> None
         )
 
 
+def _to_8bit_gray(image: Image.Image) -> Image.Image:
+    """高位深灰度先缩到 8-bit，再走 Pillow 的 convert。
+
+    `convert("L"/"RGB")` 对这些 mode 是截断到 255 而不是缩放：16-bit 灰度
+    梯度会整幅变成 255，掩膜更是全白（整图被重绘）。这里按 >>8 映射回
+    0~255，其余 mode 原样返回，RGBA/alpha/exif 路径不受影响。
+    """
+    if image.mode not in ("I;16", "I;16B", "I;16L", "I"):
+        return image
+    arr = np.asarray(image)
+    if image.mode == "I" and int(arr.max()) <= 255:
+        # 8-bit 数据装在 32-bit 容器里（部分 TIFF），旧的截断语义即正确值
+        return image
+    arr = np.clip(arr, 0, 65535).astype(np.uint32) >> 8
+    return Image.fromarray(arr.astype(np.uint8))
+
+
 def load_img(
     img_bytes: bytes,
     gray: bool = False,
@@ -465,16 +482,14 @@ def load_img(
         pass
 
     if gray:
-        image = image.convert("L")
-        np_img = np.array(image)
+        np_img = np.array(_to_8bit_gray(image).convert("L"))
     else:
         if image.mode == "RGBA":
             np_img = np.array(image)
             alpha_channel = np_img[:, :, -1]
             np_img = cv2.cvtColor(np_img, cv2.COLOR_RGBA2RGB)
         else:
-            image = image.convert("RGB")
-            np_img = np.array(image)
+            np_img = np.array(_to_8bit_gray(image).convert("RGB"))
 
     if return_info:
         return np_img, alpha_channel, infos
@@ -673,16 +688,14 @@ def decode_base64_to_image(
     infos = image.info
 
     if gray:
-        image = image.convert("L")
-        np_img = np.array(image)
+        np_img = np.array(_to_8bit_gray(image).convert("L"))
     else:
         if image.mode == "RGBA":
             np_img = np.array(image)
             alpha_channel = np_img[:, :, -1]
             np_img = cv2.cvtColor(np_img, cv2.COLOR_RGBA2RGB)
         else:
-            image = image.convert("RGB")
-            np_img = np.array(image)
+            np_img = np.array(_to_8bit_gray(image).convert("RGB"))
 
     return np_img, alpha_channel, infos, ext
 

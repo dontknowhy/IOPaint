@@ -1,8 +1,14 @@
-"""D-10 插件并发锁（CON-1）+ interactive_seg 的 check-then-act 顺序。"""
+"""D-10 插件并发锁（CON-1）+ interactive_seg 的 check-then-act 顺序。
+
+另含 GFPGAN / RestoreFormer 复用同一个 RealESRGAN upscaler 时的锁：两者各持
+各的 plugin.lock，共享的 RealESRGANer 实例状态必须靠 upscaler 自己的锁保护。
+"""
 import base64
 import io
 import threading
 import time
+from types import SimpleNamespace
+from typing import Any, Callable, Optional
 
 import numpy as np
 import pytest
@@ -10,7 +16,10 @@ from fastapi import FastAPI
 from PIL import Image
 
 from iopaint.api import Api
+from iopaint.plugins import gfpgan_plugin, gfpganer, restoreformer
 from iopaint.plugins.base_plugin import BasePlugin
+from iopaint.plugins.gfpgan_plugin import GFPGANPlugin
+from iopaint.plugins.restoreformer import RestoreFormerPlugin
 from iopaint.schema import RunPluginRequest
 from iopaint.tests.test_api_phase1 import _minimal_config
 
@@ -159,3 +168,137 @@ class TestInteractiveSegCacheOrder:
         seg.forward(img, [[1, 1, 1]], "md5-1")
         assert seg.prev_img_md5 == "md5-1"
         assert seg.predictor.set_calls == 2
+
+
+class _AcceptsDevice:
+    """只实现 .to(device)：真实现会把权重搬上 device，测试里搬不搬无所谓。"""
+
+    def to(self, device: Any) -> "_AcceptsDevice":
+        return self
+
+
+class FakeFaceDet(_AcceptsDevice):
+    """.mean_tensor 与自身被 GFPGANPlugin.__init__ 末尾各 .to(device) 一次。"""
+
+    def __init__(self) -> None:
+        self.mean_tensor = _AcceptsDevice()
+
+
+class FakeUpscalerModel:
+    """冒充 RealESRGANer：真身把 img/output 挂实例上，测试只需能拿回 upscaler 的锁。"""
+
+    def __init__(self, upscaler: "FakeUpscaler") -> None:
+        self.lock = upscaler.lock
+
+
+class FakeUpscaler:
+    """只提供 face 插件需要的那两样东西：.model（当 bg_upsampler）和 .lock。"""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.model = FakeUpscalerModel(self)
+
+
+class RecordingEnhancer:
+    """假 MyGFPGANer，记录被调用时 upscaler 锁是否已由调用方持有。
+
+    threading.Lock 不可重入：同一线程里再 acquire(blocking=False) 失败，
+    恰好证明调用方正持锁，而不是「别的线程碰巧持有」。
+    """
+
+    def __init__(
+        self, lock: Optional[Any] = None, bg_upsampler: Optional[Any] = None
+    ) -> None:
+        self.lock = lock
+        self.bg_upsampler = bg_upsampler
+        self.lock_held: Optional[bool] = None
+        self.calls = 0
+        # GFPGANPlugin.__init__ 会对 face_helper.face_det 调 .to(device)
+        self.face_helper = SimpleNamespace(face_det=FakeFaceDet())
+
+    def enhance(self, img: np.ndarray, **kwargs: Any) -> tuple:
+        self.calls += 1
+        if self.lock is not None:
+            acquired = self.lock.acquire(blocking=False)
+            if acquired:  # 没持锁就进来了，立刻归还以免污染后续断言
+                self.lock.release()
+            self.lock_held = not acquired
+        return [], [], np.zeros_like(img)
+
+
+@pytest.fixture
+def make_face_plugin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[Any, Optional[FakeUpscaler]], Any]:
+    """用真的 __init__ 造插件，只打桩两处会碰权重/网络的边。
+
+    download_model 只负责返回权重路径，MyGFPGANer 负责建网络并加载权重；
+    两者都换成假的，BasePlugin.__init__（含 check_dep）保持原样。
+    """
+
+    def fake_my_gfpganer(
+        model_path: Optional[str] = None,
+        upscale: float = 2,
+        arch: str = "clean",
+        channel_multiplier: int = 2,
+        bg_upsampler: Optional[Any] = None,
+        device: Any = None,
+    ) -> RecordingEnhancer:
+        return RecordingEnhancer(
+            bg_upsampler.lock if bg_upsampler is not None else None,
+            bg_upsampler=bg_upsampler,
+        )
+
+    # 两个插件模块各自 from iopaint.helper import download_model，必须分别打桩
+    for module in (gfpgan_plugin, restoreformer):
+        monkeypatch.setattr(module, "download_model", lambda *args, **kwargs: "dummy")
+    # 插件在 __init__ 里 from .gfpganer import MyGFPGANer，打桩模块属性即可生效
+    monkeypatch.setattr(gfpganer, "MyGFPGANer", fake_my_gfpganer)
+
+    return lambda plugin_cls, upscaler: plugin_cls(device="cpu", upscaler=upscaler)
+
+
+class TestSharedUpscalerLock:
+    """GFPGAN / RestoreFormer 的 bg_upsampler 是同一个 RealESRGANer。"""
+
+    @pytest.mark.parametrize("plugin_cls", [GFPGANPlugin, RestoreFormerPlugin])
+    def test_enhance_holds_upscaler_lock(
+        self,
+        plugin_cls: Any,
+        make_face_plugin: Callable[[Any, Optional[FakeUpscaler]], Any],
+    ) -> None:
+        upscaler = FakeUpscaler()
+        plugin = make_face_plugin(plugin_cls, upscaler)
+        rgb = np.full((8, 8, 3), 127, dtype=np.uint8)
+
+        # __init__ 必须自己把共享 upscaler 存下来，否则 _enhance 拿不到那把锁
+        assert plugin.upscaler is upscaler
+        # 真正共用给 bg_upsampler 的也是它内部的 RealESRGANer
+        assert plugin.face_enhancer.bg_upsampler is upscaler.model
+
+        out = plugin.gen_image(rgb, RunPluginRequest(name=plugin_cls.name, image=""))
+
+        assert plugin.face_enhancer.calls == 1
+        assert plugin.face_enhancer.lock_held is True
+        assert out.shape == (8, 8, 3)
+        # enhance 返回后锁必须归还，不能把共享的 upscaler 永久锁死
+        assert upscaler.lock.acquire(timeout=0.5)
+        upscaler.lock.release()
+
+    @pytest.mark.parametrize("plugin_cls", [GFPGANPlugin, RestoreFormerPlugin])
+    def test_enhance_without_upscaler(
+        self,
+        plugin_cls: Any,
+        make_face_plugin: Callable[[Any, Optional[FakeUpscaler]], Any],
+    ) -> None:
+        plugin = make_face_plugin(plugin_cls, None)
+        rgb = np.full((8, 8, 3), 127, dtype=np.uint8)
+
+        assert plugin.upscaler is None
+        assert plugin.face_enhancer.bg_upsampler is None
+
+        out = plugin.gen_image(rgb, RunPluginRequest(name=plugin_cls.name, image=""))
+
+        assert plugin.face_enhancer.calls == 1
+        assert plugin.face_enhancer.lock_held is None
+        assert out.shape == (8, 8, 3)

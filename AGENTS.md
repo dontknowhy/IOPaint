@@ -83,7 +83,7 @@ rm -rf iopaint/web_app && cp -r web_app/dist iopaint/web_app
 
 ## Tests
 
-- `pytest -m "not slow" -q` from the repo root is the fast/offline suite (719 passed, ~70s on this box; no weights, no
+- `pytest -m "not slow" -q` from the repo root is the fast/offline suite (756 passed, ~72s on this box; no weights, no
   GPU, no frontend build — `test_webui` self-skips when `iopaint/web_app` is absent). `pytest.ini` declares the `slow`
   marker; weight-heavy files opt out with a module-level `pytestmark = pytest.mark.slow`, so new test files are never
   missed by hand-maintained lists. Drop that line only if the file is genuinely weightless.
@@ -126,9 +126,16 @@ belongs on a local GPU box.
   each class's `pad_mod` and `is_erase_model` flags.
 - Image size limits are per-source, not global: `iopaint/__init__.py` disables Pillow's `MAX_IMAGE_PIXELS`, and every
   decode takes `max_pixels` from `_max_pixels_for_request` (`api.py`) — 100MP for external clients, unlimited for
-  loopback/RFC1918. New decode paths must pass it; don't re-enable the global Pillow check.
+  loopback/RFC1918. New decode paths must pass it; don't re-enable the global Pillow check. The extender canvas (source
+  image ∪ extender rect, the union `iopaint/model/base.py:_do_outpainting` builds) is capped by the same `max_pixels`
+  and answers 413 before inference, because the canvas can be far larger than the decoded image. Both decode paths run
+  high-bit-depth grayscale (`I;16`, `I;16B`, `I;16L`, `I`) through `helper._to_8bit_gray` first: Pillow's `convert()`
+  clips those modes to 255 instead of scaling, which turns a 16-bit gradient — or a 16-bit mask — solid white.
 - Plugins are built by `iopaint/plugins/__init__.py:build_plugins` from `--enable-*` flags. Their deps
   (`onnxruntime<=1.19.2`, `rembg[cpu]`) are **not** in `requirements.txt` — use `iopaint install-plugins-packages`.
+  `GFPGANPlugin`/`RestoreFormerPlugin` share one `RealESRGANUpscaler` and use its `RealESRGANer` as `bg_upsampler`,
+  which keeps per-call state on `self.img`/`self.output`; both therefore run `enhance` under `upscaler.lock`, and the
+  lock order is always `plugin.lock` → `upscaler.lock` (the RealESRGAN plugin only takes its own, so no cycle).
 - Perf regressions to avoid: don't call `scan_models()` per request (`/api/v1/server-config` uses the cached
   `ModelManager.get_available_models()`; scanning costs ~2s), don't rebuild diffusion schedulers per call (cached by
   `(sampler, lcm_lora)`), don't reload ControlNet preprocessors per request (lazy singletons), and keep
@@ -136,7 +143,9 @@ belongs on a local GPU box.
 - Revisions: a successful inpaint stores its canonical pixels in `RevisionCache` (`iopaint/revision_cache.py`, LRU,
   `--revision-cache-mb`, optional zstd-compressed undo patches) and returns the hash as `X-Revision`; later `/inpaint`
   and `/export` calls may send `revision` instead of image bytes. Keep `X-Revision` in the CORS `expose_headers` or the
-  browser cannot read it.
+  browser cannot read it. Every early `raise` after a lease is taken must stay inside `_inpaint_blocking`'s
+  `try/finally` — except the mask-size-mismatch branch, which releases explicitly; a leaked lease leaves `entry.lock`
+  held and `pins` incremented, so later requests for that revision block forever.
 - Interactive masks travel as `mask_strokes` (image-coordinate polylines, rasterized by
   `helper.rasterize_mask_strokes` with `LINE_8` + round caps); `mask` stays as the fallback for extraMasks and old
   clients. When a canonical revision exists and the result exceeds 16Mi pixels, `/inpaint` answers with a ≤16Mi JPEG

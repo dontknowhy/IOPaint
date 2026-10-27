@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+
 import cv2
 import numpy as np
 from loguru import logger
@@ -20,6 +22,10 @@ class GFPGANPlugin(BasePlugin):
         model_path = download_model(url, model_md5)
         logger.info(f"GFPGAN model path: {model_path}")
 
+        # upscaler 是 RealESRGAN 插件实例，只取它的 .model 当 bg_upsampler；
+        # 但它的 RealESRGANer 把 img/output 存在实例上，所以推理要持它的锁，
+        # 见 _enhance。
+        self.upscaler = upscaler
         # Use GFPGAN for face enhancement
         self.face_enhancer = MyGFPGANer(
             model_path=model_path,
@@ -34,17 +40,27 @@ class GFPGANPlugin(BasePlugin):
             self.face_enhancer.face_helper.face_det.to(device)
         )
 
+    def _enhance(self, bgr_np_img: np.ndarray) -> np.ndarray:
+        """持 upscaler 插件的锁跑整次 enhance。
+
+        bg_upsampler 是共享的 RealESRGANer，它的 img/output 是实例状态，两个
+        插件各持各的 plugin.lock 时仍会互相踩。锁序恒为
+        plugin.lock → upscaler.lock，RealESRGAN 插件只取自己的锁，不会成环。
+        """
+        lock = self.upscaler.lock if self.upscaler is not None else nullcontext()
+        with lock:
+            return self.face_enhancer.enhance(
+                bgr_np_img,
+                has_aligned=False,
+                only_center_face=False,
+                paste_back=True,
+                weight=0.5,
+            )[2]
+
     def gen_image(self, rgb_np_img, req: RunPluginRequest) -> np.ndarray:
-        weight = 0.5
         bgr_np_img = cv2.cvtColor(rgb_np_img, cv2.COLOR_RGB2BGR)
         logger.info(f"GFPGAN input shape: {bgr_np_img.shape}")
-        _, _, bgr_output = self.face_enhancer.enhance(
-            bgr_np_img,
-            has_aligned=False,
-            only_center_face=False,
-            paste_back=True,
-            weight=weight,
-        )
+        bgr_output = self._enhance(bgr_np_img)
         logger.info(f"GFPGAN output shape: {bgr_output.shape}")
 
         # try:

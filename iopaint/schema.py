@@ -331,7 +331,8 @@ class MaskStroke(BaseModel):
     pts: List[Tuple[float, float]] = Field(
         ..., min_length=1, max_length=200_000, description="[[x, y], ...]"
     )
-    size: float = Field(..., gt=0, le=65536, description="brush size in pixels")
+    # OpenCV 的厚度上限是 MAX_THICKNESS(32767)，超过会让 polylines/circle 断言失败
+    size: float = Field(..., gt=0, le=32767, description="brush size in pixels")
 
 
 class InpaintRequest(BaseModel):
@@ -521,6 +522,18 @@ class InpaintRequest(BaseModel):
 
         return self
 
+    @model_validator(mode="after")
+    def validate_mask_strokes_total(self) -> "InpaintRequest":
+        # 单条笔迹和条数都有上限，但光栅化是逐点 cv2.circle：总点数也必须
+        # 有界，否则几百条大笔迹就能占住线程池很久。
+        if self.mask_strokes:
+            total = sum(len(s.pts) for s in self.mask_strokes)
+            if total > 100_000:
+                raise ValueError(
+                    f"mask_strokes total points ({total}) exceeds limit of 100000"
+                )
+        return self
+
 
 class ExportRequest(BaseModel):
     """导出边界：唯一编码出口。
@@ -601,5 +614,5 @@ class AdjustMaskRequest(BaseModel):
     )
     operate: AdjustMaskOperate = Field(..., description="expand/shrink/reverse")
     kernel_size: int = Field(
-        5, ge=1, le=1000, description="Kernel size for expanding mask"
+        5, ge=1, le=100, description="Kernel size for expanding mask"
     )

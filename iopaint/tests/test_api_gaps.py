@@ -8,7 +8,10 @@ import asyncio
 import io
 import sys
 import threading
+from pathlib import Path
+from typing import Any, Dict
 
+import httpx
 import numpy as np
 import pytest
 from fastapi import FastAPI
@@ -390,6 +393,40 @@ class TestSwitchPluginModel:
         assert resp.status_code == 200
         assert api.config.remove_bg_model == "u2net"  # 没被改
 
+    def test_switch_removebg_invalid_model_is_422_and_config_kept(
+        self, tmp_path: Path
+    ) -> None:
+        """config 里的插件模型字段是 enum：非法值一旦写入，后续
+        /server-config 会一直 500，所以必须在 switch_model 之前拒绝。"""
+        api, client = _client(tmp_path, remove_bg_model="u2net")
+        plugin = FakePlugin(name="RemoveBG")
+        api.plugins["RemoveBG"] = plugin
+        resp = client.post(
+            "/api/v1/switch_plugin_model",
+            content=SwitchPluginModelRequest(
+                plugin_name="RemoveBG", model_name="isnet-anime"
+            ).model_dump_json(),
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 422
+        assert api.config.remove_bg_model == "u2net"
+        assert plugin.switched == []
+        assert client.get("/api/v1/server-config").status_code == 200
+
+    def test_switch_realesrgan_invalid_model_is_422(self, tmp_path: Path) -> None:
+        api, client = _client(tmp_path)
+        plugin = FakePlugin(name="RealESRGAN")
+        api.plugins["RealESRGAN"] = plugin
+        resp = client.post(
+            "/api/v1/switch_plugin_model",
+            content=SwitchPluginModelRequest(
+                plugin_name="RealESRGAN", model_name="not-a-model"
+            ).model_dump_json(),
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 422
+        assert plugin.switched == []
+
 
 # ---------------------------------------------------------------------------
 # geninfo / save_image / server-config / switch-model 边界
@@ -531,6 +568,174 @@ class TestAdjustMaskImageEndpoint:
         assert out.shape == (64, 64, 4)
         center = out[32, 32]
         assert tuple(center[:3]) == (255, 203, 0)
+
+
+# ---------------------------------------------------------------------------
+# inpaint 早退（矩形校验 400）必须释放 revision lease
+# ---------------------------------------------------------------------------
+
+
+class TestFailedInpaintReleasesLease:
+    def _post(self, client: TestClient, req: InpaintRequest) -> httpx.Response:
+        return client.post(
+            "/api/v1/inpaint",
+            content=req.model_dump_json(),
+            headers={"Content-Type": "application/json"},
+        )
+
+    def test_cropper_error_releases_lease_and_revision_still_usable(
+        self, tmp_path: Path
+    ) -> None:
+        """矩形校验 400 必须经过 finally 释放 lease，否则 entry.lock 被永久持有、
+        pins 永远不归零：同 revision 的后续请求全部阻塞，LRU 也无法逐出。"""
+        api, client = _client(tmp_path)
+        first = self._post(
+            client,
+            InpaintRequest(
+                image=_b64_image(), mask=_b64_mask(), hd_strategy="Original"
+            ),
+        )
+        assert first.status_code == 200
+        revision = first.headers["X-Revision"]
+
+        bad = self._post(
+            client,
+            InpaintRequest(
+                revision=revision,
+                mask=_b64_mask(),
+                hd_strategy="Original",
+                use_croper=True,
+                croper_x=10_000,
+                croper_y=10_000,
+            ),
+        )
+        assert bad.status_code == 400
+
+        entries = list(api.revision_cache._entries.values())
+        assert entries
+        for entry in entries:
+            assert entry.pins == 0
+            assert entry.lock.acquire(timeout=0.5), "entry.lock leaked"
+            entry.lock.release()
+
+        # 同 revision 的后续请求必须有界返回（旧代码会永久卡在 entry.lock 上）
+        result: Dict[str, httpx.Response] = {}
+
+        def follow_up() -> None:
+            result["resp"] = self._post(
+                client,
+                InpaintRequest(
+                    revision=revision, mask=_b64_mask(), hd_strategy="Original"
+                ),
+            )
+
+        worker = threading.Thread(target=follow_up, daemon=True)
+        worker.start()
+        worker.join(timeout=10)
+        assert not worker.is_alive(), "follow-up inpaint blocked on a leaked entry.lock"
+        assert result["resp"].status_code == 200
+
+    def test_rasterize_error_releases_lease(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """栅格化在 lease 拿到之后执行，抛异常同样必须经 finally 释放：
+        否则残留的 pins/lock 让同 revision 的后续请求永久阻塞。"""
+        api, client = _client(tmp_path)
+        first = self._post(
+            client,
+            InpaintRequest(
+                image=_b64_image(), mask=_b64_mask(), hd_strategy="Original"
+            ),
+        )
+        assert first.status_code == 200
+        revision = first.headers["X-Revision"]
+
+        def boom(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("rasterize failed")
+
+        monkeypatch.setattr(api_mod, "rasterize_mask_strokes", boom)
+        bad = self._post(
+            client,
+            InpaintRequest(
+                revision=revision,
+                mask_strokes=[{"pts": [[1, 1], [2, 2]], "size": 3}],
+                hd_strategy="Original",
+            ),
+        )
+        assert bad.status_code == 500
+
+        entries = list(api.revision_cache._entries.values())
+        assert entries
+        for entry in entries:
+            assert entry.pins == 0
+            assert entry.lock.acquire(timeout=0.5), "entry.lock leaked"
+            entry.lock.release()
+
+        # 同 revision 的后续请求必须有界返回（旧代码会永久卡在 entry.lock 上）
+        result: Dict[str, httpx.Response] = {}
+
+        def follow_up() -> None:
+            result["resp"] = self._post(
+                client,
+                InpaintRequest(
+                    revision=revision, mask=_b64_mask(), hd_strategy="Original"
+                ),
+            )
+
+        worker = threading.Thread(target=follow_up, daemon=True)
+        worker.start()
+        worker.join(timeout=10)
+        assert not worker.is_alive(), "follow-up inpaint blocked on a leaked entry.lock"
+        assert result["resp"].status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# extender 画布面积：按请求来源的 max_pixels 兜底（内网 max_pixels=None 不限）
+# ---------------------------------------------------------------------------
+
+
+class TestExtenderCanvasBounds:
+    def _post(self, client: TestClient, **kwargs: Any) -> httpx.Response:
+        req = InpaintRequest(
+            image=_b64_image(), mask=_b64_mask(), hd_strategy="Original", **kwargs
+        )
+        return client.post(
+            "/api/v1/inpaint",
+            content=req.model_dump_json(),
+            headers={"Content-Type": "application/json"},
+        )
+
+    def test_oversized_canvas_is_413_without_inference(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """64x64 图 + 16384x16384 外扩框 → 16447x16447（约 2.7 亿像素）画布，
+        外网请求应在构建画布之前被 413 拒绝（内网 max_pixels=None，按设计不限制）。"""
+        api, client = _client(tmp_path)
+        monkeypatch.setattr(
+            api, "model_manager", lambda *a, **k: pytest.fail("inference must not run")
+        )
+        resp = self._post(
+            client,
+            use_extender=True,
+            extender_x=-16383,
+            extender_y=-16383,
+            extender_width=16384,
+            extender_height=16384,
+        )
+        assert resp.status_code == 413
+        assert "canvas" in resp.json()["detail"]
+
+    def test_small_extension_still_ok(self, tmp_path: Path) -> None:
+        _, client = _client(tmp_path)
+        resp = self._post(
+            client,
+            use_extender=True,
+            extender_x=-10,
+            extender_y=-10,
+            extender_width=84,
+            extender_height=84,
+        )
+        assert resp.status_code == 200
 
 
 # ---------------------------------------------------------------------------

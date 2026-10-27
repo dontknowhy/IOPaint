@@ -211,6 +211,56 @@ class TestLoadImg:
         assert np_img.shape[2] == 3
         assert alpha is None
 
+    def _gray_png_bytes(self, arr: np.ndarray) -> bytes:
+        buf = io.BytesIO()
+        Image.fromarray(arr).save(buf, format="PNG")
+        return buf.getvalue()
+
+    def test_16bit_gray_scales_instead_of_clipping(self) -> None:
+        """16-bit 灰度 PNG 解出来是 I;16，Pillow 的 convert 是截断到 255：
+        梯度图会变成全 255，掩膜整幅变白（整图被重绘）。必须按 >>8 缩放。"""
+        arr = np.linspace(0, 65535, 64 * 64).reshape(64, 64).astype(np.uint16)
+        data = self._gray_png_bytes(arr)
+
+        np_img, alpha = load_img(data)
+        assert alpha is None
+        assert np_img.max() == 255
+        assert abs(float(np_img.mean()) - 127.5) <= 2
+
+        gray_img, _ = load_img(data, gray=True)
+        assert gray_img.dtype == np.uint8
+        assert gray_img.max() == 255
+        assert abs(float(gray_img.mean()) - 127.5) <= 2
+
+    def test_8bit_gray_pixels_unchanged(self) -> None:
+        arr = np.array([[0, 64, 128], [192, 254, 255]], dtype=np.uint8)
+        data = self._gray_png_bytes(arr)
+        for gray in (True, False):
+            np_img, _ = load_img(data, gray=gray)
+            if gray:
+                np.testing.assert_array_equal(np_img, arr)
+            else:
+                expected = np.repeat(arr[:, :, np.newaxis], 3, axis=2)
+                np.testing.assert_array_equal(np_img, expected)
+
+    def test_int32_tiff_keeps_8bit_values(self) -> None:
+        """mode "I" 的容器里可能装的是 8-bit 数据（部分 TIFF）：不能一律 >>8。"""
+        arr = np.array([[0, 17, 34], [51, 68, 255]], dtype=np.int32)
+        buf = io.BytesIO()
+        Image.fromarray(arr).save(buf, format="TIFF")
+        np_img, _ = load_img(buf.getvalue(), gray=True)
+        assert Image.open(io.BytesIO(buf.getvalue())).mode == "I"
+        np.testing.assert_array_equal(np_img, arr.astype(np.uint8))
+
+    def test_16bit_tiff_scales_instead_of_clipping(self) -> None:
+        arr = np.array([[0, 257, 32768], [51400, 65280, 65535]], dtype=np.uint16)
+        buf = io.BytesIO()
+        Image.fromarray(arr).save(buf, format="TIFF")
+        np_img, _ = load_img(buf.getvalue(), gray=True)
+        np.testing.assert_array_equal(
+            np_img, np.array([[0, 1, 128], [200, 255, 255]], dtype=np.uint8)
+        )
+
 
 # ---------------------------------------------------------------------------
 # numpy_to_bytes / pil_to_bytes
@@ -306,6 +356,23 @@ class TestBase64Roundtrip:
         decoded = base64.b64decode(b64)
         reloaded = Image.open(io.BytesIO(decoded))
         assert reloaded.size == (16, 16)
+
+    def test_decode_16bit_gray_scales_instead_of_clipping(self) -> None:
+        arr = np.linspace(0, 65535, 32 * 32).reshape(32, 32).astype(np.uint16)
+        buf = io.BytesIO()
+        Image.fromarray(arr).save(buf, format="PNG")
+        encoding = base64.b64encode(buf.getvalue()).decode()
+
+        np_img, alpha, _, ext = decode_base64_to_image(encoding)
+        assert ext == "png"
+        assert alpha is None
+        assert np.max(np_img) == 255
+        assert abs(float(np.mean(np_img)) - 127.5) <= 2
+
+        gray_img, _, _, _ = decode_base64_to_image(encoding, gray=True)
+        assert np.asarray(gray_img).dtype == np.uint8
+        assert np.max(gray_img) == 255
+        assert abs(float(np.mean(gray_img)) - 127.5) <= 2
 
 
 # ---------------------------------------------------------------------------

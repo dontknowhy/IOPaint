@@ -276,6 +276,49 @@ class TestInputBounds:
             == 12
         )
 
+    def test_kernel_size_capped_at_ui_max(self) -> None:
+        """kernel_size 代价随尺寸平方增长（k=1000 实测 50.8s/次），
+        上限与 WebUI 滑块 max=100 对齐。"""
+        with pytest.raises(ValidationError):
+            AdjustMaskRequest(mask="aGk=", operate="expand", kernel_size=101)
+        assert (
+            AdjustMaskRequest(
+                mask="aGk=", operate="expand", kernel_size=100
+            ).kernel_size
+            == 100
+        )
+
+    def test_mask_strokes_total_points_bounded(self) -> None:
+        """单条 20 万点、最多 1 万条都不限总量：2M 点光栅化实测 5.3s CPU，
+        因此额外限制所有笔迹的总点数。"""
+
+        def stroke(n: int) -> dict:
+            return {"pts": [[1.0, 1.0]] * n, "size": 8}
+
+        with pytest.raises(ValidationError):
+            InpaintRequest(mask_strokes=[stroke(50_000), stroke(50_001)])
+        req = InpaintRequest(mask_strokes=[stroke(50_000), stroke(50_000)])
+        assert req.mask_strokes is not None
+        assert sum(len(s.pts) for s in req.mask_strokes) == 100_000
+        # 正常小请求不受影响
+        normal = InpaintRequest(
+            mask_strokes=[
+                {"pts": [[0, 0], [1, 1]], "size": 5},
+                {"pts": [[2, 2]], "size": 5},
+            ]
+        )
+        assert normal.mask_strokes is not None
+        assert len(normal.mask_strokes) == 2
+
+    def test_mask_stroke_size_capped_at_cv2_max_thickness(self) -> None:
+        """size 直接当作 cv2.polylines/circle 的 thickness，超过 OpenCV 的
+        MAX_THICKNESS(32767) 会断言失败变成 500，所以在 schema 边界就对不齐。"""
+        with pytest.raises(ValidationError):
+            InpaintRequest(mask_strokes=[{"pts": [[0, 0]], "size": 32_768}])
+        req = InpaintRequest(mask_strokes=[{"pts": [[0, 0]], "size": 32_767}])
+        assert req.mask_strokes is not None
+        assert req.mask_strokes[0].size == 32_767
+
     def test_croper_coord_bounds(self):
         with pytest.raises(ValidationError):
             InpaintRequest(croper_x=999_999)

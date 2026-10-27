@@ -5,7 +5,7 @@ import os
 import time
 import traceback
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Type
 
 import cv2
 import numpy as np
@@ -71,6 +71,7 @@ from iopaint.schema import (
     ModelInfo,
     InteractiveSegModel,
     RealESRGANModel,
+    Choices,
 )
 
 CURRENT_DIR = Path(__file__).parent.absolute().resolve()
@@ -85,6 +86,14 @@ MAX_REQUEST_BODY_BYTES = 256 * 1024 * 1024
 # 解码/缩放里浪费。超过这个值的图返回缩放后的 JPEG，逻辑尺寸放在响应头里。
 PREVIEW_MAX_PIXELS = 16 * 1024 * 1024
 PREVIEW_QUALITY = 92
+
+# 插件模型在 ApiConfig / ServerConfigResponse 里是 enum 字段：先按同一枚举
+# 校验再写回 config，否则非法值会让后续 /server-config 一直 500。
+PLUGIN_MODEL_ENUMS: Dict[str, Type[Choices]] = {
+    RemoveBG.name: RemoveBGModel,
+    RealESRGANUpscaler.name: RealESRGANModel,
+    InteractiveSeg.name: InteractiveSegModel,
+}
 
 
 def _display_preview_jpeg(
@@ -420,6 +429,15 @@ class Api:
 
     def api_switch_plugin_model(self, req: SwitchPluginModelRequest):
         if req.plugin_name in self.plugins:
+            model_enum = PLUGIN_MODEL_ENUMS.get(req.plugin_name)
+            if model_enum is not None and req.model_name not in model_enum.values():
+                raise HTTPException(
+                    422,
+                    detail=(
+                        f"invalid model '{req.model_name}' for plugin "
+                        f"'{req.plugin_name}'"
+                    ),
+                )
             plugin = self.plugins[req.plugin_name]
             # CON-1: 换模型同样要独占插件（否则与正在进行的推理互踩）
             with plugin.lock:
@@ -632,11 +650,7 @@ class Api:
 
         logger.debug(f"image ext: {ext}")
 
-        if mask is None:
-            # 笔迹按原图尺寸栅格化，天然与 image 同尺寸。
-            assert req.mask_strokes is not None
-            mask = rasterize_mask_strokes(image.shape, req.mask_strokes)
-        elif image.shape[:2] != mask.shape[:2]:
+        if mask is not None and image.shape[:2] != mask.shape[:2]:
             if lease is not None:
                 lease.release()
             raise HTTPException(
@@ -647,26 +661,53 @@ class Api:
         # DOS-1: schema 只给了坐标 ±16384 的量级边界，这里再对照真实图像尺寸
         # 校验矩形确实与图像相交——完全不相交的裁剪/扩展框会让下面
         # 得到空切片（shape=0），进而 forward 报难以理解的错误。
-        self._validate_rect(
-            image.shape,
-            enabled=req.use_croper,
-            x=req.croper_x,
-            y=req.croper_y,
-            w=req.croper_width,
-            h=req.croper_height,
-            name="cropper",
-        )
-        self._validate_rect(
-            image.shape,
-            enabled=req.use_extender,
-            x=req.extender_x,
-            y=req.extender_y,
-            w=req.extender_width,
-            h=req.extender_height,
-            name="extender",
-        )
-
+        # 校验必须在 try 内：提前 raise 也要走 finally 释放 revision lease。
         try:
+            if mask is None:
+                # 笔迹按原图尺寸栅格化，天然与 image 同尺寸。同样放在 try 内：
+                # 栅格化抛出的异常也必须走 finally 释放 lease。
+                assert req.mask_strokes is not None
+                mask = rasterize_mask_strokes(image.shape, req.mask_strokes)
+            self._validate_rect(
+                image.shape,
+                enabled=req.use_croper,
+                x=req.croper_x,
+                y=req.croper_y,
+                w=req.croper_width,
+                h=req.croper_height,
+                name="cropper",
+            )
+            self._validate_rect(
+                image.shape,
+                enabled=req.use_extender,
+                x=req.extender_x,
+                y=req.extender_y,
+                w=req.extender_width,
+                h=req.extender_height,
+                name="extender",
+            )
+            if req.use_extender and max_pixels is not None:
+                # extender 会在原图外补画布（model/base.py:_do_outpainting），
+                # 面积不受图片解码上限约束；按同一个 max_pixels 兜底，
+                # 内网（max_pixels=None）仍按设计不限制。
+                padding_l = max(0, -req.extender_x)
+                padding_t = max(0, -req.extender_y)
+                padding_r = max(
+                    0, req.extender_x + req.extender_width - image.shape[1]
+                )
+                padding_b = max(
+                    0, req.extender_y + req.extender_height - image.shape[0]
+                )
+                canvas_w = image.shape[1] + padding_l + padding_r
+                canvas_h = image.shape[0] + padding_t + padding_b
+                if canvas_w * canvas_h > max_pixels:
+                    raise HTTPException(
+                        413,
+                        detail=(
+                            f"extender canvas ({canvas_w}x{canvas_h}) exceeds "
+                            f"limit of {max_pixels} pixels"
+                        ),
+                    )
             if cv2.countNonZero(mask) == 0:
                 # 空掩膜 = 无操作。不跑推理，也不新增 revision。
                 logger.info("empty mask: skip inference")
