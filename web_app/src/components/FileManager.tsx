@@ -67,10 +67,13 @@ export default function FileManager(props: Props) {
   const { onPhotoClick, photoWidth } = props
   const [open, toggleOpen] = useToggle(false)
 
-  const [fileManagerState, updateFileManagerState] = useStore((state) => [
-    state.fileManagerState,
-    state.updateFileManagerState,
-  ])
+  const [fileManagerState, updateFileManagerState, updateAppState] = useStore(
+    (state) => [
+      state.fileManagerState,
+      state.updateFileManagerState,
+      state.updateAppState,
+    ]
+  )
 
   const { toast } = useToast()
   const { t } = useTranslation()
@@ -225,8 +228,17 @@ export default function FileManager(props: Props) {
     setScrollTop(event.currentTarget.scrollTop)
   }
 
+  // 搜索框 focus 会把 disableShortCuts 置 true，但关闭对话框时输入框直接卸载，
+  // 收不到 blur，全局快捷键会一直停在禁用状态。关闭时统一兜底复位。
+  const onOpenChange = (nextOpen: boolean) => {
+    toggleOpen(nextOpen)
+    if (!nextOpen) {
+      updateAppState({ disableShortCuts: false })
+    }
+  }
+
   const onClick = ({ index }: { index: number }) => {
-    toggleOpen()
+    onOpenChange(false)
     setPhotoIndex(index)
     onPhotoClick(tab, photos[index].name)
   }
@@ -264,7 +276,7 @@ export default function FileManager(props: Props) {
   }
 
   return (
-    <Dialog open={open} onOpenChange={toggleOpen}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogTrigger asChild>
         <IconButton tooltip={t("fileManager.fileManager")}>
           <FolderClosed />

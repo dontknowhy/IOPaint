@@ -14,7 +14,9 @@
   GPU-backed canvas loses its bitmap when Chromium's GPU process crashes, which reaches the backend as an empty mask.
   Backend `gen_frontend_mask` mirrors the `ffcc00bb` brush color.
 - Shared hooks: `useDragResize`, `useImage`, `useInputImage`, `useHotkey`, `useResolution` (viewport breakpoints, not
-  model resolution).
+  model resolution). `useHotkey` disables every shortcut while `appState.disableShortCuts` is true, and `ui/input.tsx`
+  only clears it on `blur` — so any path that unmounts or hides a focused input (the FileManager search box) or moves
+  focus without a blur (the canvas mousedown, which TransformWrapper `preventDefault`s) must reset the flag itself.
 - The display canvas is capped by `IMAGE_CANVAS_MAX_PIXELS` (16Mi), so `ctx.setTransform` maps image coordinates onto a
   smaller bitmap that CSS stretches back to the original size. Take the transform from `fitCanvasBitmap` (`lib/utils.ts`),
   never from a single uniform scale: when the bitmap size rounds up but the drawn rect stays `width*scale`, the last row

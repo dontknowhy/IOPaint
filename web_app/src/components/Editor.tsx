@@ -936,6 +936,20 @@ export default function Editor(props: EditorProps) {
   }
 
   const onMouseDown = (ev: SyntheticEvent) => {
+    // 输入框/文本域 onFocus 会把 disableShortCuts 置 true，只有 blur 才复位。
+    // 画布上的 mousedown 被 TransformWrapper 的平移处理 preventDefault 掉，
+    // 浏览器不会自动让输入框失焦 —— 于是点过 NumberInput 再画一笔之后，
+    // 所有全局快捷键都停在禁用状态。这里显式 blur 一次；画布自身及其内部
+    // 控件不处理。
+    const target = ev.target as HTMLElement | null
+    const activeElement = document.activeElement as HTMLElement | null
+    if (
+      activeElement &&
+      activeElement !== target &&
+      !target?.contains(activeElement)
+    ) {
+      activeElement.blur()
+    }
     if (isProcessing) {
       return
     }

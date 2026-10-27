@@ -522,7 +522,13 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           maskImages = extraMasks
         }
 
-        if (maskLineGroup.length === 0 && !settings.showExtender) {
+        // extraMasks（交互分割 / 插件 / 调整掩膜）走 PNG 分支，笔迹可能为空：
+        // 只按 maskLineGroup 判断会把这类掩膜误判成「还没画」。
+        if (
+          maskLineGroup.length === 0 &&
+          maskImages.length === 0 &&
+          !settings.showExtender
+        ) {
           toast({
             variant: "destructive",
             description: i18n.t("states.pleaseDrawMask"),

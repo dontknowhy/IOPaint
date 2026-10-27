@@ -408,6 +408,75 @@ class TestBrushSizeHotkeys:
         assert after_dec < after_inc, f"'[' 没有减小笔刷: {after_inc} -> {after_dec}"
 
 
+class TestGlobalHotkeyLatches:
+    """输入框 onFocus 把 disableShortCuts 置 true，只有 blur 才复位。
+    两条路径都曾让这个标志停在 true，之后所有全局快捷键静默失效。"""
+
+    def test_canvas_click_after_number_input_keeps_hotkeys(
+        self, page: Page, tmp_path: Path
+    ) -> None:
+        _upload_image(page, tmp_path)
+        slider = page.locator('[role="slider"][aria-valuemax="200"]')
+        expect(slider).to_be_visible(timeout=3000)
+
+        radius = page.locator("#cv2-radius")
+        radius.click()
+        expect(radius).to_be_focused()
+        _wait_interactive(page)
+
+        # 画布上的 mousedown 被 TransformWrapper 的平移处理 preventDefault 掉，
+        # 浏览器不会自动让输入框失焦，焦点会留在 NumberInput 上。
+        _draw_stroke(page)
+        expect(radius).not_to_be_focused()
+
+        before = int(slider.get_attribute("aria-valuenow") or 0)
+        page.keyboard.press("]")
+        expect(slider).not_to_have_attribute(
+            "aria-valuenow", str(before), timeout=3000
+        )
+
+    def test_file_manager_escape_restores_hotkeys(
+        self, browser_instance: Browser, iopaint_server: str, tmp_path: Path
+    ) -> None:
+        ctx = _new_context(browser_instance, viewport={"width": 1280, "height": 720})
+        pg = ctx.new_page()
+
+        def enable_file_manager(route: Any) -> None:
+            data = route.fetch().json()
+            data["enableFileManager"] = True
+            route.fulfill(json=data)
+
+        # 共享的 iopaint_server 没带 --enable-file-manager；这里只改前端拿到的
+        # server-config，再让媒体列表返回空，避免打到未注册的后端路由。
+        pg.route("**/server-config", enable_file_manager)
+        pg.route("**/api/v1/medias*", lambda route: route.fulfill(json=[]))
+        pg.goto(iopaint_server, wait_until="load", timeout=30000)
+        pg.wait_for_timeout(2000)
+        _upload_image(pg, tmp_path)
+
+        slider = pg.locator('[role="slider"][aria-valuemax="200"]')
+        expect(slider).to_be_visible(timeout=3000)
+
+        pg.locator("button:has(svg.lucide-folder-closed)").click()
+        search = pg.get_by_placeholder("Search by file name")
+        expect(search).to_be_visible(timeout=5000)
+        search.click()
+        expect(search).to_be_focused()
+
+        # 输入框随对话框关闭一起卸载，不会再收到 blur
+        pg.keyboard.press("Escape")
+        expect(search).to_be_hidden(timeout=3000)
+        _wait_interactive(pg)
+
+        before = int(slider.get_attribute("aria-valuenow") or 0)
+        pg.keyboard.press("]")
+        expect(slider).not_to_have_attribute(
+            "aria-valuenow", str(before), timeout=3000
+        )
+
+        ctx.close()
+
+
 class TestInpaintRoundTrip:
     """cv2 真后端整链路：画一笔 → /inpaint 200 → 渲染进 renders →
     Save 解禁；Ctrl+Z 撤掉渲染（renders 弹栈）、Ctrl+Shift+Z 恢复。"""
