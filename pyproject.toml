@@ -8,6 +8,35 @@ build-backend = "setuptools.build_meta"
 [tool.mypy]
 plugins = ["pydantic.mypy"]
 
+# 上游快照只做命名空间改写和极少量适配（basicsr/facexlib/gfpgan/SAM/SAM2、HF 的
+# anytext/power_paint/brushnet、briarmbg2），让它们满足 --disallow-untyped-defs 等于改上游源码：
+# 全树 3777 条 mypy 报错里 1087 条只是这些文件的 no-untyped-def。它们又确实会被本地修改，
+# 而 check_types 把改动行当新增行——实测给 build_sam.py 的 build_sam_vit_b 加一个参数就产生
+# 1 条 no-untyped-def 新增行报错。因此按包 ignore_errors；项目自身代码仍走同一套严格 flag。
+# 不能用 exclude 替代：[tool.mypy] exclude 只作用于目录发现，check_types 显式传文件路径时
+# 仍会报错（实测 exclude 该目录后同一改动仍是 2 条新增行报错）。
+[[tool.mypy.overrides]]
+module = [
+    "iopaint.plugins.basicsr",
+    "iopaint.plugins.basicsr.*",
+    "iopaint.plugins.facexlib",
+    "iopaint.plugins.facexlib.*",
+    "iopaint.plugins.gfpgan",
+    "iopaint.plugins.gfpgan.*",
+    "iopaint.plugins.segment_anything",
+    "iopaint.plugins.segment_anything.*",
+    "iopaint.plugins.segment_anything2",
+    "iopaint.plugins.segment_anything2.*",
+    "iopaint.plugins.briarmbg2",
+    "iopaint.model.anytext",
+    "iopaint.model.anytext.*",
+    "iopaint.model.power_paint",
+    "iopaint.model.power_paint.*",
+    "iopaint.model.brushnet",
+    "iopaint.model.brushnet.*",
+]
+ignore_errors = true
+
 # mutmut（本地变异测试侦察用，非 CI 门禁；见 docs/agents/review-prompts.md）。
 # source_paths 只复制 iopaint 包（测试、pytest.ini 随行），only_mutate 把变异限制在单个文件，
 # -m "not slow" 保证权重/GPU 用例不进基线。only_mutate 必须选"未被装饰器包住的函数所在的

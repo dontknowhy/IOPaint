@@ -28,13 +28,22 @@ remains runtime-only.
 ## Why the whole tree is not checked
 
 The codebase carries substantial pre-existing typing debt: with the gate's own flag set and the pydantic plugin, a
-whole-tree run reports **3777 errors in 182 of 233 files** (`mypy iopaint --disallow-untyped-defs
+whole-tree run reports **1577 errors in 94 of 234 files** (`mypy iopaint --disallow-untyped-defs
 --check-untyped-defs --no-implicit-optional --ignore-missing-imports`), e.g. `iopaint/schema.py` alone ~10 from
-`@property` decorator stacking. Without the plugin the same run reports 6888, because it misreads pydantic
+`@property` decorator stacking. Without the plugin the same run reports 4764, because it misreads pydantic
 constructors such as `InpaintRequest()` as missing arguments. A whole-tree or whole-file gate would still be red on
 day one. The gate's diff anchoring is what keeps it honest instead of vacuous: it only forgives errors on lines the
-diff did not touch (a single-file run prints the rest as "pre-existing errors on unchanged lines (ignored)" — 2222
+diff did not touch (a single-file run prints the rest as "pre-existing errors on unchanged lines (ignored)" — 713
 for `test_runtime_gaps.py`).
+
+Upstream snapshots (`iopaint/plugins/{basicsr,facexlib,gfpgan,segment_anything,segment_anything2}`,
+`iopaint/plugins/briarmbg2.py`, `iopaint/model/{anytext,power_paint,brushnet}`) are listed under
+`[[tool.mypy.overrides]]` with `ignore_errors = true` in `pyproject.toml`. They are maintained only by namespace
+rewrites and small adaptations, and typing them would mean editing vendored upstream code — they accounted for 2199
+of the 3777 pre-override errors, and a one-parameter tweak to `plugins/segment_anything/build_sam.py` was enough to
+fail the gate on an added line. `exclude` is not a substitute: it only affects directory discovery, and
+`check_types.py` passes changed files explicitly, so an excluded file still reports errors (measured: 2 added-line
+errors with `exclude`, 0 with the override). Project code keeps the full flag set.
 
 ## What exists now
 
