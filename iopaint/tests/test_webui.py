@@ -648,21 +648,18 @@ class TestGlobalHotkeyLatches:
         )
 
     def test_file_manager_escape_restores_hotkeys(
-        self, browser_instance: Browser, iopaint_server: str, tmp_path: Path
+        self, browser_instance: Browser, iopaint_file_manager_server: str, tmp_path: Path
     ) -> None:
         ctx = _new_context(browser_instance, viewport={"width": 1280, "height": 720})
         pg = ctx.new_page()
 
-        def enable_file_manager(route: Any) -> None:
-            data = route.fetch().json()
-            data["enableFileManager"] = True
-            route.fulfill(json=data)
-
-        # 共享的 iopaint_server 没带 --enable-file-manager；这里只改前端拿到的
-        # server-config，再让媒体列表返回空，避免打到未注册的后端路由。
-        pg.route("**/server-config", enable_file_manager)
-        pg.route("**/api/v1/medias*", lambda route: route.fulfill(json=[]))
-        pg.goto(iopaint_server, wait_until="load", timeout=30000)
+        # 这台服务带 --input 目录，FileManager 由后端真实注册：server-config 的
+        # enableFileManager 是后端算出来的，媒体列表也真的打到 /api/v1/medias
+        # （Header 一挂载就拉列表，所以期望挂在 goto 上而不是点击上）。
+        with pg.expect_response("**/api/v1/medias*", timeout=15000) as medias:
+            pg.goto(iopaint_file_manager_server, wait_until="load", timeout=30000)
+        assert medias.value.status == 200, f"medias 返回 {medias.value.status}"
+        assert medias.value.json() == []
         pg.wait_for_timeout(2000)
         _upload_image(pg, tmp_path)
 
