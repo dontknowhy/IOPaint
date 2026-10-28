@@ -298,6 +298,7 @@ def api_middleware(app: FastAPI):
             "X-Internal-Format",
             "X-Image-Width",
             "X-Image-Height",
+            "X-Image-Preview",
         ],
     }
     app.add_middleware(CORSMiddleware, **cors_options)
@@ -523,6 +524,7 @@ class Api:
             internal_format,
             image_width,
             image_height,
+            is_preview,
         ) = await loop.run_in_executor(
             None, self._inpaint_blocking, req, _max_pixels_for_request(request)
         )
@@ -538,6 +540,10 @@ class Api:
             headers["X-Revision"] = revision
         if internal_format:
             headers["X-Internal-Format"] = internal_format
+        if is_preview:
+            # 响应字节是有损缩放的显示预览，canonical 像素只存在于 revision；
+            # 客户端据此拒绝把这份字节当源图重传（否则会永久降分辨率）。
+            headers["X-Image-Preview"] = "1"
         return Response(
             content=res_img_bytes,
             media_type=f"image/{ext}",
@@ -763,6 +769,7 @@ class Api:
             internal_format,
             image_width,
             image_height,
+            preview is not None,
         )
 
     def api_export(self, req: ExportRequest, request: Request) -> Response:

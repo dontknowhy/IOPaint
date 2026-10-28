@@ -188,6 +188,7 @@
     "close": "Close"
   },
   "states": {
+    "editSessionExpired": "This edit session has expired (the server cleared its cache). Reopen the image to continue.",
     "pleaseDrawMask": "Please draw mask on picture",
     "runPluginSuccess": "Run {{plugin}} successfully in {{time}}s"
   }

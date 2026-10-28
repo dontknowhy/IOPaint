@@ -61,6 +61,14 @@ export function getRenderRevision(src: string | undefined | null) {
   return _renderRevisions.get(src) ?? null
 }
 
+/**
+ * revision 失效且本地只剩有损显示预览：此时重传 preview 字节会被服务端
+ * 当成新源图，永久丢掉原分辨率，所以回退分支只能报错让用户重开图片。
+ */
+export function editSessionExpiredError() {
+  return new Error(i18n.t("states.editSessionExpired"))
+}
+
 function forgetRenderRevision(src: string | undefined | null) {
   if (src) {
     _renderRevisions.delete(src)
@@ -459,9 +467,12 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           if (revision) {
             // 插件/交互分割要处理 canonical 像素，不能拿 /inpaint 的显示预览
             //（有损、可能已缩到 16Mi）当输入。
-            const { blob, mimeType } = await exportImage(revision, () =>
-              srcToFile(lastRender.src, file.name, file.type)
-            )
+            const { blob, mimeType } = await exportImage(revision, () => {
+              if (lastRender.preview) {
+                throw editSessionExpiredError()
+              }
+              return srcToFile(lastRender.src, file.name, file.type)
+            })
             targetFile = new File([blob], file.name, { type: mimeType })
           } else {
             targetFile = await srcToFile(lastRender.src, file.name, file.type)
@@ -619,8 +630,12 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
               res = await request(revision ? null : targetFile, revision)
             } catch (e) {
               // revision 失效（逐出/重启/切图）→ 回传当前 render 字节重试。
-              // 这是唯一允许的回退分支，首次导入也走这里。
+              // 这是唯一允许的回退分支，首次导入也走这里；本地只剩有损预览时
+              // 重传会把预览当新源图（永久降分辨率），只能报错。
               if (revision && httpStatus(e) === 410) {
+                if (targetRender?.preview) {
+                  throw editSessionExpiredError()
+                }
                 const fallback = targetRender
                   ? await srcToFile(targetRender.src, file.name, file.type)
                   : file
@@ -652,6 +667,7 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
               blob,
               width && height ? { width, height } : null
             )
+            newRender.preview = res.preview === true
             // 若期间用户切换了图片，丢弃过期结果，避免污染新图片的编辑器状态
             // （否则会出现新图片上显示旧图渲染结果 / 画布尺寸错乱等"画笔消失"现象）
             if (get().file !== file) {

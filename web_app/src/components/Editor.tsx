@@ -40,7 +40,11 @@ import { useTranslation } from "react-i18next"
 import { useDisplayImage } from "@/hooks/useImage"
 import { Slider } from "./ui/slider"
 import { DisplayImage, Line, PluginName, Point } from "@/lib/types"
-import { getRenderRevision, useStore } from "@/lib/states"
+import {
+  editSessionExpiredError,
+  getRenderRevision,
+  useStore,
+} from "@/lib/states"
 import Cropper from "./Cropper"
 import { InteractiveSegPoints } from "./InteractiveSeg"
 import useHotKey from "@/hooks/useHotkey"
@@ -1133,11 +1137,15 @@ export default function Editor(props: EditorProps) {
       return
     }
     // 导出走 /export 的唯一编码出口。revision 可用时直接用服务端
-    // canonical 像素（掩膜外零重压缩），失效才回传 render 字节。
+    // canonical 像素（掩膜外零重压缩），失效才回传 render 字节；本地只有
+    // 有损显示预览时报错，避免把降分辨率的图静默存盘。
     const exportRender = (render: DisplayImage) =>
-      exportImage(getRenderRevision(render.src), () =>
-        srcToFile(render.src, file.name, file.type)
-      )
+      exportImage(getRenderRevision(render.src), () => {
+        if (render.preview) {
+          throw editSessionExpiredError()
+        }
+        return srcToFile(render.src, file.name, file.type)
+      })
 
     if (enableAutoSaving && renders.length > 0) {
       try {

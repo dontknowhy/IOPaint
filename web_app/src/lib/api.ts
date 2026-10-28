@@ -98,6 +98,8 @@ export interface InpaintResponse {
   /** 逻辑尺寸（crop/extender 之后的全分辨率），预览响应里是必填。 */
   width?: number
   height?: number
+  /** 响应字节是显示预览（`X-Image-Preview: 1`），canonical 像素只在 revision 里。 */
+  preview: boolean
 }
 
 function headerInt(value: unknown): number | undefined {
@@ -185,6 +187,7 @@ export default async function inpaint(
     revision: res.headers["x-revision"] as string | undefined,
     width: headerInt(res.headers["x-image-width"]),
     height: headerInt(res.headers["x-image-height"]),
+    preview: res.headers["x-image-preview"] === "1",
   }
 }
 

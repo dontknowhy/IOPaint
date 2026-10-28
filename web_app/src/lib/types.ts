@@ -129,6 +129,8 @@ export interface DisplayImage {
   height: number
   logicalWidth: number
   logicalHeight: number
+  /** 响应字节是有损、缩小的显示预览；canonical 像素只存在于 revision。 */
+  preview?: boolean
 }
 
 export interface Size {

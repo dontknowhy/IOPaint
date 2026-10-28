@@ -177,6 +177,7 @@ def test_inpaint_accepts_strokes_without_mask(tmp_path: Path) -> None:
     assert resp.status_code == 200, resp.text
     assert resp.headers["X-Image-Width"] == "64"
     assert resp.headers["X-Image-Height"] == "64"
+    assert "X-Image-Preview" not in resp.headers
     assert resp.headers["X-Revision"]
     _decode(resp.content)
 
@@ -196,6 +197,7 @@ def test_inpaint_large_image_returns_display_preview(tmp_path: Path) -> None:
     assert resp.headers["content-type"].startswith("image/jpeg")
     assert resp.headers["X-Image-Width"] == "4200"
     assert resp.headers["X-Image-Height"] == "4200"
+    assert resp.headers["X-Image-Preview"] == "1"
     image = _decode(resp.content)
     assert image.size[0] * image.size[1] <= PREVIEW_MAX_PIXELS
 

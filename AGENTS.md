@@ -149,8 +149,10 @@ belongs on a local GPU box.
 - Interactive masks travel as `mask_strokes` (image-coordinate polylines, rasterized by
   `helper.rasterize_mask_strokes` with `LINE_8` + round caps); `mask` stays as the fallback for extraMasks and old
   clients. When a canonical revision exists and the result exceeds 16Mi pixels, `/inpaint` answers with a ≤16Mi JPEG
-  display preview and the logical size in `X-Image-Width`/`X-Image-Height` (both CORS-exposed); `/export`, later edits
-  and plugin/interactive-seg inputs still read canonical pixels, never the preview bytes.
+  display preview plus `X-Image-Preview: 1` and the logical size in `X-Image-Width`/`X-Image-Height` (all CORS-exposed);
+  `/export`, later edits and plugin/interactive-seg inputs still read canonical pixels, never the preview bytes. A render
+  whose bytes are a preview is marked `DisplayImage.preview`, and every fallback that would re-upload render bytes (the
+  410 retry, export, plugin input) refuses it with `states.editSessionExpired` instead of creating a downgraded revision.
 
 ## Frontend notes
 

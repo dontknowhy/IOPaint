@@ -188,6 +188,7 @@
     "close": "关闭"
   },
   "states": {
+    "editSessionExpired": "编辑会话已过期（服务端缓存已被清理），请重新打开图片后继续。",
     "pleaseDrawMask": "请在图片上画出掩膜",
     "runPluginSuccess": "{{plugin}} 运行成功，用时 {{time}} 秒"
   }
