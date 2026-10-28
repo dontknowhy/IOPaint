@@ -111,11 +111,13 @@ def _inpaint(
     image_b64: Optional[str] = None,
     revision: Optional[str] = None,
     mask: Optional[str] = None,
+    **extra: Any,
 ) -> Any:
     body: dict[str, Any] = {
         "mask": mask,
         "hd_strategy": "Original",
         "cv2_radius": 3,
+        **extra,
     }
     if image_b64 is not None:
         body["image"] = image_b64
@@ -494,3 +496,57 @@ def test_export_force_jpeg_flattens_alpha_onto_white(tmp_path: Path) -> None:
     assert img.mode == "RGB"
     # 全透明区域垫白底，q100 下应接近 255
     assert np.asarray(img).mean() > 250
+
+
+@pytest.mark.parametrize("cache_kwargs", [{}, {"revision_cache_mb": 0}])
+def test_extender_does_not_stretch_alpha(
+    tmp_path: Path, cache_kwargs: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """extender 改画布后，旧 alpha 必须按几何重建而不是 resize 拉伸。
+
+    cv2 模型本身不实现 extender（只有 DiffusionInpaintModel 会改画布），
+    这里用 fake model_manager 复刻 model/base.py:_do_outpainting 的输出：
+    旧图贴在左扩 4 列之后、BGR 返回。
+    """
+    alpha = np.tile(np.arange(8, dtype=np.uint8) * 32, (8, 1))
+    rgba = np.zeros((8, 8, 4), dtype=np.uint8)
+    rgba[:, :, :3] = 120
+    rgba[:, :, 3] = alpha
+    buf = io.BytesIO()
+    Image.fromarray(rgba).save(buf, format="PNG")
+    source = buf.getvalue()
+
+    api, client = _client(tmp_path, **cache_kwargs)
+
+    def fake_manager(image: np.ndarray, mask: np.ndarray, config: Any) -> np.ndarray:
+        assert config.use_extender
+        out = np.zeros((8, 12, 3), dtype=np.uint8)
+        out[:, 4:] = image[:, :, ::-1]
+        return out
+
+    monkeypatch.setattr(api, "model_manager", fake_manager)
+    resp = _inpaint(
+        client,
+        image_b64=_b64(source, "image/png"),
+        mask=_mask_b64(rgba.shape, (4, 0, 8, 8)),
+        use_extender=True,
+        extender_x=-4,
+        extender_y=0,
+        extender_width=12,
+        extender_height=8,
+    )
+    assert resp.status_code == 200, resp.text
+    out = Image.open(io.BytesIO(resp.content))
+    assert out.mode == "RGBA"
+    out_alpha = np.array(out)[:, :, 3]
+    # 新画布左侧补出来的 4 列视为不透明
+    assert (out_alpha[:, :4] == 255).all()
+    # 旧图区域逐像素保留源 alpha（resize 拉伸会让边缘列不等于源列）
+    assert np.array_equal(out_alpha[:, 4:], alpha)
+
+    revision = resp.headers.get("X-Revision")
+    if revision:
+        exported = _export(client, revision=revision, format="png")
+        assert exported.status_code == 200
+        exported_alpha = np.array(Image.open(io.BytesIO(exported.content)))[:, :, 3]
+        assert np.array_equal(exported_alpha, out_alpha)

@@ -766,8 +766,32 @@ class Api:
                 result_rgb = cv2.cvtColor(rgb_np_img, cv2.COLOR_BGR2RGB)
 
             revision = None
+            if alpha_channel is not None and result_rgb.shape[:2] != image.shape[:2]:
+                if req.use_extender:
+                    # extender 把旧图贴在 (padding_l, padding_t)（见
+                    # model/base.py:_do_outpainting）；旧 alpha 与新画布尺寸不同，
+                    # 不能 resize。按几何重建，新补出的区域视为不透明。
+                    old_h, old_w = alpha_channel.shape[:2]
+                    padding_l = max(0, -req.extender_x)
+                    padding_t = max(0, -req.extender_y)
+                    new_alpha = np.full(
+                        (result_rgb.shape[0], result_rgb.shape[1]),
+                        255,
+                        dtype=alpha_channel.dtype,
+                    )
+                    new_alpha[
+                        padding_t : padding_t + old_h,
+                        padding_l : padding_l + old_w,
+                    ] = alpha_channel
+                    alpha_channel = new_alpha
+                else:
+                    # 只有 extender 会改画布；其他路径出现尺寸变化就别猜 alpha，
+                    # 宁可导出成不透明，也不要把旧 alpha resize 到新尺寸。
+                    alpha_channel = None
             if lease is not None:
-                revision = lease.commit(result_rgb)
+                revision = lease.commit(result_rgb, alpha=alpha_channel)
+                # commit 后条目里的 alpha 才是 canonical，刷新本地副本
+                alpha_channel = lease.alpha
                 lease.release()
                 lease = None
         finally:

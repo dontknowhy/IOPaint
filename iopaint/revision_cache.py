@@ -174,10 +174,15 @@ class Lease:
         self,
         result_rgb: np.ndarray,
         *,
+        alpha: Optional[np.ndarray] = None,
         keep_unmasked_area: bool = True,
     ) -> Optional[str]:
-        """提交一轮结果，返回新 revision。未采纳缓存时返回 None。"""
-        rev = self.cache._commit(self.entry, result_rgb)
+        """提交一轮结果，返回新 revision。未采纳缓存时返回 None。
+
+        ``alpha`` 只在画布尺寸变化（outpainting）时生效；同尺寸路径沿用条目里
+        已有的 alpha，避免调用方每次都要传。
+        """
+        rev = self.cache._commit(self.entry, result_rgb, alpha=alpha)
         self._committed = True
         return rev
 
@@ -282,7 +287,16 @@ class RevisionCache:
         entry.lock.acquire()
         # 回退到请求的 generation（分支语义）。单条目模式只能是最新。
         if gen != entry.generation:
-            if not self._rewind_locked(entry, gen):
+            try:
+                rewound = self._rewind_locked(entry, gen)
+            except BaseException:
+                # 补丁材质化失败（zstd 损坏 / MemoryError）是数据损坏，要原样
+                # 抛出（500），但必须先把租约还回去：否则该 revision 永久阻塞。
+                entry.lock.release()
+                with self._lock:
+                    entry.pins -= 1
+                raise
+            if not rewound:
                 entry.lock.release()
                 with self._lock:
                     entry.pins -= 1
@@ -303,12 +317,20 @@ class RevisionCache:
     def begin_by_hash(self, digest: str) -> Optional[Lease]:
         return self._begin(digest, by_hash=True)
 
-    def begin_entry(self, entry: _Entry) -> Lease:
-        """为刚 create() 的条目取租约（首轮导入路径）。"""
+    def begin_entry(self, entry: _Entry) -> Optional[Lease]:
+        """为刚 create() 的条目取租约（首轮导入路径）。
+
+        create() 返回后到这个调用之间，另一线程的 create/_commit 可能已经把这条
+        （pins 为 0 的）entry 逐出。此时返回 None，让调用方走单轮无 revision
+        路径，而不是对已逐出的 entry 调 OrderedDict.move_to_end（KeyError → 500）。
+        """
         with self._lock:
+            key = str(id(entry))
+            if self._entries.get(key) is not entry:
+                return None
             entry.pins += 1
             entry.last_used = time.monotonic()
-            self._entries.move_to_end(str(id(entry)))
+            self._entries.move_to_end(key)
         entry.lock.acquire()
         return Lease(self, entry)
 
@@ -324,9 +346,14 @@ class RevisionCache:
             return False
         # steps 覆盖 (floor, generation]；按 generation 倒序贴回 before
         while entry.steps and entry.steps[-1].generation > generation:
-            step = entry.steps.pop()
+            step = entry.steps[-1]
             x1, y1, x2, y2 = step.box
             entry.image[y1:y2, x1:x2] = step.materialize()
+            entry.steps.pop()
+            # 弹掉的补丁不再占用预算（与 _trim_locked 的扣减口径一致），
+            # 否则反复分支/回退会让 _bytes 虚高，提前逐出。
+            with self._lock:
+                self._bytes -= step.nbytes
         entry.generation = generation
         # 失效的 revision 清掉
         for rev, gen in list(entry.revisions.items()):
@@ -438,13 +465,21 @@ class RevisionCache:
             )
         return _Step(generation=generation, box=box, before=patch)
 
-    def _commit(self, entry: _Entry, result_rgb: np.ndarray) -> Optional[str]:
+    def _commit(
+        self,
+        entry: _Entry,
+        result_rgb: np.ndarray,
+        *,
+        alpha: Optional[np.ndarray] = None,
+    ) -> Optional[str]:
         with entry.lock:
             old_cost = entry.nbytes
             if result_rgb.shape[:2] != entry.image.shape[:2]:
                 # 裁剪/扩展（outpainting）改变了画布：整帧成为新 keyframe。
                 entry.image = np.ascontiguousarray(result_rgb)
-                entry.alpha = None
+                # 旧 alpha 与新画布不同尺寸，绝不能 resize；调用方按 extender
+                # 几何重建后传进来，重建不了就是 None（导出保持不透明）。
+                entry.alpha = alpha
                 entry.steps.clear()
                 entry.generation += 1
                 entry.floor = entry.generation
@@ -495,12 +530,14 @@ class RevisionCache:
             entry.revisions[rev] = entry.generation
             entry.last_used = time.monotonic()
 
-        # LRU 记账（在 entry.lock 之外拿全局锁，避免与逐出死锁）
-        with self._lock:
-            self._bytes += entry.nbytes - old_cost
-            self._revisions[rev] = entry
-            self._entries.move_to_end(str(id(entry)))
-            self._trim_locked(exclude=entry)
+            # LRU 记账与收缩都在 entry.lock 内完成：_trim_locked 会 pop
+            # exclude.steps，而 snapshot 在 entry.lock 内迭代 steps，两者必须
+            # 互斥。锁序始终是 entry.lock → self._lock（反向没有获取点）。
+            with self._lock:
+                self._bytes += entry.nbytes - old_cost
+                self._revisions[rev] = entry
+                self._entries.move_to_end(str(id(entry)))
+                self._trim_locked(exclude=entry)
         return rev
 
     # ------------------------------------------------------------------
@@ -583,6 +620,8 @@ class RevisionCache:
         return True
 
     def _trim_locked(self, exclude: Optional[_Entry] = None) -> None:
+        # 调用方必须持有 exclude.lock：下面会 pop exclude.steps，而
+        # snapshot 在 entry.lock 内按 steps 回退像素。持 self._lock 调用。
         while self._bytes > self.max_bytes and self._entries:
             evicted = False
             for key, entry in list(self._entries.items()):

@@ -1,5 +1,5 @@
 """Revision cache：命中、回退、逐出、admission 与补丁位精确。"""
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import numpy as np
 import pytest
@@ -254,3 +254,126 @@ def test_alias_keeps_generation_of_response_bytes() -> None:
     lease.release()
     # 从旧 hash 进入 = 分支到那一轮的 generation，更新的 revision 失效
     assert cache.begin_by_revision(r2) is None
+
+
+def test_shape_change_commit_stores_rebuilt_alpha_and_accounts_bytes() -> None:
+    """画布变化时 alpha 只能由调用方重建后传入，不能再被 resize 或丢弃。"""
+    cache = RevisionCache(max_bytes=10 * 1024 * 1024)
+    base = _frame(0, (8, 8))
+    alpha = np.tile(np.arange(8, dtype=np.uint8), (8, 1))
+    entry = cache.create(base.copy(), alpha, "png", {}, None, None)
+    assert entry is not None
+    lease = cache.begin_entry(entry)
+    assert lease is not None
+    new_alpha = np.full((8, 12), 255, dtype=np.uint8)
+    rev = lease.commit(_frame(9, (8, 12)), alpha=new_alpha)
+    lease.release()
+    assert rev is not None
+    snap = cache.snapshot(rev)
+    assert snap is not None
+    assert snap[1] is not None
+    assert np.array_equal(snap[1], new_alpha)
+    # alpha 的字节数也计入预算：_bytes 必须与条目实际占用一致
+    assert cache.total_bytes == entry.nbytes
+
+
+def test_rewind_refunds_popped_step_bytes() -> None:
+    """回退弹掉的撤销补丁必须从 _bytes 里扣掉，否则反复分支会虚高预算。"""
+    frame = _frame(0, (32, 32))
+    cache = RevisionCache(max_bytes=7000)
+    entry = cache.create(frame.copy(), None, "png", {}, None, None)
+    assert entry is not None
+    rev0 = next(rev for rev, gen in entry.revisions.items() if gen == 0)
+    assert cache.total_bytes == entry.nbytes
+    for _ in range(5):
+        lease = cache.begin_entry(entry)
+        assert lease is not None
+        r1 = lease.commit(_edit(lease.image, (0, 0, 8, 8), 50))
+        lease.release()
+        assert r1 is not None
+        lease = cache.begin_by_revision(r1)
+        assert lease is not None
+        r2 = lease.commit(_edit(lease.image, (8, 8, 16, 16), 100))
+        lease.release()
+        assert r2 is not None
+        assert cache.total_bytes == sum(e.nbytes for e in cache._entries.values())
+        lease = cache.begin_by_revision(rev0)
+        assert lease is not None
+        lease.release()
+        assert entry.steps == []
+        assert cache.total_bytes == entry.nbytes
+
+
+def test_begin_entry_on_evicted_entry_returns_none() -> None:
+    """create() 与 begin_entry() 之间被逐出的条目不能再碰 LRU（KeyError → 500）。"""
+    frame = np.zeros((16, 16, 3), dtype=np.uint8)
+    cache = RevisionCache(max_bytes=800)
+    first = cache.create(frame.copy(), None, "png", {}, None, None)
+    assert first is not None
+    # 小预算：第二次 create 会在 first.pins == 0 时把它逐出
+    second = cache.create(frame.copy(), None, "png", {}, None, None, seed_hash="b")
+    assert second is not None
+    assert cache.begin_entry(first) is None
+    lease = cache.begin_entry(second)
+    assert lease is not None
+    lease.release()
+
+
+def test_commit_holds_entry_lock_while_trimming(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_trim_locked 会 pop exclude.steps，_commit 必须自己持有 entry.lock。
+
+    不能依赖调用方（Lease.commit）恰好持锁——直接调 _commit 的路径同样要安全。
+    """
+    cache = RevisionCache(max_bytes=10 * 1024 * 1024)
+    base = _frame(0)
+    entry = cache.create(base.copy(), None, "png", {}, None, None)
+    assert entry is not None
+    real_trim = RevisionCache._trim_locked
+    owned: list[bool] = []
+
+    def probe(self: RevisionCache, exclude: Any = None) -> None:
+        owned.append(bool(getattr(entry.lock, "_is_owned")()))
+        real_trim(self, exclude=exclude)
+
+    monkeypatch.setattr(RevisionCache, "_trim_locked", probe)
+    assert cache._commit(entry, _edit(base, (0, 0, 8, 8), 100)) is not None
+    assert owned == [True]
+
+
+def test_rewind_failure_releases_lock_and_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """补丁材质化抛异常时必须释放 entry.lock 与 pin，否则该 revision 永久阻塞。"""
+    cache = RevisionCache(max_bytes=10 * 1024 * 1024)
+    base = _frame(0)
+    entry = cache.create(base.copy(), None, "png", {}, None, None)
+    assert entry is not None
+    rev0 = next(rev for rev, gen in entry.revisions.items() if gen == 0)
+    lease = cache.begin_entry(entry)
+    assert lease is not None
+    r1 = lease.commit(_edit(base, (0, 0, 8, 8), 50))
+    lease.release()
+    assert r1 is not None
+    lease = cache.begin_by_revision(r1)
+    assert lease is not None
+    r2 = lease.commit(_edit(lease.image, (8, 0, 16, 8), 100))
+    lease.release()
+    assert r2 is not None
+
+    real_rewind = RevisionCache._rewind_locked
+
+    def boom(self: RevisionCache, entry: Any, generation: int) -> bool:
+        raise RuntimeError("corrupt undo patch")
+
+    monkeypatch.setattr(RevisionCache, "_rewind_locked", boom)
+    with pytest.raises(RuntimeError, match="corrupt"):
+        cache.begin_by_revision(rev0)
+    assert entry.pins == 0
+    assert not getattr(entry.lock, "_is_owned")()
+    # 异常不应影响更早 revision 的正常回退
+    monkeypatch.setattr(RevisionCache, "_rewind_locked", real_rewind)
+    lease = cache.begin_by_revision(r1)
+    assert lease is not None
+    lease.release()

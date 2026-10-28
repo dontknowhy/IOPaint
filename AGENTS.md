@@ -150,7 +150,13 @@ belongs on a local GPU box.
   and `/export` calls may send `revision` instead of image bytes. Keep `X-Revision` in the CORS `expose_headers` or the
   browser cannot read it. Every early `raise` after a lease is taken must stay inside `_inpaint_blocking`'s
   `try/finally` — except the mask-size-mismatch branch, which releases explicitly; a leaked lease leaves `entry.lock`
-  held and `pins` incremented, so later requests for that revision block forever.
+  held and `pins` incremented, so later requests for that revision block forever. `_begin`'s rewind path releases the
+  same lock and pin before re-raising a patch-materialization failure, and `begin_entry` returns None when the entry was
+  evicted between `create` and the call (the request then takes the single-round no-revision path). The cache's lock
+  order is always `entry.lock` then the global `_lock`: `_commit` does its LRU accounting and `_trim_locked` inside its
+  own `entry.lock`, because the latter pops `exclude.steps` while `snapshot` iterates steps under that same lock. An
+  extender that changes the canvas rebuilds alpha from the old `(padding_l, padding_t)` geometry (new area opaque, never
+  resized) and passes it through `commit(alpha=...)`, so later `/export` keeps the source alpha.
 - Interactive masks travel as `mask_strokes` (image-coordinate polylines, rasterized by
   `helper.rasterize_mask_strokes` with `LINE_8` + round caps); `mask` stays as the fallback for extraMasks and old
   clients. When a canonical revision exists and the result exceeds 16Mi pixels, `/inpaint` answers with a ≤16Mi JPEG
