@@ -104,6 +104,94 @@ def _wait_interactive(page_obj):
     )
 
 
+def _wait_image_loaded(page_obj: Any) -> None:
+    """等原图真正解码并画到第一块 canvas 上（isOriginalLoaded 之后才允许落笔）。"""
+    page_obj.wait_for_function(
+        """() => {
+            const canvas = document.querySelectorAll('canvas')[0];
+            if (!canvas || !canvas.width || !canvas.height) return false;
+            const ctx = canvas.getContext('2d');
+            const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            for (let i = 3; i < data.length; i += 4) {
+                if (data[i] !== 0) return true;
+            }
+            return false;
+        }""",
+        timeout=10000,
+    )
+
+
+def _canvas_pixel_count(page_obj: Any, index: int = 1) -> int:
+    """数一块 canvas 上 alpha 非 0 的像素（index 1 是掩膜画布）。"""
+    return page_obj.evaluate(
+        """(index) => {
+            const canvas = document.querySelectorAll('canvas')[index];
+            if (!canvas) return -1;
+            const ctx = canvas.getContext('2d');
+            const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            let count = 0;
+            for (let i = 3; i < data.length; i += 4) {
+                if (data[i] !== 0) count += 1;
+            }
+            return count;
+        }""",
+        index,
+    )
+
+
+def _wait_mask_cleared(page_obj: Any, timeout: int = 3000) -> None:
+    """等掩膜画布清空（成功入图后 curLineGroup 被清掉，只显示它）。"""
+    page_obj.wait_for_function(
+        """() => {
+            const canvas = document.querySelectorAll('canvas')[1];
+            if (!canvas) return false;
+            const ctx = canvas.getContext('2d');
+            const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            for (let i = 3; i < data.length; i += 4) {
+                if (data[i] !== 0) return false;
+            }
+            return true;
+        }""",
+        timeout=timeout,
+    )
+
+
+def _dispatch_touch(
+    page_obj: Any, event_type: str, points: Any, changed: Any
+) -> None:
+    """在掩膜画布上派发原生 TouchEvent（points/changed 为 [id, clientX, clientY]）。
+
+    用 CDP 的 Input.dispatchTouchEvent 没法让 touchend 的坐标离开最后一次
+    touchmove（协议要求 touchEnd 的 touchPoints 为空），所以这里直接构造
+    TouchEvent —— 编辑器监听的是 canvas 上的原生事件，走的是同一条代码路径。
+    """
+    page_obj.evaluate(
+        """([eventType, points, changed]) => {
+            const canvas = document.querySelectorAll('canvas')[1];
+            const makeTouch = ([id, clientX, clientY]) => new Touch({
+                identifier: id,
+                target: canvas,
+                clientX,
+                clientY,
+                pageX: clientX,
+                pageY: clientY,
+                screenX: clientX,
+                screenY: clientY,
+            });
+            const touches = points.map(makeTouch);
+            const changedTouches = changed.map(makeTouch);
+            canvas.dispatchEvent(new TouchEvent(eventType, {
+                touches,
+                targetTouches: touches,
+                changedTouches,
+                bubbles: true,
+                cancelable: true,
+            }));
+        }""",
+        [event_type, points, changed],
+    )
+
+
 # ── Tests ─────────────────────────────────────────────────────────────
 
 class TestPageLoad:
@@ -696,5 +784,172 @@ class TestManualInpainting:
             pg.wait_for_timeout(200)
         pg.unroute("**/inpaint")
         assert captured, "Shift+R 没有触发 /inpaint"
+
+        ctx.close()
+
+
+# ── 第四轮：触屏捏合误绘制 / 画布外松手 ghost 笔画 / touchend 丢点 ──────
+
+def _next_frames(page_obj: Any, count: int = 2) -> None:
+    """等 N 个 rAF：笔迹合帧在 rAF 里落地，比固定 sleep 稳定。"""
+    page_obj.evaluate(
+        """(count) => new Promise((resolve) => {
+            const step = (left) => {
+                if (left <= 0) { resolve(); return; }
+                requestAnimationFrame(() => step(left - 1));
+            };
+            step(count);
+        })""",
+        count,
+    )
+
+
+class TestTouchGesture:
+    """双指捏合不能被当成锚定绘制（扩散模型上一次误 inpaint 很贵）。"""
+
+    def test_fast_pinch_does_not_draw_or_inpaint(
+        self, browser_instance: Any, iopaint_server: Any, tmp_path: Path
+    ) -> None:
+        ctx, pg = _fresh_page(browser_instance, iopaint_server)
+        _upload_image(pg, tmp_path)
+        _wait_image_loaded(pg)
+
+        requests = []
+
+        def capture(route: Any) -> None:
+            requests.append(route.request.post_data_buffer)
+            route.abort()
+
+        pg.route("**/inpaint", capture)
+
+        bb = pg.locator("canvas").first.bounding_box()
+        cx, cy = bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2
+
+        start = [[1, cx - 40, cy], [2, cx + 40, cy]]
+        _dispatch_touch(pg, "touchstart", start, start)
+        # 捏合第一帧常常只有一根手指先动，另一根还没跟上
+        move1 = [[1, cx - 10, cy], [2, cx + 40, cy]]
+        _dispatch_touch(pg, "touchmove", move1, move1)
+        # 第二帧两指一起动 → 明确是缩放手势
+        move2 = [[1, cx + 20, cy], [2, cx + 70, cy]]
+        _dispatch_touch(pg, "touchmove", move2, move2)
+        _dispatch_touch(pg, "touchend", [], move2)
+
+        _next_frames(pg)
+        assert requests == [], "双指捏合误触发了 /inpaint"
+        assert _canvas_pixel_count(pg) == 0, "双指捏合在掩膜上留下了笔画"
+
+        pg.unroute("**/inpaint")
+        ctx.close()
+
+    def test_anchor_finger_drift_cancels_the_stroke(
+        self, browser_instance: Any, iopaint_server: Any, tmp_path: Path
+    ) -> None:
+        ctx, pg = _fresh_page(browser_instance, iopaint_server)
+        _upload_image(pg, tmp_path)
+        _wait_image_loaded(pg)
+
+        requests = []
+
+        def capture(route: Any) -> None:
+            requests.append(route.request.post_data_buffer)
+            route.abort()
+
+        pg.route("**/inpaint", capture)
+
+        bb = pg.locator("canvas").first.bounding_box()
+        cx, cy = bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2
+
+        start = [[1, cx - 40, cy], [2, cx + 40, cy]]
+        _dispatch_touch(pg, "touchstart", start, start)
+        move1 = [[1, cx - 40, cy], [2, cx + 70, cy]]
+        _dispatch_touch(pg, "touchmove", move1, move1)
+        # 锚定绘制需要连续保持 >=120ms（时间戳参数化，真实时钟走一格）
+        pg.wait_for_timeout(150)
+        move2 = [[1, cx - 40, cy], [2, cx + 75, cy]]
+        _dispatch_touch(pg, "touchmove", move2, move2)
+        # 进入 draw 后把“按住”的那根手指也拉开 40px：这是捏合，取消笔画
+        move3 = [[1, cx, cy], [2, cx + 78, cy]]
+        _dispatch_touch(pg, "touchmove", move3, move3)
+        # 抬起正在绘制的那根手指
+        _dispatch_touch(pg, "touchend", [], [move3[1]])
+
+        _next_frames(pg)
+        assert requests == [], "捏合漂移后仍然提交了笔画并触发 /inpaint"
+        assert _canvas_pixel_count(pg) == 0, "取消后的临时笔迹还留在掩膜上"
+
+        pg.unroute("**/inpaint")
+        ctx.close()
+
+
+class TestStrayMouseUp:
+    """在 header/侧栏上松开鼠标也要结束笔画，不能留下一段 ghost 笔画。"""
+
+    def test_mouseup_outside_canvas_ends_the_stroke(
+        self, browser_instance: Any, iopaint_server: Any, tmp_path: Path
+    ) -> None:
+        ctx, pg = _fresh_page(browser_instance, iopaint_server)
+        _upload_image(pg, tmp_path)
+        _wait_image_loaded(pg)
+
+        bb = pg.locator("canvas").first.bounding_box()
+        cx, cy = bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2
+
+        pg.mouse.move(cx - 40, cy)
+        pg.mouse.down()
+        pg.mouse.move(cx, cy, steps=10)
+
+        header = pg.locator("header").bounding_box()
+        pg.mouse.move(header["x"] + 300, header["y"] + header["height"] / 2)
+
+        # 修复前 header 上的 mouseup 结束不了笔画：整个请求都不会发生
+        with pg.expect_response("**/inpaint", timeout=8000):
+            pg.mouse.up()
+        expect(_save_button(pg)).to_be_enabled(timeout=10000)
+
+        # 成功入图后掩膜只显示 curLineGroup（已被清空），画布回到空白
+        _wait_mask_cleared(pg)
+
+        # 回到画布只移动不按键：修复前 strokeRef 还活着，会继续画 ghost 笔迹
+        pg.mouse.move(cx + 60, cy + 40, steps=10)
+        _next_frames(pg)
+        assert _canvas_pixel_count(pg) == 0, "画布外松手后仍画出了 ghost 笔迹"
+
+        ctx.close()
+
+
+class TestTouchEndLastPoint:
+    """touchend 的坐标可能比最后一次 touchmove 更靠前，commit 前要补上。"""
+
+    def test_touchend_commits_the_release_point(
+        self, browser_instance: Any, iopaint_server: Any, tmp_path: Path
+    ) -> None:
+        ctx, pg = _fresh_page(browser_instance, iopaint_server)
+        _upload_image(pg, tmp_path)
+        _wait_image_loaded(pg)
+
+        bb = pg.locator("canvas").first.bounding_box()
+        cx, cy = bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2
+        start = [1, cx - 60, cy]
+        moved = [1, cx, cy]
+        released = [1, cx + 60, cy]
+
+        with pg.expect_request("**/inpaint", timeout=15000) as req_info:
+            _dispatch_touch(pg, "touchstart", [start], [start])
+            _dispatch_touch(pg, "touchmove", [moved], [moved])
+            _dispatch_touch(pg, "touchend", [], [released])
+
+        payload = json.loads(req_info.value.post_data)
+        strokes = payload.get("mask_strokes") or []
+        pts = [pt for stroke in strokes for pt in stroke["pts"]]
+        assert pts, "请求里没有 mask_strokes"
+
+        # touchend 的 clientX 换算成原图坐标（测试图 256x256）
+        expected_x = (released[1] - bb["x"]) / bb["width"] * 256
+        last_x = pts[-1][0]
+        assert abs(last_x - expected_x) < 5, (
+            f"笔画终点停在最后一次 touchmove（x={pts[-1]}），"
+            f"没有补上抬手点 x={expected_x:.1f}"
+        )
 
         ctx.close()

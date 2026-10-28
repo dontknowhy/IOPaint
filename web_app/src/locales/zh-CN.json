@@ -190,6 +190,7 @@
   "states": {
     "editSessionExpired": "编辑会话已过期（服务端缓存已被清理），请重新打开图片后继续。",
     "pleaseDrawMask": "请在图片上画出掩膜",
+    "extenderSameAsImage": "扩展区域与原图相同，请先拖动扩展框",
     "runPluginSuccess": "{{plugin}} 运行成功，用时 {{time}} 秒"
   }
 }

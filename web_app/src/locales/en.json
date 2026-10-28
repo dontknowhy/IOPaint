@@ -190,6 +190,7 @@
   "states": {
     "editSessionExpired": "This edit session has expired (the server cleared its cache). Reopen the image to continue.",
     "pleaseDrawMask": "Please draw mask on picture",
+    "extenderSameAsImage": "The extender area is the same as the image. Drag the extender box out first.",
     "runPluginSuccess": "Run {{plugin}} successfully in {{time}}s"
   }
 }

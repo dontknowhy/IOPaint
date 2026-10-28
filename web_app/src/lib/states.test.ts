@@ -79,6 +79,8 @@ beforeEach(() => {
   inpaintMock.mockReset()
   toastMock.mockReset()
   httpStatusMock.mockReset()
+  createObjectURL.mockClear()
+  revokeObjectURL.mockClear()
   httpStatusMock.mockImplementation(
     (error) => (error as { status?: number } | null)?.status
   )
@@ -192,5 +194,159 @@ describe("runInpainting revision expiry", () => {
 
     expect(inpaintMock).toHaveBeenCalledTimes(2)
     expect(toastMock).not.toHaveBeenCalled()
+  })
+})
+
+// 迟到的响应不能把请求期间发生的 undo 盖回去：请求开始时的 renders/lineGroups
+// 快照已经是过去式，再写回 state 等于静默撤销了用户的撤销。
+describe("runInpainting stale response", () => {
+  it("drops the response when the user undid while it was in flight", async () => {
+    resetStore({
+      extraMasks: [new Image()],
+      renders: [seededRender(false)],
+    })
+    useStore.getState().updateEditorState({
+      lineGroups: [[{ size: 10, pts: [{ x: 1, y: 1 }] }]],
+    })
+
+    let resolveInpaint!: (value: unknown) => void
+    inpaintMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolveInpaint = resolve
+      })
+    )
+
+    const pending = useStore.getState().runInpainting()
+    await vi.waitFor(() => expect(inpaintMock).toHaveBeenCalledTimes(1))
+
+    useStore.getState().undo()
+    expect(useStore.getState().editorState.renders).toHaveLength(0)
+    expect(useStore.getState().editorState.lineGroups).toHaveLength(0)
+
+    resolveInpaint({
+      blob: new Blob(["late"], { type: "image/png" }),
+      revision: "rev-late",
+      width: 64,
+      height: 64,
+    })
+    await pending
+
+    // 修复前这里会变成 1（快照 + 新结果），撤销被重新盖回来
+    expect(useStore.getState().editorState.renders).toHaveLength(0)
+    expect(useStore.getState().editorState.lineGroups).toHaveLength(0)
+    // redo 栈保留用户刚撤销的那一步，没有被 resetRedoState 清掉
+    expect(useStore.getState().editorState.redoRenders).toHaveLength(1)
+    expect(useStore.getState().editorState.redoLineGroups).toHaveLength(1)
+  })
+})
+
+describe("runInpainting extender", () => {
+  it("toasts instead of silently doing nothing when the extender equals the image", async () => {
+    const originalSettings = useStore.getState().settings
+    try {
+      resetStore({ extraMasks: [new Image()] })
+      useStore.getState().updateSettings({
+        showExtender: true,
+        model: {
+          ...originalSettings.model,
+          support_outpainting: true,
+        },
+      })
+      useStore.setState({
+        extenderState: { x: 0, y: 0, width: 64, height: 64 },
+      })
+
+      await useStore.getState().runInpainting()
+
+      expect(inpaintMock).not.toHaveBeenCalled()
+      expect(toastMock).toHaveBeenCalledTimes(1)
+      expect(toastMock.mock.calls[0][0].description).toBe(
+        "The extender area is the same as the image. Drag the extender box out first."
+      )
+    } finally {
+      useStore.setState({ settings: originalSettings })
+    }
+  })
+})
+
+describe("clearMask", () => {
+  it("also clears the last-run mask snapshot so the next Run does not reuse it", async () => {
+    resetStore({})
+    useStore.getState().updateEditorState({
+      lastLineGroup: [{ size: 10, pts: [{ x: 1, y: 1 }] }],
+      prevExtraMasks: [new Image()],
+    })
+
+    useStore.getState().clearMask()
+
+    expect(useStore.getState().editorState.lastLineGroup).toHaveLength(0)
+    expect(useStore.getState().editorState.prevExtraMasks).toHaveLength(0)
+
+    await useStore.getState().runInpainting()
+
+    // 修复前 lastLineGroup 还在，runInpainting 会重跑上一张掩膜
+    expect(inpaintMock).not.toHaveBeenCalled()
+    expect(toastMock.mock.calls[0][0].description).toBe(
+      "Please draw mask on picture"
+    )
+  })
+})
+
+describe("persist options", () => {
+  it("merge tolerates a null persisted state", () => {
+    const options = useStore.persist.getOptions()
+    const current = useStore.getState()
+
+    const merged = options.merge!(null, current)
+
+    expect(merged.settings).toEqual(current.settings)
+    expect(merged.fileManagerState).toEqual(current.fileManagerState)
+    // 新对象，不是把 current 原样返回
+    expect(merged.settings).not.toBe(current.settings)
+  })
+
+  it("merge fills missing settings from current defaults", () => {
+    const options = useStore.persist.getOptions()
+    const current = useStore.getState()
+
+    const merged = options.merge!(
+      {
+        fileManagerState: { layout: "rows" },
+        settings: {
+          prompt: "old prompt",
+          model: { name: "persisted-model" },
+        },
+      },
+      current
+    )
+
+    expect(merged.settings.prompt).toBe("old prompt")
+    expect(merged.settings.ldmSteps).toBe(current.settings.ldmSteps)
+    // model 永远来自运行时，不被持久化数据覆盖
+    expect(merged.settings.model).toBe(current.settings.model)
+    expect(merged.fileManagerState.layout).toBe("rows")
+    expect(merged.fileManagerState.sortBy).toBe(current.fileManagerState.sortBy)
+  })
+
+  it("migrate normalizes an older shape and drops unknown keys", () => {
+    const options = useStore.persist.getOptions()
+    const migrated = options.migrate!(
+      {
+        fileManagerState: { layout: "rows", legacy: 1 },
+        settings: { prompt: "old prompt", sdMaskBlur: 4 },
+      },
+      1
+    ) as {
+      fileManagerState: Record<string, unknown>
+      settings: Record<string, unknown>
+    }
+
+    expect(migrated.settings.prompt).toBe("old prompt")
+    expect(migrated.settings.ldmSteps).toBe(
+      useStore.getState().settings.ldmSteps
+    )
+    expect("sdMaskBlur" in migrated.settings).toBe(false)
+    expect(migrated.fileManagerState.layout).toBe("rows")
+    expect("legacy" in migrated.fileManagerState).toBe(false)
   })
 })

@@ -400,6 +400,48 @@ let prevMaskSeq = 0
 // 免得同一条提示被反复刷屏；出现新内容（比如又回退到别的卡）仍然会再弹一次。
 let shownDeviceNotice = ""
 
+// persist 只认识当前形状的 key：旧版本残留（或手改过的 localStorage）里的
+// 未知字段在这里丢掉，不让它们被原样展开进 state。persisted 为 null 时
+// （storage 为空/被清掉）返回空对象，hydration 不再抛 TypeError。
+function pickKnownKeys<T extends object>(
+  value: unknown,
+  defaults: T
+): Partial<T> {
+  if (!value || typeof value !== "object") {
+    return {}
+  }
+  const source = value as Record<string, unknown>
+  const result: Record<string, unknown> = {}
+  for (const key of Object.keys(defaults)) {
+    if (key in source) {
+      result[key] = source[key]
+    }
+  }
+  return result as Partial<T>
+}
+
+type PersistedState = {
+  fileManagerState: Partial<FileManagerState>
+  settings: Partial<Settings>
+}
+
+function normalizePersistedState(persisted: unknown): PersistedState {
+  const state = (persisted ?? {}) as {
+    fileManagerState?: unknown
+    settings?: unknown
+  }
+  const settings = pickKnownKeys(state.settings, defaultValues.settings)
+  // model 是运行时由服务端返回，不应持久化
+  delete settings.model
+  return {
+    fileManagerState: pickKnownKeys(
+      state.fileManagerState,
+      defaultValues.fileManagerState
+    ),
+    settings,
+  }
+}
+
 export const useStore = createWithEqualityFn<AppState & AppAction>()(
   persist(
     immer((set, get) => ({
@@ -503,6 +545,12 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           extenderState.height === imageHeight &&
           extenderState.width === imageWidth
         ) {
+          // 扩展框还和原图完全重合时服务端没有可扩的区域，点了 Run 只会静默
+          // 什么都不发生；明确提示用户先拖动扩展框。
+          toast({
+            variant: "destructive",
+            description: i18n.t("states.extenderSameAsImage"),
+          })
           return
         }
 
@@ -670,7 +718,14 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
             newRender.preview = res.preview === true
             // 若期间用户切换了图片，丢弃过期结果，避免污染新图片的编辑器状态
             // （否则会出现新图片上显示旧图渲染结果 / 画布尺寸错乱等"画笔消失"现象）
-            if (get().file !== file) {
+            // 撤销/重做同样会让 renders/lineGroups/curLineGroup 换成新数组：这份
+            // 响应是基于请求前的快照算出来的，再写回去会把刚撤销的一步重新盖回来。
+            if (
+              get().file !== file ||
+              get().editorState.renders !== renders ||
+              get().editorState.lineGroups !== lineGroups ||
+              get().editorState.curLineGroup !== curLineGroup
+            ) {
               URL.revokeObjectURL(blobUrl)
               _activeBlobUrls.delete(blobUrl)
               forgetRenderRevision(blobUrl)
@@ -1341,6 +1396,10 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         set((state) => {
           state.editorState.extraMasks = []
           state.editorState.curLineGroup = []
+          // lastLineGroup/prevExtraMasks 是上一轮 Run 的掩膜快照，留着会让下一次
+          // Run 走 useLastLineGroup 分支重跑那张旧掩膜。
+          state.editorState.lastLineGroup = []
+          state.editorState.prevExtraMasks = []
         })
       },
     })),
@@ -1354,10 +1413,7 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         ),
       }),
       merge: (persisted, current) => {
-        const persistedState = persisted as {
-          fileManagerState?: Partial<FileManagerState>
-          settings?: Partial<Settings>
-        }
+        const persistedState = normalizePersistedState(persisted)
         return {
           ...current,
           fileManagerState: {
@@ -1369,6 +1425,21 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
             ...persistedState.settings,
             // model 是运行时由服务端返回，不应持久化
             model: current.settings.model,
+          },
+        }
+      },
+      // 版本升级时把旧形状归一化成当前形状（未知 key 丢弃，缺失 key 用
+      // defaultValues 补齐），而不是把旧对象原样展开。
+      migrate: (persistedState) => {
+        const persisted = normalizePersistedState(persistedState)
+        return {
+          fileManagerState: {
+            ...defaultValues.fileManagerState,
+            ...persisted.fileManagerState,
+          },
+          settings: {
+            ...defaultValues.settings,
+            ...persisted.settings,
           },
         }
       },

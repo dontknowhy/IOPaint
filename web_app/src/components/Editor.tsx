@@ -40,6 +40,7 @@ import { useTranslation } from "react-i18next"
 import { useDisplayImage } from "@/hooks/useImage"
 import { Slider } from "./ui/slider"
 import { DisplayImage, Line, PluginName, Point } from "@/lib/types"
+import { decideTouchGesture, lastTouchPoint } from "@/lib/touchGesture"
 import {
   editSessionExpiredError,
   getRenderRevision,
@@ -69,6 +70,9 @@ const MAX_SCALE = 50
 const TOUCH_MOVE_THRESHOLD = 10
 // 判定“哪根手指按住了没动”的阈值（px），避免把捏合开始阶段误判成锚定绘制
 const TOUCH_ANCHOR_THRESHOLD = 6
+// 判定「一指定住、另一指拖动」需要连续保持的时长（ms）：捏合的第一帧
+// 常常只有一根手指先动，立刻起笔会在扩散模型上误触发一次昂贵的 inpaint
+const TOUCH_DRAW_DWELL_MS = 120
 interface EditorProps {
   file: File
 }
@@ -94,6 +98,8 @@ type TouchLatestState = {
   runInpainting: () => Promise<void>
   updateInteractiveSegState: (state: { clicks: number[][] }) => void
   setIsDraging: (value: boolean) => void
+  // 结束当前笔画（画布外松开鼠标时也走这条路径）
+  finishStroke: () => void
 }
 
 export default function Editor(props: EditorProps) {
@@ -214,6 +220,14 @@ export default function Editor(props: EditorProps) {
   )
   // 正在驱动笔画的指头 identifier
   const drawingTouchIdRef = useRef<number | null>(null)
+  // pending 状态下“第一次满足绘制条件”的时间戳（performance.now）
+  const touchPendingSinceRef = useRef<number | null>(null)
+  // 进入 draw 时锚定指的起点，漂移超过阈值说明其实是捏合
+  const touchAnchorStartRef = useRef<{
+    id: number
+    x: number
+    y: number
+  } | null>(null)
   // 供原生 touch 监听器读取的最新状态与函数
   const latestRef = useRef<TouchLatestState | null>(null)
 
@@ -826,6 +840,13 @@ export default function Editor(props: EditorProps) {
     }
     // getCoalescedEvents 带上浏览器合并掉的中间点，快速划动时笔迹不会断
     const nativeEvent = ev.nativeEvent as MouseEvent
+    // 鼠标在 header/侧栏上松开时 canvas 收不到 mouseup，window 监听器会兜底
+    // 结束笔画；这里再按 buttons 兜一层（比如在浏览器窗口外松开后移回来），
+    // 否则回到画布的第一下移动会接着画出不在 mask_strokes 里的 ghost 笔迹。
+    if (nativeEvent.buttons === 0) {
+      finishStroke()
+      return
+    }
     const withCoalesced = nativeEvent as MouseEvent & {
       getCoalescedEvents?: () => MouseEvent[]
     }
@@ -888,11 +909,9 @@ export default function Editor(props: EditorProps) {
     }
   }
 
-  const onPointerUp = (ev: SyntheticEvent) => {
-    if (isMidClick(ev)) {
-      setIsPanning(false)
-      return
-    }
+  // 结束一次笔画：画布内松手（onPointerUp）和画布外松手（window mouseup）
+  // 共用。重复调用是安全的：commit 之后 strokeRef 为空 / isInpainting 已置位。
+  const finishStroke = () => {
     if (!hadDrawSomething()) {
       return
     }
@@ -923,6 +942,14 @@ export default function Editor(props: EditorProps) {
     } else {
       runInpainting()
     }
+  }
+
+  const onPointerUp = (ev: SyntheticEvent) => {
+    if (isMidClick(ev)) {
+      setIsPanning(false)
+      return
+    }
+    finishStroke()
   }
 
   const onCanvasMouseUp = (ev: SyntheticEvent) => {
@@ -1571,6 +1598,7 @@ export default function Editor(props: EditorProps) {
     runInpainting,
     updateInteractiveSegState,
     setIsDraging,
+    finishStroke,
   }
 
   // 触屏手势（原生非 passive 监听器，绕开 React passive 限制）：
@@ -1594,6 +1622,8 @@ export default function Editor(props: EditorProps) {
         // 记录所有手指位置，等第一次 touchmove 判断意图（锚定绘制会在此后重新起笔）
         latest.cancelCurrentStroke()
         touchModeRef.current = "pending"
+        touchPendingSinceRef.current = null
+        touchAnchorStartRef.current = null
         touchPositionsRef.current.clear()
         for (const t of touches) {
           touchPositionsRef.current.set(t.identifier, {
@@ -1606,6 +1636,8 @@ export default function Editor(props: EditorProps) {
       // 单指
       const t = touches[0]
       touchModeRef.current = "single"
+      touchPendingSinceRef.current = null
+      touchAnchorStartRef.current = null
       touchPositionsRef.current.clear()
       touchPositionsRef.current.set(t.identifier, {
         x: t.clientX,
@@ -1654,27 +1686,31 @@ export default function Editor(props: EditorProps) {
       if (mode === "pending") {
         // 位移始终相对“多指落下的那一刻”计算（不更新基准点），
         // 以便慢速拖动也能累积到阈值，同时避免误判捏合。
-        let movingTouch: Touch | null = null
-        let movingCount = 0
-        let stillCount = 0
-        for (const t of touches) {
-          const prev = touchPositionsRef.current.get(t.identifier)
-          if (prev === undefined) {
-            continue
-          }
-          const dist = Math.hypot(t.clientX - prev.x, t.clientY - prev.y)
-          if (dist > TOUCH_MOVE_THRESHOLD) {
-            movingCount += 1
-            movingTouch = t
-          } else if (dist <= TOUCH_ANCHOR_THRESHOLD) {
-            stillCount += 1
-          }
-        }
-        const canDraw = !latest.isPanning && !latest.isInteractiveSeg
-        if (canDraw && movingCount === 1 && movingTouch && stillCount >= 1) {
-          // 一根手指按住不动、另一根拖动 → 视为绘制（保留锚定绘制特性）
+        const decision = decideTouchGesture({
+          mode: "pending",
+          startPoints: Array.from(touchPositionsRef.current, ([id, p]) => ({
+            id,
+            x: p.x,
+            y: p.y,
+          })),
+          currentPoints: Array.from(touches).map((t) => ({
+            id: t.identifier,
+            x: t.clientX,
+            y: t.clientY,
+          })),
+          pendingSince: touchPendingSinceRef.current,
+          now: performance.now(),
+          canDraw: !latest.isPanning && !latest.isInteractiveSeg,
+          moveThreshold: TOUCH_MOVE_THRESHOLD,
+          anchorThreshold: TOUCH_ANCHOR_THRESHOLD,
+          dwellMs: TOUCH_DRAW_DWELL_MS,
+        })
+        touchPendingSinceRef.current = decision.pendingSince
+        if (decision.mode === "draw") {
+          // 一根手指按住不动、另一根拖动且持续超过 dwell → 视为绘制
           touchModeRef.current = "draw"
-          drawingTouchIdRef.current = movingTouch.identifier
+          drawingTouchIdRef.current = decision.drawingId
+          touchAnchorStartRef.current = decision.anchorStart
           for (const t of touches) {
             touchPositionsRef.current.set(t.identifier, {
               x: t.clientX,
@@ -1684,12 +1720,17 @@ export default function Editor(props: EditorProps) {
           // 丢弃以按住指头为起点的那段笔画，从当前移动指头重新开始
           latest.cancelCurrentStroke()
           latest.setIsDraging(true)
-          latest.startStroke(touchPointXY(movingTouch, canvas))
+          const movingTouch = Array.from(touches).find(
+            (t) => t.identifier === decision.drawingId
+          )
+          if (movingTouch) {
+            latest.startStroke(touchPointXY(movingTouch, canvas))
+          }
           // 阻止库把这次多指当作 pinch
           event.stopPropagation()
           return
         }
-        if (movingCount >= 2) {
+        if (decision.mode === "gesture") {
           // 明显是两根手指一起动 → 手势，交给库处理缩放/平移
           for (const t of touches) {
             touchPositionsRef.current.set(t.identifier, {
@@ -1698,6 +1739,7 @@ export default function Editor(props: EditorProps) {
             })
           }
           touchModeRef.current = "gesture"
+          touchAnchorStartRef.current = null
           latest.cancelCurrentStroke()
           return
         }
@@ -1705,15 +1747,46 @@ export default function Editor(props: EditorProps) {
         return
       }
       if (mode === "draw") {
+        const decision = decideTouchGesture({
+          mode: "draw",
+          startPoints: [],
+          currentPoints: Array.from(touches).map((t) => ({
+            id: t.identifier,
+            x: t.clientX,
+            y: t.clientY,
+          })),
+          drawingId: drawingTouchIdRef.current,
+          anchorStart: touchAnchorStartRef.current,
+          pendingSince: null,
+          now: performance.now(),
+          canDraw: true,
+          moveThreshold: TOUCH_MOVE_THRESHOLD,
+          anchorThreshold: TOUCH_ANCHOR_THRESHOLD,
+          dwellMs: TOUCH_DRAW_DWELL_MS,
+        })
+        if (decision.mode !== "draw") {
+          // 锚定指被拉开了：这是捏合而不是锚定绘制，取消刚画出的临时笔迹
+          for (const t of touches) {
+            touchPositionsRef.current.set(t.identifier, {
+              x: t.clientX,
+              y: t.clientY,
+            })
+          }
+          touchModeRef.current = "gesture"
+          drawingTouchIdRef.current = null
+          touchAnchorStartRef.current = null
+          latest.cancelCurrentStroke()
+          latest.setIsDraging(false)
+          return
+        }
         for (const t of touches) {
           touchPositionsRef.current.set(t.identifier, {
             x: t.clientX,
             y: t.clientY,
           })
         }
-        const drawingId = drawingTouchIdRef.current
         const t = Array.from(touches).find(
-          (touch) => touch.identifier === drawingId
+          (touch) => touch.identifier === decision.drawingId
         )
         if (t && latest.isDraging) {
           latest.pushStrokePoint(touchPointXY(t, canvas))
@@ -1741,10 +1814,13 @@ export default function Editor(props: EditorProps) {
       const changed = changedTouches[0]
       const mode = touchModeRef.current
       if (mode === "single") {
+        const drawingId = drawingTouchIdRef.current ?? changed.identifier
         touchPositionsRef.current.delete(changed.identifier)
         if (touches.length === 0) {
           touchModeRef.current = null
           drawingTouchIdRef.current = null
+          touchPendingSinceRef.current = null
+          touchAnchorStartRef.current = null
           if (latest.isInteractiveSeg) {
             const xy = touchPointXY(changed, canvas)
             const newClicks = [...latest.clicks]
@@ -1761,6 +1837,12 @@ export default function Editor(props: EditorProps) {
           }
           if (!latest.originalSrc || !latest.context?.canvas) {
             return
+          }
+          // touchmove 会被浏览器合并/节流，抬手位置可能比最后一个 move 更靠前：
+          // commit 前用 changedTouches 里那只绘制指补一个点。
+          const lastTouch = lastTouchPoint(changedTouches, drawingId)
+          if (lastTouch) {
+            latest.pushStrokePoint(touchPointXY(lastTouch, canvas))
           }
           latest.setIsDraging(false)
           latest.commitCurrentStroke()
@@ -1780,6 +1862,8 @@ export default function Editor(props: EditorProps) {
       }
       if (mode === "pending") {
         touchPositionsRef.current.delete(changed.identifier)
+        touchPendingSinceRef.current = null
+        touchAnchorStartRef.current = null
         if (touches.length === 0) {
           touchModeRef.current = null
         } else if (touches.length === 1) {
@@ -1800,12 +1884,16 @@ export default function Editor(props: EditorProps) {
           // 绘制手指抬起 → 提交笔画
           touchModeRef.current = null
           drawingTouchIdRef.current = null
+          touchPendingSinceRef.current = null
+          touchAnchorStartRef.current = null
           if (
             !latest.isPanning &&
             !latest.isInpainting &&
             latest.isDraging &&
             strokeRef.current
           ) {
+            // 同 single 分支：抬手位置可能比最后一次 touchmove 更靠前
+            latest.pushStrokePoint(touchPointXY(changed, canvas))
             latest.setIsDraging(false)
             latest.commitCurrentStroke()
             if (!latest.runMannually) {
@@ -1813,7 +1901,8 @@ export default function Editor(props: EditorProps) {
             }
           }
         } else {
-          // 按住的手指抬起，绘制手指还在 → 用剩下那根手指继续
+          // 按住的手指抬起，绘制手指还在 → 用剩下那根手指继续（已没有锚定指）
+          touchAnchorStartRef.current = null
           const remaining = Array.from(touches).find(
             (t) => t.identifier !== changed.identifier
           )
@@ -1833,6 +1922,8 @@ export default function Editor(props: EditorProps) {
         }
         if (touches.length === 0) {
           touchModeRef.current = null
+          touchPendingSinceRef.current = null
+          touchAnchorStartRef.current = null
         }
       }
     }
@@ -1841,6 +1932,8 @@ export default function Editor(props: EditorProps) {
       touchPositionsRef.current.clear()
       touchModeRef.current = null
       drawingTouchIdRef.current = null
+      touchPendingSinceRef.current = null
+      touchAnchorStartRef.current = null
       latestRef.current?.cancelCurrentStroke()
     }
 
@@ -1854,6 +1947,17 @@ export default function Editor(props: EditorProps) {
       canvas.removeEventListener("touchend", onTouchEnd)
       canvas.removeEventListener("touchcancel", onTouchCancel)
     }
+  }, [])
+
+  // 在 header/侧栏等画布外松开鼠标时，canvas/容器都收不到 mouseup，
+  // isDraging 与 strokeRef 会一直活着（回到画布只移动就继续画 ghost 笔迹）。
+  // window 级监听器保证只在真正松开时结束一次笔画。
+  useEffect(() => {
+    const onWindowMouseUp = () => {
+      latestRef.current?.finishStroke()
+    }
+    window.addEventListener("mouseup", onWindowMouseUp)
+    return () => window.removeEventListener("mouseup", onWindowMouseUp)
   }, [])
 
   // 滚轮处理：普通滚轮（无 Ctrl）→ 平移；Ctrl+滚轮/触控板捏合 → 由库缩放；
