@@ -20,6 +20,7 @@ pw = pytest.importorskip("playwright", reason="playwright not installed")
 from playwright.sync_api import (  # noqa: E402
     Browser,
     BrowserContext,
+    Locator,
     Page,
     expect,
     sync_playwright,
@@ -94,6 +95,16 @@ def _save_button(page_obj):
     """Save Image 按钮：IconButton 没有可访问名字，靠 lucide-download 图标定位，
     全仓库只有 Editor 的保存按钮用这个图标。renders.length 决定它的 disabled。"""
     return page_obj.locator("button:has(svg.lucide-download)")
+
+
+def _brush_slider(page_obj: Any) -> Locator:
+    """底部笔刷滑块。cv2 面板的 radius 滑块 max=100，笔刷这根是 max=200。"""
+    return page_obj.locator('[role="slider"][aria-valuemax="200"]')
+
+
+def _history_button(page_obj: Any, icon: str) -> Locator:
+    """工具栏的 Undo/Redo：disabled 直接来自 undoDisabled()/redoDisabled()。"""
+    return page_obj.locator(f"button:has(svg.lucide-{icon})")
 
 
 def _wait_interactive(page_obj):
@@ -228,64 +239,122 @@ class TestFileUpload:
 
 
 class TestBrushTools:
-    def test_brush_cursor(self, page, tmp_path):
-        bb = page.locator("canvas").first.bounding_box()
+    def test_brush_cursor(self, page: Page, tmp_path: Path) -> None:
+        _upload_image(page, tmp_path)
+        _wait_image_loaded(page)
+        mask_canvas = page.locator("canvas").nth(1)
+        # 先移开再回来，确保 onMouseOver 真的触发（同坐标重复 move 不会再发 mouseover）
+        page.mouse.move(5, 5)
+        bb = mask_canvas.bounding_box()
         page.mouse.move(bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2)
-        page.wait_for_timeout(300)
-        assert page.locator("canvas").first.is_visible()
+        # showBrush 之后 getCursor() 返回 "none"：隐藏系统箭头，改由自定义笔刷圈指示
+        expect(mask_canvas).to_have_css("cursor", "none", timeout=3000)
 
-    def test_draw_stroke(self, page, tmp_path):
+    def test_draw_stroke(self, page: Page, tmp_path: Path) -> None:
+        _upload_image(page, tmp_path)
+        _wait_image_loaded(page)
         bb = page.locator("canvas").first.bounding_box()
         cx, cy = bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2
         page.mouse.move(cx - 50, cy)
         page.mouse.down()
         page.mouse.move(cx + 50, cy, steps=10)
-        page.mouse.up()
-        page.wait_for_timeout(300)
-        assert page.locator("canvas").first.is_visible()
+        _next_frames(page)
+        # 按住鼠标时掩膜画布上必须已经有笔画（松手后会被 /inpaint 成功清掉）
+        assert _canvas_pixel_count(page) > 0, "拖动过程中掩膜上没有任何笔画"
+        with page.expect_request("**/inpaint", timeout=8000):
+            page.mouse.up()
 
-    def test_right_click_no_crash(self, page, tmp_path):
+    def test_right_click_no_crash(self, page: Page, tmp_path: Path) -> None:
+        _upload_image(page, tmp_path)
+        _wait_image_loaded(page)
         bb = page.locator("canvas").first.bounding_box()
-        page.mouse.click(
-            bb["x"] + bb["width"] / 2,
-            bb["y"] + bb["height"] / 2,
-            button="right",
-        )
-        page.wait_for_timeout(300)
-        assert page.locator("canvas").first.is_visible()
+        assert bb is not None
+        cx, cy = bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2
+        page.mouse.click(cx, cy, button="right")
+        _next_frames(page)
+        assert _canvas_pixel_count(page) == 0, "右键在掩膜上画出了笔画"
 
-    def test_bracket_size_change(self, page, tmp_path):
-        page.keyboard.press("[")
+        # 右键之后编辑器必须还能画（没有 latch 在右键分支里）
+        page.mouse.move(cx - 40, cy)
+        page.mouse.down()
+        page.mouse.move(cx + 40, cy, steps=10)
+        _next_frames(page)
+        assert _canvas_pixel_count(page) > 0, "右键之后左键拖动不再落笔"
+        with page.expect_request("**/inpaint", timeout=8000):
+            page.mouse.up()
+
+    def test_bracket_size_change(self, page: Page, tmp_path: Path) -> None:
+        _upload_image(page, tmp_path)
+        slider = _brush_slider(page)
+        expect(slider).to_be_visible(timeout=3000)
+        before = int(slider.get_attribute("aria-valuenow") or 0)
         page.keyboard.press("]")
-        page.wait_for_timeout(200)
-        assert page.locator("canvas").first.is_visible()
+        expect(slider).not_to_have_attribute("aria-valuenow", str(before), timeout=3000)
+        after = int(slider.get_attribute("aria-valuenow") or 0)
+        assert after > before, f"']' 没有增大笔刷: {before} -> {after}"
+        page.keyboard.press("[")
+        expect(slider).not_to_have_attribute("aria-valuenow", str(after), timeout=3000)
+        assert int(slider.get_attribute("aria-valuenow") or 0) < after, "'[' 没有减小笔刷"
 
 
 class TestKeyboardShortcuts:
-    def test_ctrl_z_undo(self, page, tmp_path):
-        bb = page.locator("canvas").first.bounding_box()
-        page.mouse.move(bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2)
-        page.mouse.down()
-        page.mouse.up()
+    def test_ctrl_z_undo(self, page: Page, tmp_path: Path) -> None:
+        _upload_image(page, tmp_path)
+        _wait_image_loaded(page)
+        undo = _history_button(page, "undo")
+        redo = _history_button(page, "redo")
+        expect(undo).to_be_disabled(timeout=3000)
+
+        # 先有一笔真实 render，Undo 才会从 disabled 变成 enabled
+        with page.expect_response("**/inpaint", timeout=20000) as resp_info:
+            _draw_stroke(page)
+        assert resp_info.value.status == 200
+        expect(undo).to_be_enabled(timeout=10000)
+        expect(redo).to_be_disabled(timeout=3000)
+
         page.keyboard.press("Control+z")
-        page.wait_for_timeout(300)
-        assert page.locator("canvas").first.is_visible()
+        # 撤掉唯一的 render 后：无图可撤、有图可重做
+        expect(undo).to_be_disabled(timeout=3000)
+        expect(redo).to_be_enabled(timeout=3000)
 
-    def test_ctrl_y_redo(self, page, tmp_path):
-        bb = page.locator("canvas").first.bounding_box()
+    def test_redo_hotkey_after_undo(self, page: Page, tmp_path: Path) -> None:
+        _upload_image(page, tmp_path)
+        _wait_image_loaded(page)
+        undo = _history_button(page, "undo")
+        redo = _history_button(page, "redo")
+
+        with page.expect_response("**/inpaint", timeout=20000) as resp_info:
+            _draw_stroke(page)
+        assert resp_info.value.status == 200
+
+        # 等响应体落地（renders 入栈）再 undo：只等 response 头时 undo 还是 disabled
+        expect(undo).to_be_enabled(timeout=10000)
+        expect(redo).to_be_disabled(timeout=3000)
+
+        page.keyboard.press("Control+z")
+        expect(undo).to_be_disabled(timeout=3000)
+        expect(redo).to_be_enabled(timeout=3000)
+
+        # 实际绑定的是 shift+ctrl+z（Editor.tsx:useHotKey），不是 Ctrl+Y
+        page.keyboard.press("Control+Shift+z")
+        expect(undo).to_be_enabled(timeout=3000)
+        expect(redo).to_be_disabled(timeout=3000)
+
+    def test_space_hand_toggle(self, page: Page, tmp_path: Path) -> None:
+        _upload_image(page, tmp_path)
+        _wait_image_loaded(page)
+        mask_canvas = page.locator("canvas").nth(1)
+        page.mouse.move(5, 5)
+        bb = mask_canvas.bounding_box()
         page.mouse.move(bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2)
-        page.mouse.down()
-        page.mouse.up()
-        page.keyboard.press("Control+y")
-        page.wait_for_timeout(300)
-        assert page.locator("canvas").first.is_visible()
+        expect(mask_canvas).to_have_css("cursor", "none", timeout=3000)
 
-    def test_space_hand_toggle(self, page, tmp_path):
         page.keyboard.down("Space")
-        page.wait_for_timeout(200)
+        # 按住空格 → isPanning=true → getCursor() 返回 "grab"
+        expect(mask_canvas).to_have_css("cursor", "grab", timeout=3000)
+
         page.keyboard.up("Space")
-        page.wait_for_timeout(200)
-        assert page.locator("canvas").first.is_visible()
+        expect(mask_canvas).to_have_css("cursor", "none", timeout=3000)
 
 
 class TestModelUI:
@@ -297,15 +366,20 @@ class TestModelUI:
 
 
 class TestInpaintFlow:
-    def test_draw_and_see_stroke(self, page, tmp_path):
+    def test_draw_and_see_stroke(self, page: Page, tmp_path: Path) -> None:
+        _upload_image(page, tmp_path)
+        _wait_image_loaded(page)
         bb = page.locator("canvas").first.bounding_box()
         cx, cy = bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2
         page.mouse.move(cx - 40, cy - 40)
         page.mouse.down()
         page.mouse.move(cx + 40, cy + 40, steps=10)
-        page.mouse.up()
-        page.wait_for_timeout(500)
-        assert page.locator("canvas").first.is_visible()
+        _next_frames(page)
+        assert _canvas_pixel_count(page) > 0, "拖动过程中掩膜上没有任何笔画"
+        # 松手必须真的提交给后端（auto 模式）：死掉的 mouseup 处理器会在这里超时
+        with page.expect_response("**/inpaint", timeout=20000) as resp_info:
+            page.mouse.up()
+        assert resp_info.value.status == 200, f"/inpaint 返回 {resp_info.value.status}"
 
 
 class TestResponsive:
@@ -421,6 +495,56 @@ class TestMaskContract:
         xs = [p[0] for p in pts]
         ys = [p[1] for p in pts]
         assert max(xs) - min(xs) > 10 and max(ys) - min(ys) > 10
+
+
+class TestExtraMaskContract:
+    """调整掩膜（extraMasks）路径：掩膜以 PNG `mask` 发出，不再带 `mask_strokes`。
+
+    cv2 后端不渲染侧栏的扩散面板，所以只把 /api/v1/model 的响应伪装成扩散
+    inpaint 模型，让调整掩膜按钮挂出来；/inpaint 仍然打到真实的 cv2 服务，
+    由它走服务端 `mask` fallback —— 这一步同时证明该 fallback 可用。
+    """
+
+    def test_expand_mask_sends_mask_png_and_no_strokes(
+        self, browser_instance: Browser, iopaint_server: str, tmp_path: Path
+    ) -> None:
+        ctx = _new_context(browser_instance, viewport={"width": 1280, "height": 720})
+        pg = ctx.new_page()
+
+        def fake_diffusion_model(route: Any) -> None:
+            data = route.fetch().json()
+            data["name"] = "runwayml/stable-diffusion-inpainting"
+            data["model_type"] = "diffusers_sd_inpaint"
+            data["need_prompt"] = True
+            route.fulfill(json=data)
+
+        pg.route("**/api/v1/model", fake_diffusion_model)
+        pg.goto(iopaint_server, wait_until="load", timeout=30000)
+        pg.wait_for_timeout(2000)
+        _upload_image(pg, tmp_path)
+        _wait_image_loaded(pg)
+
+        # 非 inpaint 模型默认手动模式：画完一笔不会自动打 /inpaint
+        _draw_stroke(pg)
+
+        with pg.expect_response("**/adjust_mask", timeout=15000) as adjust_info:
+            pg.get_by_role("button", name="Expand").click()
+        assert adjust_info.value.status == 200, (
+            f"/adjust_mask 返回 {adjust_info.value.status}"
+        )
+
+        with pg.expect_request("**/inpaint", timeout=15000) as req_info:
+            with pg.expect_response("**/inpaint", timeout=15000) as resp_info:
+                pg.get_by_role("button", name="Paint").click()
+
+        body = req_info.value.post_data
+        assert body, "/inpaint 请求体为空"
+        payload = json.loads(body)
+        assert payload.get("mask"), "extraMasks 路径没有把掩膜当 PNG 传上去"
+        assert "mask_strokes" not in payload, "extraMasks 路径不该再传矢量笔迹"
+        assert resp_info.value.status == 200, f"/inpaint 返回 {resp_info.value.status}"
+
+        ctx.close()
 
 
 class TestDeviceNoticeToast:

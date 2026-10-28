@@ -235,32 +235,44 @@ class TestJpegSubsampling:
 
 class TestInputBounds:
     def test_sd_steps_zero_rejected(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as ei:
             InpaintRequest(sd_steps=0)
+        assert ei.value.errors()[0]["loc"] == ("sd_steps",)
+        # ge=1 的下边界：1 必须放行，否则合法请求会被 422
+        assert InpaintRequest(sd_steps=1).sd_steps == 1
 
     def test_sd_steps_huge_rejected(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as ei:
             InpaintRequest(sd_steps=1_000_000)
+        assert ei.value.errors()[0]["loc"] == ("sd_steps",)
 
     def test_ldm_steps_zero_rejected(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as ei:
             InpaintRequest(ldm_steps=0)
+        assert ei.value.errors()[0]["loc"] == ("ldm_steps",)
+        assert InpaintRequest(ldm_steps=1).ldm_steps == 1
 
     def test_ldm_steps_huge_rejected(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as ei:
             InpaintRequest(ldm_steps=1_000_000)
+        assert ei.value.errors()[0]["loc"] == ("ldm_steps",)
 
     def test_steps_in_range_ok(self):
         assert InpaintRequest(sd_steps=100).sd_steps == 100
         assert InpaintRequest(ldm_steps=50).ldm_steps == 50
 
     def test_oversize_image_rejected(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as ei:
             InpaintRequest(image="x" * 64_000_001)
+        assert ei.value.errors()[0]["loc"] == ("image",)
+        # max_length 的上边界：正好 64,000,000 字符仍要接受
+        assert InpaintRequest(image="x" * 64_000_000).image
 
     def test_oversize_mask_rejected(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as ei:
             InpaintRequest(mask="x" * 64_000_001)
+        assert ei.value.errors()[0]["loc"] == ("mask",)
+        assert InpaintRequest(mask="x" * 64_000_000).mask
 
     def test_plugin_image_too_long_rejected(self) -> None:
         with pytest.raises(ValidationError) as ei:
@@ -277,8 +289,9 @@ class TestInputBounds:
     def test_plugin_scale_bounds(self) -> None:
         """scale 会作为 outscale 乘到输出尺寸上（12MP × 1000 ≈ 1.2e13 像素）。"""
         for bad in (0, -1, 1000):
-            with pytest.raises(ValidationError):
+            with pytest.raises(ValidationError) as ei:
                 RunPluginRequest(name="x", image="aGk=", scale=bad)
+            assert ei.value.errors()[0]["loc"] == ("scale",)
         for ok in (2, 4):
             assert RunPluginRequest(name="x", image="aGk=", scale=ok).scale == ok
 
@@ -287,10 +300,10 @@ class TestInputBounds:
         assert req.image is not None
 
     def test_kernel_size_bounds(self):
-        with pytest.raises(ValidationError):
-            AdjustMaskRequest(mask="aGk=", operate="expand", kernel_size=0)
-        with pytest.raises(ValidationError):
-            AdjustMaskRequest(mask="aGk=", operate="expand", kernel_size=1_000_000)
+        for bad in (0, 1_000_000):
+            with pytest.raises(ValidationError) as ei:
+                AdjustMaskRequest(mask="aGk=", operate="expand", kernel_size=bad)
+            assert ei.value.errors()[0]["loc"] == ("kernel_size",)
         assert (
             AdjustMaskRequest(mask="aGk=", operate="expand", kernel_size=12).kernel_size
             == 12

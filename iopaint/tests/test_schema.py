@@ -2,6 +2,7 @@
 import random
 
 import pytest
+from pydantic import ValidationError
 
 from iopaint.schema import (
     AdjustMaskRequest,
@@ -184,17 +185,19 @@ class TestInpaintRequest:
 # ---------------------------------------------------------------------------
 
 class TestAdjustMaskRequest:
-    def test_expand(self):
-        req = AdjustMaskRequest(mask="abc", operate="expand", kernel_size=5)
-        assert req.operate == "expand"
+    def test_kernel_size_defaults_to_5(self) -> None:
+        # 省略 kernel_size 时必须落到 schema 默认值 5（API 客户端可以只传 operate）
+        req = AdjustMaskRequest(mask="aGk=", operate="expand")
+        assert req.kernel_size == 5
 
-    def test_shrink(self):
-        req = AdjustMaskRequest(mask="abc", operate="shrink", kernel_size=10)
-        assert req.kernel_size == 10
+    def test_operate_accepts_the_three_modes(self) -> None:
+        for op in ("expand", "shrink", "reverse"):
+            assert AdjustMaskRequest(mask="aGk=", operate=op).operate == op
 
-    def test_reverse(self):
-        req = AdjustMaskRequest(mask="abc", operate="reverse")
-        assert req.operate == "reverse"
+    def test_operate_rejects_unknown_value(self) -> None:
+        with pytest.raises(ValidationError) as ei:
+            AdjustMaskRequest(mask="aGk=", operate="nope")
+        assert ei.value.errors()[0]["loc"] == ("operate",)
 
 
 # ---------------------------------------------------------------------------
