@@ -11,6 +11,7 @@ import types
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -302,6 +303,45 @@ class TestStartFullLaunch:
             )
         assert result.exit_code == 1
         assert any("Failed to start IOPaint" in m for m in messages)
+
+    def test_every_plugin_device_goes_through_check_device(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """五个插件 device 都要走 check_device，无卡机器上回退 CPU 而不是 traceback。"""
+        _patch_hub_ok(monkeypatch)
+        monkeypatch.setattr(
+            "iopaint.download.scan_models",
+            lambda: [SimpleNamespace(name="cv2")],
+        )
+        monkeypatch.setattr(
+            "iopaint.cli._resolve_cli_device",
+            lambda device, gpu_id: (Device.cpu, None),
+        )
+        seen = []
+
+        def fake_check_device(device: Device) -> Device:
+            seen.append(device)
+            return device
+
+        monkeypatch.setattr("iopaint.cli.check_device", fake_check_device)
+
+        class FakeApi:
+            def __init__(self, app: Any, config: Any) -> None:
+                self.config = config
+
+            def launch(self) -> None:
+                pass
+
+        # start 在函数内 `from iopaint.api import Api`，因此打桩源模块
+        monkeypatch.setattr("iopaint.api.Api", FakeApi)
+        result = runner.invoke(
+            typer_app,
+            ["start", "--model", "cv2", "--device", "cpu",
+             "--interactive-seg-device", "mps",
+             "--restoreformer-device", "mps"],
+        )
+        assert result.exit_code == 0
+        assert seen == [Device.cpu, Device.mps, Device.cpu, Device.cpu, Device.mps]
 
     def test_inbrowser_lifespan_opens_browser(self, monkeypatch):
         _patch_hub_ok(monkeypatch)

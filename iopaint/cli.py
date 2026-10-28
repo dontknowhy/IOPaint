@@ -262,8 +262,10 @@ def start(
         logger.warning("--force-fp16 is ignored because --no-half (fp32) is set")
     dump_gpu_info(device, gpu_id)
     remove_bg_device = check_device(remove_bg_device)
+    interactive_seg_device = check_device(interactive_seg_device)
     realesrgan_device = check_device(realesrgan_device)
     gfpgan_device = check_device(gfpgan_device)
+    restoreformer_device = check_device(restoreformer_device)
 
     if input and not input.exists():
         logger.error(cli_text("cli.error.input_missing", input=input))

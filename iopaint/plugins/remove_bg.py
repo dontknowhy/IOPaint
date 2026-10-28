@@ -16,20 +16,27 @@ def _rmbg_remove(device, *args, **kwargs):
     return remove(*args, **kwargs)
 
 
+def _version_tuple(v: str) -> tuple[int, ...]:
+    """取前三段数字元组：字符串比较会把 "2.0.100" 误判为旧于 "2.0.59"。"""
+    return tuple(int(p) for p in v.split(".")[:3] if p.isdigit())
+
+
 class RemoveBG(BasePlugin):
     name = "RemoveBG"
     support_gen_mask = True
     support_gen_image = True
 
     def __init__(self, model_name, device):
-        super().__init__()
+        # check_dep 需要 self.model_name 判断是否走 briaai 路径，赋值必须早于
+        # BasePlugin.__init__。
         self.model_name = model_name
         self.device = device
+        super().__init__()
 
         if model_name.startswith("birefnet"):
             import rembg
 
-            if rembg.__version__ < "2.0.59":
+            if _version_tuple(rembg.__version__) < (2, 0, 59):
                 raise ValueError(cli_text("cli.error.remove_bg_upgrade"))
 
         hub_dir = get_dir()
@@ -92,6 +99,13 @@ class RemoveBG(BasePlugin):
         return output
 
     def check_dep(self):
+        # briaai 模型走 torch + huggingface_hub 自己的 session，不需要 rembg；
+        # 其余模型（含 birefnet*）仍用 rembg 的 new_session。
+        if self.model_name in (
+            RemoveBGModel.briaai_rmbg_1_4,
+            RemoveBGModel.briaai_rmbg_2_0,
+        ):
+            return None
         try:
             import rembg
         except ImportError as e:

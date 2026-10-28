@@ -4,6 +4,7 @@
 web_config 顶层 import gradio（~2s），只在此文件付一次。save_config 的签名与
 gr 组件列表是位置绑定的（AGENTS.md gotcha），这里用 **kwargs 调用以稳住解耦。
 """
+import inspect
 import json
 import os
 from pathlib import Path
@@ -52,6 +53,28 @@ class TestLoadConfig:
         p.write_text("{ broken json", encoding="utf-8")
         cfg = load_config(p)
         assert cfg.host == "127.0.0.1"
+        assert "Load config file failed" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"port": "abc"},
+            {"export_png_compress_level": 10},
+        ],
+    )
+    def test_invalid_field_values_fall_back_to_defaults(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        payload: dict,
+    ) -> None:
+        """合法 JSON 但字段校验失败：页面仍要能打开，用默认值兜底并在终端说明。"""
+        p = tmp_path / "c.json"
+        p.write_text(json.dumps(payload), encoding="utf-8")
+        cfg = load_config(p)
+        assert cfg.host == "127.0.0.1"
+        assert cfg.port == 8080
+        assert cfg.export_png_compress_level == 1
         assert "Load config file failed" in capsys.readouterr().out
 
 
@@ -165,6 +188,53 @@ class TestChangeCurrentModel:
         )
 
 
+class TestLosslessFieldsRoundTrip:
+    """无损 revision 的四个字段必须原样经过页面保存，不能被 pydantic 默认值覆盖。"""
+
+    _FIELDS = (
+        "revision_cache_mb",
+        "delta_compress",
+        "stateless_lossless",
+        "wire_format",
+    )
+    _VALUES = {
+        "revision_cache_mb": 4096,
+        "delta_compress": True,
+        "stateless_lossless": True,
+        "wire_format": "webp",
+    }
+
+    def test_non_default_values_survive_load_and_save(
+        self, tmp_path: Path, _config_file: Path
+    ) -> None:
+        p = tmp_path / "c.json"
+        p.write_text(json.dumps(self._VALUES), encoding="utf-8")
+        loaded = load_config(p)
+        save_config(
+            **_save_kwargs(**{f: getattr(loaded, f) for f in self._FIELDS})
+        )
+        saved = json.loads(_config_file.read_text(encoding="utf-8"))
+        assert {f: saved[f] for f in self._FIELDS} == self._VALUES
+
+
+class TestConfigFieldCoverage:
+    """default_configs / save_config 形参 / save_btn.click 的 inputs 必须同时覆盖所有字段。"""
+
+    def test_defaults_signature_and_click_inputs_agree(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from iopaint.i18n import build_i18n
+
+        monkeypatch.setattr(web_config, "scan_models", lambda: [])
+        demo = web_config.build_demo(tmp_path / "c.json", build_i18n())
+
+        params = set(inspect.signature(save_config).parameters) - {"request"}
+        assert params == set(web_config.default_configs)
+
+        save_fn = next(fn for fn in demo.fns.values() if fn.fn is save_config)
+        assert len(save_fn.inputs) == len(params)
+
+
 class TestMainSmoke:
     def test_builds_ui_and_launches(self, tmp_path, monkeypatch):
         """main() 组装 gr UI 并 launch：launch 打桩，scan_models 桩掉避免扫盘。"""
@@ -187,3 +257,30 @@ class TestMainSmoke:
         assert launches[0]["show_api"] is False
         # 自定义翻译随 launch 交给 Gradio 前端（gr.I18n 实例，不便逐字段断言）
         assert "i18n" in launches[0]
+
+    def test_quality_slider_uses_config_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """页面初值取 config 里的 quality，避免“打开不改也写回 95”。"""
+        import gradio as gr
+
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"quality": 80}), encoding="utf-8")
+        monkeypatch.setattr(web_config, "scan_models", lambda: [])
+        monkeypatch.setattr(gr.Blocks, "launch", lambda self, *args, **kwargs: None)
+
+        real_slider = gr.Slider
+        sliders = []
+
+        def recording_slider(*args: Any, **kwargs: Any) -> Any:
+            sliders.append((kwargs.get("label"), kwargs.get("value")))
+            return real_slider(*args, **kwargs)
+
+        monkeypatch.setattr(gr, "Slider", recording_slider)
+        web_config.main(cfg_file)
+
+        # gr.I18n 的 label 是带 key 的翻译元数据串，按 key 定位 quality 滑块
+        assert any(
+            "web_config.quality" in str(label) and value == 80
+            for label, value in sliders
+        )

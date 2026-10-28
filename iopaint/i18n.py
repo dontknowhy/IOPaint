@@ -85,6 +85,24 @@ def build_en_catalog() -> Dict[str, Any]:
             "device": "Device",
             "gpu_id": f"GPU index {GPU_ID_HELP}",
             "quality": f"Image Quality ({QUALITY_HELP})",
+            "revision_cache_mb": (
+                "In-process canonical revision cache budget in MB. "
+                "0 disables the lossless revision path; the single-entry cap is "
+                "half of this value."
+            ),
+            "delta_compress": (
+                "Compress undo patches with zstd. Requires the optional zstandard "
+                "dependency; falls back to raw patches when it is absent."
+            ),
+            "stateless_lossless": (
+                "Stateless lossless: encode /inpaint responses as PNG so every "
+                "round stays lossless without the revision cache "
+                "(about 1.5s extra per round)."
+            ),
+            "wire_format": (
+                "Wire format used when stateless lossless is enabled: "
+                "png (faster) or webp (smaller, slower)."
+            ),
             "export_force": EXPORT_FORCE_HELP,
             "export_format": EXPORT_FORMAT_HELP,
             "export_quality": EXPORT_QUALITY_HELP,

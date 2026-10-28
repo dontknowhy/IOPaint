@@ -25,6 +25,8 @@ from datetime import datetime
 from json import JSONDecodeError
 
 import gradio as gr
+from pydantic import ValidationError
+
 from iopaint.download import scan_models
 from loguru import logger
 
@@ -52,6 +54,10 @@ default_configs = dict(
     mask_dir=None,
     output_dir=None,
     quality=95,
+    revision_cache_mb=512,
+    delta_compress=False,
+    stateless_lossless=False,
+    wire_format="png",
     export_force=False,
     export_format=None,
     export_quality=100,
@@ -87,8 +93,9 @@ def load_config(p: Path) -> WebConfig:
         with open(p, "r", encoding="utf-8") as f:
             try:
                 return WebConfig(**{**default_configs, **json.load(f)})
-            except JSONDecodeError:
+            except (JSONDecodeError, ValidationError) as e:
                 print("Load config file failed, using default configs")
+                logger.warning(f"Load config file failed: {e}")
                 return WebConfig(**default_configs)
     else:
         return WebConfig(**default_configs)
@@ -112,6 +119,10 @@ def save_config(
     mask_dir,
     output_dir,
     quality,
+    revision_cache_mb,
+    delta_compress,
+    stateless_lossless,
+    wire_format,
     export_force,
     export_format,
     export_quality,
@@ -231,12 +242,33 @@ def build_demo(config_file: Path, i18n: "gr.I18n") -> "gr.Blocks":
                     label=i18n("web_config.gpu_id"),
                 )
                 quality = gr.Slider(
-                    value=95,
+                    value=init_config.quality,
                     label=i18n("web_config.quality"),
                     minimum=75,
                     maximum=100,
                     step=1,
                 )
+                revision_cache_mb = gr.Slider(
+                    value=init_config.revision_cache_mb,
+                    label=i18n("web_config.revision_cache_mb"),
+                    minimum=0,
+                    maximum=8192,
+                    step=1,
+                )
+                with gr.Row():
+                    delta_compress = gr.Checkbox(
+                        init_config.delta_compress,
+                        label=i18n("web_config.delta_compress"),
+                    )
+                    stateless_lossless = gr.Checkbox(
+                        init_config.stateless_lossless,
+                        label=i18n("web_config.stateless_lossless"),
+                    )
+                    wire_format = gr.Dropdown(
+                        ["png", "webp"],
+                        value=init_config.wire_format,
+                        label=i18n("web_config.wire_format"),
+                    )
 
                 with gr.Row():
                     export_force = gr.Checkbox(
@@ -422,6 +454,10 @@ def build_demo(config_file: Path, i18n: "gr.I18n") -> "gr.Blocks":
                 mask_dir,
                 output_dir,
                 quality,
+                revision_cache_mb,
+                delta_compress,
+                stateless_lossless,
+                wire_format,
                 export_force,
                 export_format,
                 export_quality,

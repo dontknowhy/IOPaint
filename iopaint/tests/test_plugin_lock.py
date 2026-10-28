@@ -258,6 +258,50 @@ def make_face_plugin(
     return lambda plugin_cls, upscaler: plugin_cls(device="cpu", upscaler=upscaler)
 
 
+class _SwappableUpscaler:
+    """只保留 _enhance 需要的东西：共享锁 + 可被 switch_model 替换的 .model。"""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.model = object()
+
+
+class _BgRecordingEnhancer:
+    def __init__(self, bg_upsampler: Any) -> None:
+        self.bg_upsampler = bg_upsampler
+        self.seen: list = []
+
+    def enhance(self, img: np.ndarray, **kwargs: Any) -> tuple:
+        self.seen.append(self.bg_upsampler)
+        return [], [], np.zeros_like(img)
+
+
+class TestBgUpsamplerFollowsSwitchModel:
+    """GFPGAN / RestoreFormer 每次 enhance 都要绑定当前 upscaler.model。
+
+    RealESRGAN.switch_model 只替换自己的 .model，插件构造时抓的旧 RealESRGANer
+    会继续被背景增强使用（旧模型占显存、背景用错模型）。
+    """
+
+    @pytest.mark.parametrize("plugin_cls", [GFPGANPlugin, RestoreFormerPlugin])
+    def test_enhance_uses_current_upscaler_model(self, plugin_cls: Any) -> None:
+        upscaler = _SwappableUpscaler()
+        old_model = upscaler.model
+        enhancer = _BgRecordingEnhancer(old_model)
+
+        plugin = plugin_cls.__new__(plugin_cls)  # 跳过 __init__（会下载权重）
+        plugin.upscaler = upscaler
+        plugin.face_enhancer = enhancer
+        img = np.zeros((4, 4, 3), np.uint8)
+
+        plugin._enhance(img)
+        new_model = object()
+        upscaler.model = new_model  # 等价于 RealESRGAN.switch_model 换模型
+        plugin._enhance(img)
+
+        assert enhancer.seen == [old_model, new_model]
+
+
 class TestSharedUpscalerLock:
     """GFPGAN / RestoreFormer 的 bg_upsampler 是同一个 RealESRGANer。"""
 

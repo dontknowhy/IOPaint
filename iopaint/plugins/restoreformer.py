@@ -44,6 +44,10 @@ class RestoreFormerPlugin(BasePlugin):
         """
         lock = self.upscaler.lock if self.upscaler is not None else nullcontext()
         with lock:
+            if self.upscaler is not None:
+                # RealESRGAN 运行期 switch_model 只替换 upscaler.model；构造时抓的
+                # 旧 RealESRGANer 会让背景继续用旧模型，必须在共享锁内重新绑定。
+                self.face_enhancer.bg_upsampler = self.upscaler.model
             return self.face_enhancer.enhance(
                 bgr_np_img,
                 has_aligned=False,
