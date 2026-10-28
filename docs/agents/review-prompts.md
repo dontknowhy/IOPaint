@@ -48,10 +48,18 @@ mutmut show <id>              # inspect one survivor
 rm -rf mutants                # scratch dir; safe to delete at any time
 ```
 
-Measured on `only_mutate = ["iopaint/helper.py"]` (2026-10, one 8-core machine): 662 mutants in **70 s**
-(9.5 mutations/s), 517 killed / 143 survived / 2 timeout → **78.1 % kill rate**. Survivors cluster in
-`adjust_mask` (29), `only_keep_largest_contour` (20), `download_model` (14), `gen_frontend_mask` (12) — image-path
-and network-path code where tests assert the happy path only.
+Measured baselines (2026-10, one 8-core machine, both with `-m "not slow"`):
+
+- `only_mutate = ["iopaint/helper.py"]`: 662 mutants in **70 s** (9.5 mutations/s), 517 killed / 143 survived /
+  2 timeout → **78.1 % kill rate — helper.py's score, not a repo-wide number**. Survivors cluster in `adjust_mask`
+  (29), `only_keep_largest_contour` (20), `download_model` (14), `gen_frontend_mask` (12) — image-path and
+  network-path code where tests assert the happy path only.
+- `only_mutate = ["iopaint/api.py"]` (current target): 1543 mutants in **5 min 03 s** wall (7.12 mutations/s after the
+  baseline), 1345 killed / 198 survived / 0 timeout → **87.2 % kill rate**. Survivors cluster in `api_export` (60),
+  `_media_type_for_ext` (32), `api_run_plugin_gen_mask` (17), `_diffuser_callback` (12), `api_save_image` (11) —
+  export/format and plugin-mask paths, where the suite asserts status codes but not the encoded bytes or the emitted
+  events. The two rates are not comparable across files: each mutant's chance of being killed depends on how much
+  surrounding plumbing the suite happens to touch.
 
 One hard-won config constraint and one now-fixed isolation pitfall, both explained in comments
 (`pyproject.toml` / the test file) — do not "simplify" either away:
@@ -60,7 +68,13 @@ One hard-won config constraint and one now-fixed isolation pitfall, both explain
   a decorator (except a bare `@staticmethod`/`@classmethod`), see the `FunctionDef` branch in
   `mutmut/mutation/file_mutation.py`. `iopaint/schema.py` is nearly all `@property`/`@computed_field`/
   `@model_validator`, so it yields **0 usable mutants** and the run aborts with "could not find any test case for
-  any mutant". `iopaint/helper.py` (26 top-level plain functions) works.
+  any mutant". `iopaint/helper.py` (26 top-level plain functions) works, and so does `iopaint/api.py`: its only
+  decorated members are the two `@app.middleware` and two `@app.exception_handler` class-level wrappers, while every
+  route method registered through `add_api_route` and the bare `@staticmethod _validate_rect` are mutated.
+- **`source_paths` must include `scripts`.** `test_check_types.py` imports `scripts.check_types`, and mutmut copies
+  only `source_paths` into `mutants/`; with `source_paths = ["iopaint"]` collection dies with
+  `ModuleNotFoundError: No module named 'scripts'` and the whole run exits during stats — measured
+  `failed to collect stats. runner returned 1`.
 - **The `importlib.reload(runtime)` pollution is fixed — background only, no deselect remains.** reload shares the
   module dict but rebuilds the classes inside it, so `list_gpus()` returned instances of a *new* `GpuInfo` while the
   test module's top-level import still held the old one; frozen-dataclass `__eq__` compares `other.__class__ is
@@ -69,8 +83,8 @@ One hard-won config constraint and one now-fixed isolation pitfall, both explain
   `pytest` never tripped it because the test sat last in its file; mutmut's set-ordered subsets could put it first,
   hence the old `--deselect`. The file now carries an autouse `_restore_runtime_module` fixture that snapshots
   `iopaint.runtime.__dict__` on setup and writes it back on teardown, so state cannot leak whatever the order, and
-  `pyproject.toml` has no deselect any more (re-measured 2026-10: `mutmut run` still 662 mutants / 517 killed /
-  143 survived / 2 timeout — identical to the baseline above).
+  `pyproject.toml` has no deselect any more (re-measured 2026-10 with the helper.py target: `mutmut run` still
+  662 mutants / 517 killed / 143 survived / 2 timeout — identical to the baseline above).
 
 Judgment rule: **a surviving mutant is a test that claims coverage it does not deliver.** For each survivor, decide:
 

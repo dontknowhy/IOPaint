@@ -38,16 +38,20 @@ module = [
 ignore_errors = true
 
 # mutmut（本地变异测试侦察用，非 CI 门禁；见 docs/agents/review-prompts.md）。
-# source_paths 只复制 iopaint 包（测试、pytest.ini 随行），only_mutate 把变异限制在单个文件，
+# source_paths 只复制 iopaint 包 + scripts（测试、pytest.ini 随行）：test_check_types.py 从
+# scripts.check_types 导入，而 mutmut 只复制 source_paths，少了 scripts 会在收集阶段
+# ModuleNotFoundError、整个 run 在 stats 阶段就退出。only_mutate 把变异限制在单个文件，
 # -m "not slow" 保证权重/GPU 用例不进基线。only_mutate 必须选"未被装饰器包住的函数所在的
 # 文件"：mutmut 3.8 跳过一切带装饰器的函数（file_mutation.py 的 FunctionDef 分支），schema.py
-# 因此产出 0 个可用变异体，helper.py 的裸函数则能正常生成。
+# 因此产出 0 个可用变异体。当前目标是 api.py：它的中间件/异常处理器是类方法上的装饰器，
+# 只有 add_api_route 注册的裸方法与 _validate_rect（裸 @staticmethod，mutmut 白名单）
+# 参与变异，撤销租约、extender 面积、请求体上限这些契约都在这些函数里。
 # 不需要 deselect 任何用例：test_runtime_gaps 的 reload 污染已由该文件的
 # _restore_runtime_module fixture 在每个测试结束时把 iopaint.runtime 的 module dict
 # 还原成进测试时的快照修复，mutmut 按 set 顺序乱序跑子集同样安全。
 [tool.mutmut]
-source_paths = ["iopaint"]
-only_mutate = ["iopaint/helper.py"]
+source_paths = ["iopaint", "scripts"]
+only_mutate = ["iopaint/api.py"]
 pytest_add_cli_args = [
     "-m",
     "not slow",
