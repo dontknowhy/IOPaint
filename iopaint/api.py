@@ -1,11 +1,12 @@
 import asyncio
 import base64
+import binascii
 import math
 import os
 import time
 import traceback
 from pathlib import Path
-from typing import Optional, Dict, List, Type
+from typing import Any, Dict, List, MutableMapping, Optional, Type
 
 import cv2
 import numpy as np
@@ -129,9 +130,16 @@ def _max_pixels_for_request(request: Optional[Request]) -> Optional[int]:
 
     内网来源（回环/私有网段，见 helper.is_private_host）返回 None（不限制），
     外网来源沿用 1 亿像素上限。直连部署下 request.client.host 即真实来源 IP；
-    取不到（None/无法解析）一律按外网处理。
+    取不到（None/无法解析）一律按外网处理。带 Forwarded / X-Forwarded-For /
+    X-Real-IP 的请求说明前面有反向代理，对端地址不是真实来源，一律按外网
+    处理；Docker -p 发布端口仍然看起来是内网地址，这是运维侧接受的选择。
     """
     host = request.client.host if request is not None and request.client else None
+    if request is not None and any(
+        request.headers.get(name)
+        for name in ("forwarded", "x-forwarded-for", "x-real-ip")
+    ):
+        return EXTERNAL_MAX_IMAGE_PIXELS
     if is_private_host(host):
         return PRIVATE_MAX_IMAGE_PIXELS
     return EXTERNAL_MAX_IMAGE_PIXELS
@@ -139,11 +147,17 @@ def _max_pixels_for_request(request: Optional[Request]) -> Optional[int]:
 
 def _data_url_to_bytes(encoding: str) -> bytes:
     """base64/data-url → 原始字节（不落盘、不二次编码）。"""
-    if encoding.startswith("data:image/") or encoding.startswith(
-        "data:application/octet-stream;base64,"
-    ):
-        encoding = encoding.split(";", 1)[1].split(",", 1)[1]
-    return base64.b64decode(encoding)
+    if not encoding.startswith("data:"):
+        return base64.b64decode(encoding)
+    # 只接受 data:*;base64,<payload>：缺 ";base64" 标记或载荷不是合法
+    # base64 都是客户端错误，按 400 回，而不是 500。
+    try:
+        header, payload = encoding.split(",", 1)
+        if not header.endswith(";base64"):
+            raise ValueError("data URL is not base64 encoded")
+        return base64.b64decode(payload, validate=True)
+    except (ValueError, binascii.Error):
+        raise HTTPException(status_code=400, detail="invalid data URL")
 
 
 def _media_type_for_ext(ext: str) -> str:
@@ -262,20 +276,45 @@ def api_middleware(app: FastAPI):
     @app.middleware("http")
     async def body_size_limit(request: Request, call_next):
         # DOS-1: 请求体上限。image/mask 是 base64 字符串，schema 侧已按字段限长，
-        # 这里再按 Content-Length 兜一层（防其它大 body 端点）。
+        # 这里再兜一层（防其它大 body 端点）。Content-Length 是快路径；
+        # chunked / 无该头的请求按 ASGI receive 通道实际收到的字节累计，
+        # 超限立刻停止读取并回 413，避免无界 body 流进 JSON/base64 解析。
+        def too_large() -> JSONResponse:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "error": "RequestEntityTooLarge",
+                    "detail": f"Request body too large (limit {MAX_REQUEST_BODY_BYTES} bytes)",
+                    "body": "",
+                    "errors": "",
+                },
+            )
+
         content_length = request.headers.get("content-length")
         if content_length and content_length.isdigit():
             if int(content_length) > MAX_REQUEST_BODY_BYTES:
-                return JSONResponse(
-                    status_code=413,
-                    content={
-                        "error": "RequestEntityTooLarge",
-                        "detail": f"Request body too large (limit {MAX_REQUEST_BODY_BYTES} bytes)",
-                        "body": "",
-                        "errors": "",
-                    },
-                )
-        return await call_next(request)
+                return too_large()
+
+        receive = request._receive
+        received = 0
+        over_limit = False
+
+        async def counting_receive() -> MutableMapping[str, Any]:
+            nonlocal received, over_limit
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > MAX_REQUEST_BODY_BYTES:
+                    over_limit = True
+                    # 超限块不再交给下游：回一个结束消息让 body 解析立刻收尾，
+                    # 响应由本中间件替换成 413。直接 raise 会被内层
+                    # BaseHTTPMiddleware 的 task group 包成 ExceptionGroup 记成 500。
+                    return {"type": "http.request", "body": b"", "more_body": False}
+            return message
+
+        request._receive = counting_receive
+        response = await call_next(request)
+        return too_large() if over_limit else response
 
     @app.exception_handler(Exception)
     async def fastapi_exception_handler(request: Request, e: Exception):
@@ -983,11 +1022,11 @@ class Api:
 
     def launch(self):
         self.app.include_router(self.router)
+        # keep-alive 用 uvicorn 默认值；固定成超大值会让空闲连接永不回收，放大 fd/内存占用
         uvicorn.run(
             self.combined_asgi_app,
             host=self.config.host,
             port=self.config.port,
-            timeout_keep_alive=999999999,
         )
 
     def _build_file_manager(self) -> Optional[FileManager]:

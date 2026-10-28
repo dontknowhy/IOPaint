@@ -262,6 +262,26 @@ class TestInputBounds:
         with pytest.raises(ValidationError):
             InpaintRequest(mask="x" * 64_000_001)
 
+    def test_plugin_image_too_long_rejected(self) -> None:
+        with pytest.raises(ValidationError) as ei:
+            RunPluginRequest(name="x", image="A" * 64_000_001)
+        assert ei.value.errors()[0]["loc"] == ("image",)
+        assert RunPluginRequest(name="x", image="A" * 64_000_000).image
+
+    def test_adjust_mask_too_long_rejected(self) -> None:
+        with pytest.raises(ValidationError) as ei:
+            AdjustMaskRequest(mask="A" * 64_000_001, operate="expand")
+        assert ei.value.errors()[0]["loc"] == ("mask",)
+        assert AdjustMaskRequest(mask="A" * 64_000_000, operate="expand").mask
+
+    def test_plugin_scale_bounds(self) -> None:
+        """scale 会作为 outscale 乘到输出尺寸上（12MP × 1000 ≈ 1.2e13 像素）。"""
+        for bad in (0, -1, 1000):
+            with pytest.raises(ValidationError):
+                RunPluginRequest(name="x", image="aGk=", scale=bad)
+        for ok in (2, 4):
+            assert RunPluginRequest(name="x", image="aGk=", scale=ok).scale == ok
+
     def test_normal_size_image_ok(self):
         req = InpaintRequest(image="a" * 1000, mask="b" * 1000)
         assert req.image is not None

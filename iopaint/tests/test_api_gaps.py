@@ -114,6 +114,42 @@ class TestRichExceptionPath:
 
 
 # ---------------------------------------------------------------------------
+# 请求体上限：没有 Content-Length 的 chunked 请求也要按实收字节数拒绝
+# ---------------------------------------------------------------------------
+
+
+class TestBodyLimitReceivedBytes:
+    def test_chunked_body_over_limit_is_413(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """httpx 对迭代器 content 用 chunked 编码，不带 Content-Length；
+        累计 3000 字节超过 2048 上限，必须在进入 JSON 解析前回 413。"""
+        monkeypatch.setattr(api_mod, "MAX_REQUEST_BODY_BYTES", 2048)
+        _, client = _client(tmp_path)
+        resp = client.post(
+            "/api/v1/inpaint",
+            content=iter([b"x" * 1500, b"y" * 1500]),
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 413
+        assert resp.json()["error"] == "RequestEntityTooLarge"
+
+    def test_declared_content_length_over_limit_is_413(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """保留 Content-Length 快路径：不实际读取 body 也能拒绝。"""
+        monkeypatch.setattr(api_mod, "MAX_REQUEST_BODY_BYTES", 2048)
+        _, client = _client(tmp_path)
+        resp = client.post(
+            "/api/v1/inpaint",
+            content=b"x",
+            headers={"Content-Type": "application/json", "Content-Length": "3000"},
+        )
+        assert resp.status_code == 413
+        assert resp.json()["error"] == "RequestEntityTooLarge"
+
+
+# ---------------------------------------------------------------------------
 # emit_from_thread / _log_emit_error：socketio 进度事件的线程侧安全网
 # ---------------------------------------------------------------------------
 
@@ -826,3 +862,50 @@ class TestRichImportFailureFallback:
         resp = TestClient(app, raise_server_exceptions=False).get("/boom")
         assert resp.status_code == 500
         assert resp.json()["error"] == "ValueError"
+
+
+# ---------------------------------------------------------------------------
+# /export：format 只接受 ExportFormat；畸形 data URL 是 400 而不是 500
+# ---------------------------------------------------------------------------
+
+
+class TestExportFormat:
+    def test_unknown_format_is_422(self, tmp_path: Path) -> None:
+        _, client = _client(tmp_path)
+        resp = client.post(
+            "/api/v1/export",
+            json={"image": _b64_image(), "format": "notaformat"},
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"][0]["loc"] == ["body", "format"]
+
+    def test_valid_format_still_exports(self, tmp_path: Path) -> None:
+        _, client = _client(tmp_path)
+        resp = client.post(
+            "/api/v1/export",
+            json={"image": _b64_image(), "format": "png"},
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "image/png"
+
+
+class TestDataUrlErrors:
+    def test_missing_base64_marker_is_400(self, tmp_path: Path) -> None:
+        """缺 ";base64," 的 data URL 是客户端错误：400，而不是 500。"""
+        _, client = _client(tmp_path)
+        resp = client.post("/api/v1/export", json={"image": "data:image/png"})
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "invalid data URL"
+
+    def test_invalid_base64_payload_is_400(self, tmp_path: Path) -> None:
+        _, client = _client(tmp_path)
+        resp = client.post(
+            "/api/v1/export", json={"image": "data:image/png;base64,!!!!"}
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "invalid data URL"
+
+    def test_plain_base64_still_accepted(self, tmp_path: Path) -> None:
+        _, client = _client(tmp_path)
+        resp = client.post("/api/v1/export", json={"image": _b64_image()})
+        assert resp.status_code == 200

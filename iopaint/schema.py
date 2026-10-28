@@ -545,7 +545,7 @@ class ExportRequest(BaseModel):
     revision: Optional[str] = Field(None, max_length=128)
     image: Optional[str] = Field(None, max_length=64_000_000)
     # 目标格式；缺省跟随 revision 的源格式 / 上传图片的真实格式
-    format: Optional[str] = Field(None, max_length=16)
+    format: Optional[ExportFormat] = None
     quality: Optional[int] = Field(None, ge=1, le=100)
     subsampling: Optional[Literal["444", "420", "keep"]] = None
     export_mode: Optional[Literal["dct_patch", "full"]] = None
@@ -553,11 +553,16 @@ class ExportRequest(BaseModel):
 
 class RunPluginRequest(BaseModel):
     name: str
-    image: str = Field(..., description="base64 encoded image")
+    image: str = Field(
+        ...,
+        max_length=64_000_000,
+        description="base64 encoded image",
+    )
     clicks: List[List[int]] = Field(
         [], description="Clicks for interactive seg, [[x,y,0/1], [x2,y2,0/1]]"
     )
-    scale: float = Field(2.0, description="Scale for upscaling")
+    # RealESRGANUpscaler 把它当 outscale 传给 RealESRGANer.enhance（输出尺寸 ×scale）
+    scale: float = Field(2.0, gt=0, le=8, description="Scale for upscaling")
 
 
 MediaTab = Literal["input", "output", "mask"]
@@ -610,7 +615,9 @@ AdjustMaskOperate = Literal["expand", "shrink", "reverse"]
 
 class AdjustMaskRequest(BaseModel):
     mask: str = Field(
-        ..., description="base64 encoded mask. 255 means area to do inpaint"
+        ...,
+        max_length=64_000_000,
+        description="base64 encoded mask. 255 means area to do inpaint",
     )
     operate: AdjustMaskOperate = Field(..., description="expand/shrink/reverse")
     kernel_size: int = Field(

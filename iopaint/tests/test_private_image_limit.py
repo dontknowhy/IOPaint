@@ -2,14 +2,15 @@
 
 外网来源沿用 1 亿像素上限（>上限告警、>2×上限抛错，与 Pillow 原生语义一致），
 内网来源（回环 / 私有网段 / 链路本地）不限制。判定依据 request.client.host，
-直连部署下即真实来源 IP。这里用 TestClient 的 client= 注入来源，并把
-api.EXTERNAL_MAX_IMAGE_PIXELS 调小到 4096，避免真的构造上亿像素的图。
+直连部署下即真实来源 IP；带 Forwarded / X-Forwarded-For / X-Real-IP 的请求
+说明对端是反向代理，一律按外网处理。这里用 TestClient 的 client= 注入来源，
+并把 api.EXTERNAL_MAX_IMAGE_PIXELS 调小到 4096，避免真的构造上亿像素的图。
 """
 import base64
 import io
 import warnings
 from pathlib import Path
-from typing import cast
+from typing import Dict, Optional, cast
 
 import httpx
 import numpy as np
@@ -86,18 +87,21 @@ def _minimal_config(tmp_path: Path) -> ApiConfig:
 
 
 class _FakeRequest:
-    """只带 client.host 的 Request 替身，供 _max_pixels_for_request 单测。"""
+    """只带 client.host / headers 的 Request 替身，供 _max_pixels_for_request 单测。"""
 
     class _Client:
         def __init__(self, host: str) -> None:
             self.host = host
 
-    def __init__(self, host: str) -> None:
+    def __init__(self, host: str, headers: Optional[Dict[str, str]] = None) -> None:
         self.client = self._Client(host)
+        self.headers = headers or {}
 
 
-def _fake_request(host: str) -> Request:
-    return cast(Request, _FakeRequest(host))
+def _fake_request(
+    host: str, headers: Optional[Dict[str, str]] = None
+) -> Request:
+    return cast(Request, _FakeRequest(host, headers))
 
 
 class TestIsPrivateHost:
@@ -176,6 +180,24 @@ class TestMaxPixelsForRequest:
     def test_missing_request_is_external(self) -> None:
         assert _max_pixels_for_request(None) == EXTERNAL_MAX_IMAGE_PIXELS
 
+    @pytest.mark.parametrize(
+        "headers",
+        [
+            {"forwarded": "for=203.0.113.9"},
+            {"x-forwarded-for": "203.0.113.9"},
+            {"x-real-ip": "203.0.113.9"},
+        ],
+    )
+    def test_proxied_private_peer_is_external(
+        self, headers: Dict[str, str]
+    ) -> None:
+        """同机反向代理会让所有客户端都像 127.0.0.1：带转发头即不可信。"""
+        req = _fake_request("192.168.1.50", headers)
+        assert _max_pixels_for_request(req) == EXTERNAL_MAX_IMAGE_PIXELS
+
+    def test_private_peer_without_proxy_header_is_unlimited(self) -> None:
+        assert _max_pixels_for_request(_fake_request("192.168.1.50")) is None
+
 
 class TestDecodeMaxPixels:
     def test_decode_private_allows_over_limit(self) -> None:
@@ -202,15 +224,20 @@ class TestApiSourceDependentLimit:
         return TestClient(app, client=client, raise_server_exceptions=False)
 
     def _post_inpaint(
-        self, client: TestClient, size: tuple[int, int]
+        self,
+        client: TestClient,
+        size: tuple[int, int],
+        headers: Optional[Dict[str, str]] = None,
     ) -> httpx.Response:
         req = InpaintRequest.model_validate(
             {"image": _b64_png(size), "mask": _b64_mask(size), "hd_strategy": "Original"}
         )
+        merged = {"Content-Type": "application/json"}
+        merged.update(headers or {})
         return client.post(
             "/api/v1/inpaint",
             content=req.model_dump_json(),
-            headers={"Content-Type": "application/json"},
+            headers=merged,
         )
 
     def test_private_client_bypasses_limit(
@@ -222,6 +249,18 @@ class TestApiSourceDependentLimit:
         resp = self._post_inpaint(client, (100, 100))
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("image/")
+
+    def test_proxied_private_client_uses_external_limit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """同机反代场景：对端是 192.168.x.x，但带 X-Forwarded-For 就按外网限制。"""
+        monkeypatch.setattr(api_mod, "EXTERNAL_MAX_IMAGE_PIXELS", self.CAP)
+        client = self._client(tmp_path, PRIVATE_CLIENT)
+        resp = self._post_inpaint(
+            client, (100, 100), headers={"X-Forwarded-For": "203.0.113.9"}
+        )
+        assert resp.status_code == 500
+        assert resp.json()["error"] == "DecompressionBombError"
 
     def test_public_client_over_double_limit_is_rejected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

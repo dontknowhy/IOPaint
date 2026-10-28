@@ -46,7 +46,7 @@ class InpaintModel:
     def forward(self, image, mask, config: InpaintRequest):
         """Input images and output images have same size
         images: [H, W, C] RGB
-        masks: [H, W, 1] 255 为 masks 区域
+        masks: [H, W] 255 为 masks 区域
         return: BGR IMAGE
         """
         ...

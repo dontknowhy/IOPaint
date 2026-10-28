@@ -126,11 +126,16 @@ belongs on a local GPU box.
   each class's `pad_mod` and `is_erase_model` flags.
 - Image size limits are per-source, not global: `iopaint/__init__.py` disables Pillow's `MAX_IMAGE_PIXELS`, and every
   decode takes `max_pixels` from `_max_pixels_for_request` (`api.py`) — 100MP for external clients, unlimited for
-  loopback/RFC1918. New decode paths must pass it; don't re-enable the global Pillow check. The extender canvas (source
-  image ∪ extender rect, the union `iopaint/model/base.py:_do_outpainting` builds) is capped by the same `max_pixels`
+  loopback/RFC1918 (a request carrying `Forwarded`/`X-Forwarded-For`/`X-Real-IP` counts as external, since a same-host
+  reverse proxy otherwise makes every client look private). New decode paths must pass it; don't re-enable the global
+  Pillow check. The extender canvas (source image ∪ extender rect, the union
+  `iopaint/model/base.py:_do_outpainting` builds) is capped by the same `max_pixels`
   and answers 413 before inference, because the canvas can be far larger than the decoded image. Both decode paths run
   high-bit-depth grayscale (`I;16`, `I;16B`, `I;16L`, `I`) through `helper._to_8bit_gray` first: Pillow's `convert()`
   clips those modes to 255 instead of scaling, which turns a 16-bit gradient — or a 16-bit mask — solid white.
+- Request bodies are capped by `api_middleware`'s `body_size_limit` (`api.py`): declared `Content-Length` is the fast
+  path, then the bytes actually received through the wrapped ASGI `receive` are counted, so chunked / header-less bodies
+  also get the 413 (`error: RequestEntityTooLarge`) instead of reaching the JSON/base64 decoders.
 - Plugins are built by `iopaint/plugins/__init__.py:build_plugins` from `--enable-*` flags. Their deps
   (`onnxruntime<=1.19.2`, `rembg[cpu]`) are **not** in `requirements.txt` — use `iopaint install-plugins-packages`.
   `GFPGANPlugin`/`RestoreFormerPlugin` share one `RealESRGANUpscaler` and use its `RealESRGANer` as `bg_upsampler`,
