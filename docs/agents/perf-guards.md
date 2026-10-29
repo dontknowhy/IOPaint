@@ -79,6 +79,25 @@ python -m pytest benchmarks -m bench -s      # 2 tests, ~5s
 - **Threshold**: boolean / call-count.
 - **Suite**: fast.
 
+## 5. 推理延迟基准 — `benchmarks/test_inpaint_latency.py` **implemented**
+
+- **What**: LaMa 单次推理（256/512/1024）与 SD1.5 inpainting UNet 单步（512 输出、batch=2、
+  latent 64×64）的 median/p90/min/max 和峰值显存。用于判断 `torch.compile`/AOTInductor
+  是否值得做，以及改动前后的回归对比。
+- **How**: `ModelManager(name="lama", device=cuda:0)` 走真实加载路径；UNet 从本地 HF cache
+  读取（`local_files_only=True`）。权重/显卡缺失时 `pytest.skip`，不下载任何东西。
+- **Which GPU**: 默认 `cuda:0`，用 `IOPAINT_BENCH_GPU=N` 换卡；每行输出都带
+  `name cuda:N <MiB> sm_XY`，因为 `cuda:0` 不一定是快卡。UNet 用例要求 ≥5120 MiB，
+  显存更小的卡会带原因 skip 而不是 OOM。
+- **Run**: `python -m pytest benchmarks -m bench -s`（不在 `testpaths`，CI 不收集）
+- **Suite**: local/slow；只记录数字，不设通用阈值。具体机器要做回归时，用本文件打印的
+  median 建立 `baseline * 1.5` 阈值，并按 `docs/agents/perf-guards.md` 的通用规则跑多轮。
+- **Measured baseline**（单卡 CUDA，torch 2.14.1+cu126，fp32；卡型见运行时输出）：
+  - LaMa 端到端（含 host↔GPU 拷贝与 numpy 转换）256×256 **62.2 ms**、512×512 **179.6 ms**、
+    1024×1024 **687.5 ms**（峰值显存 230/331/732 MB）；纯 GPU 前向分别约 36/120 ms（不含拷贝）
+  - SD1.5 UNet 单步 **411.0 ms**（fp32，batch=2，latent 64×64，峰值显存 3875 MB）
+  - `cudnn.benchmark=True` 对两者无收益；`channels_last` 让 UNet 慢到 449.4 ms
+
 ## Pick order (suggestion for the human)
 
 **#1 is already landed** (see its section). Of the remaining three: 4 is the cheapest to land; 2 is fast if the
