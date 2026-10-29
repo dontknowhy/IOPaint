@@ -90,6 +90,9 @@ class RetinaFace(nn.Module):
         self.phase = phase
         self.target_size, self.max_size = 1600, 2150
         self.resize, self.scale, self.scale1 = 1.0, None, None
+        # PriorBox 只依赖输入尺寸，缓存最近一次的 anchors；同尺寸图片（批处理/视频帧）不必重复构建
+        self._priors_shape = None
+        self._priors = None
         self.mean_tensor = torch.tensor(
             [[[[104.0]], [[117.0]], [[123.0]]]], device=self.device
         )
@@ -187,8 +190,11 @@ class RetinaFace(nn.Module):
         loc, conf, landmarks = self(inputs)
 
         # get priorbox
-        priorbox = PriorBox(self.cfg, image_size=inputs.shape[2:])
-        priors = priorbox.forward().to(self.device)
+        shape = tuple(inputs.shape[2:])
+        if shape != self._priors_shape:
+            self._priors = PriorBox(self.cfg, image_size=shape).forward()
+            self._priors_shape = shape
+        priors = self._priors.to(self.device)
 
         return loc, conf, landmarks, priors
 
