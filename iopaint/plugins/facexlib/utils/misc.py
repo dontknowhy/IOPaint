@@ -56,7 +56,7 @@ def img2tensor(imgs, bgr2rgb=True, float32=True):
         return _totensor(imgs, bgr2rgb, float32)
 
 
-def load_file_from_url(url, model_dir=None, progress=True, file_name=None, save_dir=None):
+def load_file_from_url(url, model_dir=None, progress=True, file_name=None, save_dir=None, hash_prefix=None):
     """Ref:https://github.com/1adrianb/face-alignment/blob/master/face_alignment/utils.py
     """
     if model_dir is None:
@@ -74,7 +74,7 @@ def load_file_from_url(url, model_dir=None, progress=True, file_name=None, save_
     cached_file = os.path.abspath(os.path.join(save_dir, filename))
     if not os.path.exists(cached_file):
         print(f'Downloading: "{url}" to {cached_file}\n')
-        download_url_to_file(url, cached_file, hash_prefix=None, progress=progress)
+        download_url_to_file(url, cached_file, hash_prefix=hash_prefix, progress=progress)
     return cached_file
 
 

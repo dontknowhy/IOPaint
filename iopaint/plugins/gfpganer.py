@@ -78,7 +78,7 @@ class MyGFPGANer:
             model_rootpath=model_dir,
         )
 
-        loadnet = torch.load(model_path)
+        loadnet = torch.load(model_path, map_location="cpu", weights_only=True)
         if "params_ema" in loadnet:
             keyname = "params_ema"
         else:
@@ -87,7 +87,7 @@ class MyGFPGANer:
         self.gfpgan.eval()
         self.gfpgan = self.gfpgan.to(self.device)
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def enhance(
         self,
         img,

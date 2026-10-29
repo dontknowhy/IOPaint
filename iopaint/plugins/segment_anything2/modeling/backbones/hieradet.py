@@ -265,7 +265,7 @@ class Hiera(nn.Module):
         )
 
         if weights_path is not None:
-            chkpt = torch.load(weights_path, map_location="cpu")
+            chkpt = torch.load(weights_path, map_location="cpu", weights_only=True)
             logging.info("loading Hiera", self.load_state_dict(chkpt, strict=False))
 
     def _get_pos_embed(self, hw: Tuple[int, int]) -> torch.Tensor:
