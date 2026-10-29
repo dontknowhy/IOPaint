@@ -1,5 +1,7 @@
 import os
 import random
+from contextlib import contextmanager
+from typing import Iterator
 
 import cv2
 import torch
@@ -1621,6 +1623,26 @@ FCF_MODEL_URL = os.environ.get(
 FCF_MODEL_MD5 = os.environ.get("FCF_MODEL_MD5", "3323152bc01bf1c56fd8aba74435a211")
 
 
+@contextmanager
+def _cudnn_deterministic() -> Iterator[None]:
+    """Run the FcF forward with deterministic cuDNN without leaking globals.
+
+    ``torch.backends.cudnn.deterministic`` / ``benchmark`` are process-wide; setting
+    them in ``init_model`` made every model loaded afterwards inherit FcF's choice.
+    Save/restore only these two flags instead of calling torch.backends.cudnn.flags,
+    whose unspecified arguments fall back to their own defaults (enabled=False).
+    """
+    old_deterministic = torch.backends.cudnn.deterministic
+    old_benchmark = torch.backends.cudnn.benchmark
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    try:
+        yield
+    finally:
+        torch.backends.cudnn.deterministic = old_deterministic
+        torch.backends.cudnn.benchmark = old_benchmark
+
+
 class FcF(InpaintModel):
     name = "fcf"
     min_size = 512
@@ -1634,8 +1656,6 @@ class FcF(InpaintModel):
         np.random.seed(seed)
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
 
         kwargs = {
             "channel_base": 1 * 32768,
@@ -1725,9 +1745,10 @@ class FcF(InpaintModel):
         erased_img = image * (1 - mask)
         input_image = torch.cat([0.5 - mask, erased_img], dim=1)
 
-        output = self.model(
-            input_image, self.label, truncation_psi=0.1, noise_mode="none"
-        )
+        with _cudnn_deterministic():
+            output = self.model(
+                input_image, self.label, truncation_psi=0.1, noise_mode="none"
+            )
         output = (
             (output.permute(0, 2, 3, 1) * 127.5 + 127.5)
             .round()
