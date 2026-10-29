@@ -6,6 +6,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision.transforms import Normalize, Resize, ToTensor
 
 
@@ -74,4 +75,6 @@ class SAM2Transforms(nn.Module):
         """
         Perform PostProcessing on output masks.
         """
-        return masks
+        return F.interpolate(
+            masks.float(), size=orig_hw, mode="bilinear", align_corners=False
+        )

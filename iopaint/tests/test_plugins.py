@@ -130,4 +130,6 @@ def test_segment_anything(name, device):
     )
 
     save_name = f"test_segment_anything_{name}_{device}.png"
+    # SAM2 的 postprocess_masks 必须把 256×256 的 low-res mask 插值回原图尺寸
+    assert new_mask.shape == rgb_img.shape[:2]
     _save(new_mask, save_name)
