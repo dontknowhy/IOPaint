@@ -45,6 +45,7 @@ default_configs = dict(
     force_fp16=False,
     low_mem=False,
     cpu_offload=False,
+    torch_compile=False,
     disable_nsfw_checker=False,
     local_files_only=False,
     cpu_textencoder=False,
@@ -110,6 +111,7 @@ def save_config(
     force_fp16,
     low_mem,
     cpu_offload,
+    torch_compile,
     disable_nsfw_checker,
     local_files_only,
     cpu_textencoder,
@@ -328,6 +330,9 @@ def build_demo(config_file: Path, i18n: "gr.I18n") -> "gr.Blocks":
                 cpu_offload = gr.Checkbox(
                     init_config.cpu_offload, label=i18n("web_config.cpu_offload")
                 )
+                torch_compile = gr.Checkbox(
+                    init_config.torch_compile, label=i18n("web_config.torch_compile")
+                )
                 low_mem = gr.Checkbox(
                     init_config.low_mem, label=i18n("web_config.low_mem")
                 )
@@ -445,6 +450,7 @@ def build_demo(config_file: Path, i18n: "gr.I18n") -> "gr.Blocks":
                 force_fp16,
                 low_mem,
                 cpu_offload,
+                torch_compile,
                 disable_nsfw_checker,
                 local_files_only,
                 cpu_textencoder,

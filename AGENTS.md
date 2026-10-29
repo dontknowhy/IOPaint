@@ -110,6 +110,12 @@ Slow tests: see docs/agents/slow-tests.md (trigger: running or extending the wei
 downloading model weights). CI only spot-checks erase models via the dispatch-only `slow-smoke.yml`; the full set
 belongs on a local GPU box.
 
+Local runs hard-code no hardware: comments, docstrings and test fixtures never record this machine's GPU index or name,
+free VRAM, driver version or current load — that is state of one box and goes stale on the next. The device is chosen
+per run instead: the card that is idle, has the most free VRAM (a run must not be able to OOM the card it shares), and
+is strongest by compute, judged from the model name you already know rather than a benchmark run first; `nvidia-smi`
+confirms idle/free VRAM and `CUDA_VISIBLE_DEVICES=<idx>` selects the card.
+
 ## Architecture
 
 - Entry: `iopaint/__init__.py:entry_point` → `iopaint/cli.py:typer_app` (typer). `cli.py:start` validates paths, dumps the
@@ -145,6 +151,9 @@ belongs on a local GPU box.
   `ModelManager.get_available_models()`; scanning costs ~2s), don't rebuild diffusion schedulers per call (cached by
   `(sampler, lcm_lora)`), don't reload ControlNet preprocessors per request (lazy singletons), and keep
   `--empty-cache-after-inpaint` default-off.
+- `--torch-compile` opts into a lazy `torch.compile` of the diffusion UNet only (`iopaint/model/torch_compile.py`):
+  CUDA sm≥7.0, plain SD/SDXL, never with `--cpu-offload`. A compile failure or any LCM LoRA use permanently returns
+  that model to eager, so the flag can't turn a request into a 500; the default path stays eager.
 - Revisions: a successful inpaint stores its canonical pixels in `RevisionCache` (`iopaint/revision_cache.py`, LRU,
   `--revision-cache-mb`, optional zstd-compressed undo patches) and returns the hash as `X-Revision`; later `/inpaint`
   and `/export` calls may send `revision` instead of image bytes. Keep `X-Revision` in the CORS `expose_headers` or the

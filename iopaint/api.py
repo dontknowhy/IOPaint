@@ -1093,6 +1093,7 @@ class Api:
             no_half=self.config.no_half,
             force_fp16=self.config.force_fp16,
             low_mem=self.config.low_mem,
+            torch_compile=self.config.torch_compile,
             disable_nsfw=self.config.disable_nsfw_checker,
             sd_cpu_textencoder=self.config.cpu_textencoder,
             local_files_only=self.config.local_files_only,

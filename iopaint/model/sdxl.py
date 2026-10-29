@@ -26,6 +26,7 @@ class SDXL(DiffusionInpaintModel):
     min_size = 512
     lcm_lora_id = "latent-consistency/lcm-lora-sdxl"
     model_id_or_path = "diffusers/stable-diffusion-xl-1.0-inpainting-0.1"
+    supports_torch_compile = True
 
     def init_model(self, device: torch.device, **kwargs):
         from diffusers.pipelines import StableDiffusionXLInpaintPipeline

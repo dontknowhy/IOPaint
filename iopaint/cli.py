@@ -184,6 +184,7 @@ def start(
     no_half: bool = Option(False, help=cli_text("cli.help.no_half")),
     force_fp16: bool = Option(False, help=cli_text("cli.help.force_fp16")),
     cpu_offload: bool = Option(False, help=cli_text("cli.help.cpu_offload")),
+    torch_compile: bool = Option(False, help=cli_text("cli.help.torch_compile")),
     disable_nsfw_checker: bool = Option(
         False, help=cli_text("cli.help.disable_nsfw_checker")
     ),
@@ -332,6 +333,7 @@ def start(
         force_fp16=force_fp16,
         low_mem=low_mem,
         cpu_offload=cpu_offload,
+        torch_compile=torch_compile,
         disable_nsfw_checker=disable_nsfw_checker,
         local_files_only=local_files_only,
         cpu_textencoder=cpu_textencoder if device == Device.cuda else False,

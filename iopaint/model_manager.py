@@ -471,6 +471,13 @@ class ModelManager:
         if not self.available_models[self.name].support_lcm_lora:
             return
 
+        # torch.compile 的 UNet 在 LoRA 改动后可能保留旧图；一旦用过 LCM LoRA
+        # 就永久回到 eager，并先把原 UNet 放回 pipeline，让 diffusers 的 LoRA
+        # 加载/切换看到真实子模块（set_lora_enabled 是单向的）
+        set_lora_enabled = getattr(self.model, "set_lora_enabled", None)
+        if set_lora_enabled is not None:
+            set_lora_enabled(config.sd_lcm_lora)
+
         if config.sd_lcm_lora:
             # TODO: change this if load other lora is supported
             if not bool(self.model.model.get_list_adapters()):

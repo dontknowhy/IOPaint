@@ -23,6 +23,8 @@ class InpaintModel:
     pad_mod = 8
     pad_to_square = False
     is_erase_model = False
+    # 只有纯 SD/SDXL 的 UNet 支持运行时 torch.compile（见 model/torch_compile.py）
+    supports_torch_compile = False
 
     def __init__(self, device, **kwargs):
         """
@@ -293,7 +295,17 @@ class DiffusionInpaintModel(InpaintModel):
         self.model_info = kwargs["model_info"]
         self.model_id_or_path = self.model_info.path
         self._scheduler_cache = {}
+        self._compiled_unet = None
         super().__init__(device, **kwargs)
+        if kwargs.get("torch_compile", False):
+            from .torch_compile import maybe_compile_unet
+
+            self._compiled_unet = maybe_compile_unet(self, self.device, kwargs)
+
+    def set_lora_enabled(self, enabled: bool) -> None:
+        """Keep the UNet eager once LCM LoRA mutates it."""
+        if self._compiled_unet is not None:
+            self._compiled_unet.set_lora_enabled(enabled)
 
     @torch.no_grad()
     def __call__(self, image, mask, config: InpaintRequest):

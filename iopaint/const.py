@@ -54,6 +54,13 @@ Offloads diffusion model's weight to CPU RAM, significantly reducing vRAM usage.
 
 LOW_MEM_HELP = "Enable attention slicing and vae tiling to save memory."
 
+TORCH_COMPILE_HELP = """
+Compile the diffusion UNet with torch.compile. Requires a CUDA GPU with compute
+capability >= 7.0 (Triton); the first inference is slower while the graph is built.
+Only plain SD/SDXL models are supported; ControlNet/BrushNet/PowerPaint/LCM LoRA fall
+back to eager. Ignored with --cpu-offload.
+"""
+
 DISABLE_NSFW_HELP = """
 Disable NSFW checker for diffusion model.
 """

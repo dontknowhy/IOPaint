@@ -265,6 +265,8 @@ class ApiConfig(BaseModel):
     force_fp16: bool = False
     low_mem: bool
     cpu_offload: bool
+    # 只对纯 SD/SDXL 的 UNet 生效；ControlNet/BrushNet/PowerPaint/LCM LoRA 会回退 eager
+    torch_compile: bool = False
     disable_nsfw_checker: bool
     local_files_only: bool
     cpu_textencoder: bool
