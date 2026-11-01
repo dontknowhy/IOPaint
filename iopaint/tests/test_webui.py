@@ -135,6 +135,16 @@ def _history_button(page_obj: Any, icon: str) -> Locator:
     return page_obj.locator(f"button:has(svg.lucide-{icon})")
 
 
+def _toast_text(page_obj: Any, text: str) -> Locator:
+    """toast 的可见正文。Radix 的 ToastAnnounce 会把「Notification <正文>」再塞进一个
+    aria-live 的 VisuallyHidden 区域、挂满 1s 才卸载，所以 document 级的 get_by_text
+    在 toast 刚弹出的那一秒会同时命中它（strict mode 直接抛错，不是重试）。
+    收窄到 toast viewport（role=region，aria-label="Notifications (F8)"）后只剩可见文字。"""
+    return page_obj.locator(
+        '[role="region"][aria-label^="Notifications"]'
+    ).get_by_text(text)
+
+
 def _wait_interactive(page_obj):
     """Radix Select/Dialog 关闭动画期间会给 body 挂 pointer-events:none，
     此时画布上的鼠标事件全部落空（实测约 300ms）。等它复位再画。"""
@@ -589,12 +599,12 @@ class TestDeviceNoticeToast:
         pg.route("**/server-config", inject)
         pg.goto(iopaint_server, wait_until="load", timeout=30000)
 
-        expect(pg.get_by_text(self.NOTICE)).to_be_visible(timeout=8000)
+        expect(_toast_text(pg, self.NOTICE)).to_be_visible(timeout=8000)
 
         # 页面加载会拉两次 server-config（App 的 getServerConfig + Settings 的
         # react-query），第二趟必须被 setServerConfig 里的 shownDeviceNotice 挡掉
         pg.wait_for_timeout(1500)
-        count = pg.get_by_text(self.NOTICE).count()
+        count = _toast_text(pg, self.NOTICE).count()
         assert count == 1, f"同一条 deviceNotice 弹了 {count} 次"
 
         ctx.close()
@@ -847,10 +857,11 @@ class TestInpaintErrorToast:
         _upload_image(pg, tmp_path)
         _draw_stroke(pg)
 
-        expect(pg.get_by_text(self.DETAIL)).to_be_visible(timeout=8000)
+        expect(_toast_text(pg, self.DETAIL)).to_be_visible(timeout=8000)
         expect(
-            pg.get_by_text(
-                "Please take a screenshot of the detailed error message in your terminal"
+            _toast_text(
+                pg,
+                "Please take a screenshot of the detailed error message in your terminal",
             )
         ).to_be_visible(timeout=3000)
         expect(_save_button(pg)).to_be_disabled(timeout=3000)
