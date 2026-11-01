@@ -123,6 +123,48 @@ def _bbox_of_diff(diff: np.ndarray) -> Optional[Box]:
     return int(cols[0]), int(rows[0]), int(cols[-1]) + 1, int(rows[-1]) + 1
 
 
+def _outside_equal(
+    canonical: np.ndarray, result: np.ndarray, region: Box
+) -> bool:
+    """矩形之外的像素是否逐字节相同。
+
+    `tobytes()` 走 memcpy/memcmp，比 12MP 的全帧 `!=`（实测 158ms）快一个
+    数量级；只要盒外全部相同，盒内那把比较就等于整帧比较的结果。
+    """
+    x1, y1, x2, y2 = region
+    return (
+        canonical[:y1].tobytes() == result[:y1].tobytes()
+        and canonical[y2:].tobytes() == result[y2:].tobytes()
+        and canonical[y1:y2, :x1].tobytes() == result[y1:y2, :x1].tobytes()
+        and canonical[y1:y2, x2:].tobytes() == result[y1:y2, x2:].tobytes()
+    )
+
+
+def _diff_hinted(
+    canonical: np.ndarray, result: np.ndarray, region: Optional[Box]
+) -> np.ndarray:
+    """逐像素变化图；有可信的 ``region`` 时只比较盒内。
+
+    ``region`` 来自调用方的“模型可能改写区”（掩膜包围盒 + crop 边距），盒外
+    先做一次逐字节校验：不相等说明提示不准（模型写了别处），直接退回全帧比较，
+    所以这里永远返回与全帧比较等价的结果。
+    """
+    if region is not None:
+        h, w = canonical.shape[:2]
+        x1, y1, x2, y2 = region
+        x1, x2 = max(0, min(x1, w)), max(0, min(x2, w))
+        y1, y2 = max(0, min(y1, h)), max(0, min(y2, h))
+        if x1 < x2 and y1 < y2 and _outside_equal(
+            canonical, result, (x1, y1, x2, y2)
+        ):
+            diff = np.zeros((h, w), dtype=bool)
+            diff[y1:y2, x1:x2] = np.any(
+                result[y1:y2, x1:x2] != canonical[y1:y2, x1:x2], axis=2
+            )
+            return diff
+    return np.any(result != canonical, axis=2)
+
+
 class Lease:
     """一次 inpaint 对某条链的独占租约。
 
@@ -176,13 +218,18 @@ class Lease:
         *,
         alpha: Optional[np.ndarray] = None,
         keep_unmasked_area: bool = True,
+        region: Optional[Box] = None,
     ) -> Optional[str]:
         """提交一轮结果，返回新 revision。未采纳缓存时返回 None。
 
         ``alpha`` 只在画布尺寸变化（outpainting）时生效；同尺寸路径沿用条目里
         已有的 alpha，避免调用方每次都要传。
+
+        ``region`` 是“模型可能改写的矩形”这一性能提示（掩膜包围盒 + CROP 边距）：
+        只在这个矩形内做逐像素比较，盒外仍逐字节校验，校验不过就退回全帧比较。
+        因此猜小了只损失速度，不会漏掉变化。
         """
-        rev = self.cache._commit(self.entry, result_rgb, alpha=alpha)
+        rev = self.cache._commit(self.entry, result_rgb, alpha=alpha, region=region)
         self._committed = True
         return rev
 
@@ -471,6 +518,7 @@ class RevisionCache:
         result_rgb: np.ndarray,
         *,
         alpha: Optional[np.ndarray] = None,
+        region: Optional[Box] = None,
     ) -> Optional[str]:
         with entry.lock:
             old_cost = entry.nbytes
@@ -492,7 +540,7 @@ class RevisionCache:
                     dtype=bool,
                 )
             else:
-                diff = np.any(result_rgb != entry.image, axis=2)
+                diff = _diff_hinted(entry.image, result_rgb, region)
                 box = _bbox_of_diff(diff) if diff.any() else None
                 if box is None:
                     # 空掩膜 / 无变化：不新增 generation，直接复用当前 revision

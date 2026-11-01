@@ -6,7 +6,7 @@ import os
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, MutableMapping, Optional, Type
+from typing import Any, Dict, List, MutableMapping, Optional, Tuple, Type, Union
 
 import cv2
 import numpy as np
@@ -116,13 +116,18 @@ def _display_preview_jpeg(
         alpha = alpha_channel
         if alpha.shape[:2] != (height, width):
             alpha = cv2.resize(alpha, dsize=(width, height))
-        # JPEG 不支持 alpha，透明区域垫白底（与 /export 的 JPEG 分支一致）
-        a = alpha.astype(np.float32)[:, :, np.newaxis] / 255.0
-        arr = np.clip(
-            rgb.astype(np.float32) * a + 255.0 * (1.0 - a), 0, 255
-        ).astype(np.uint8)
+        if (alpha == 255).all():
+            # 全不透明：合成结果按定义就等于原图（a=1 时 rgb*1+255*0，再 clip
+            # 与 astype 都是恒等），省掉 12MP 上 200ms 的 float32 全图运算。
+            arr = rgb
+        else:
+            # JPEG 不支持 alpha，透明区域垫白底（与 /export 的 JPEG 分支一致）
+            a = alpha.astype(np.float32)[:, :, np.newaxis] / 255.0
+            arr = np.clip(
+                rgb.astype(np.float32) * a + 255.0 * (1.0 - a), 0, 255
+            ).astype(np.uint8)
     arr = cv2.resize(arr, dsize=(new_w, new_h), interpolation=cv2.INTER_AREA)
-    return pil_to_bytes(Image.fromarray(arr), ext="jpeg", quality=PREVIEW_QUALITY)
+    return pil_to_bytes(arr, ext="jpeg", quality=PREVIEW_QUALITY)
 
 
 def _max_pixels_for_request(request: Optional[Request]) -> Optional[int]:
@@ -610,6 +615,36 @@ class Api:
                 ),
             )
 
+    @staticmethod
+    def _region_hint(
+        mask: np.ndarray, req: InpaintRequest, shape: Tuple[int, ...]
+    ) -> Optional[Tuple[int, int, int, int]]:
+        """模型可能改写的矩形，给 revision 的逐像素比较兜个范围。
+
+        掩膜包围盒 + `hd_strategy_crop_margin`（CROP 策略会把盒外一圈一起送进
+        网络，LaMa 这类擦除模型把整块 crop 结果贴回去）；用了 cropper 再把
+        裁剪框并进来。**这只是性能提示**：猜小了 `_diff_hinted` 的盒外校验会
+        发现不一致并退回全帧比较，不会漏掉变化。
+        """
+        rows = np.flatnonzero(mask.any(axis=1))
+        if rows.size == 0:
+            return None
+        cols = np.flatnonzero(mask.any(axis=0))
+        margin = int(req.hd_strategy_crop_margin)
+        x1, y1 = int(cols[0]) - margin, int(rows[0]) - margin
+        x2, y2 = int(cols[-1]) + 1 + margin, int(rows[-1]) + 1 + margin
+        if req.use_croper:
+            x1 = min(x1, req.croper_x)
+            y1 = min(y1, req.croper_y)
+            x2 = max(x2, req.croper_x + req.croper_width)
+            y2 = max(y2, req.croper_y + req.croper_height)
+        height, width = shape[:2]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(width, x2), min(height, y2)
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return (x1, y1, x2, y2)
+
     def _inpaint_blocking(
         self,
         req: InpaintRequest,
@@ -632,9 +667,10 @@ class Api:
         raw_bytes: Optional[bytes] = None
         source_hash: Optional[str] = None
         if req.image:
+            # 原始字节只解一次 base64：既喂给下面的解码器，也用来算哈希。
+            # 哈希推迟到真要查表时——12MP PNG 的 sha256 是 27ms，revision
+            # 命中时上传的字节根本用不上。
             raw_bytes = _data_url_to_bytes(req.image)
-            source_hash = sha256_bytes(raw_bytes)
-
         lease = None
         if req.revision:
             lease = self.revision_cache.begin_by_revision(req.revision)
@@ -648,7 +684,8 @@ class Api:
                         status_code=410,
                         detail="revision expired; resend the image bytes",
                     )
-        if lease is None and source_hash is not None:
+        if lease is None and raw_bytes is not None:
+            source_hash = sha256_bytes(raw_bytes)
             lease = self.revision_cache.begin_by_hash(source_hash)
             if lease is None:
                 logger.info(
@@ -670,7 +707,7 @@ class Api:
         else:
             assert req.image is not None
             image, alpha_channel, infos, ext = decode_base64_to_image(
-                req.image, max_pixels=max_pixels
+                req.image, max_pixels=max_pixels, image_bytes=raw_bytes
             )
             source_sampling = (
                 jpeg_sampling_from_bytes(raw_bytes) if raw_bytes else None
@@ -789,7 +826,11 @@ class Api:
                     # 宁可导出成不透明，也不要把旧 alpha resize 到新尺寸。
                     alpha_channel = None
             if lease is not None:
-                revision = lease.commit(result_rgb, alpha=alpha_channel)
+                revision = lease.commit(
+                    result_rgb,
+                    alpha=alpha_channel,
+                    region=self._region_hint(mask, req, image.shape),
+                )
                 # commit 后条目里的 alpha 才是 canonical，刷新本地副本
                 alpha_channel = lease.alpha
                 lease.release()
@@ -816,7 +857,7 @@ class Api:
             )
             internal_format = wire_ext if self.config.stateless_lossless else None
             res_img_bytes = pil_to_bytes(
-                Image.fromarray(rgb_res),
+                rgb_res,
                 ext=wire_ext,
                 quality=self.config.quality,
                 infos=infos,
@@ -876,7 +917,9 @@ class Api:
             assert req.image is not None
             raw = _data_url_to_bytes(req.image)
             image, alpha_channel, infos, decoded_ext = decode_base64_to_image(
-                req.image, max_pixels=_max_pixels_for_request(request)
+                req.image,
+                max_pixels=_max_pixels_for_request(request),
+                image_bytes=raw,
             )
             source_ext = decoded_ext
             source_sampling = jpeg_sampling_from_bytes(raw)
@@ -935,15 +978,23 @@ class Api:
                 )
 
         subsampling = _subsampling_value(sampling_mode, source_sampling)
-        pil_img = Image.fromarray(concat_alpha_channel(image, alpha_channel))
-        if is_jpeg and pil_img.mode == "RGBA":
+        encoder_input: Union[Image.Image, np.ndarray] = concat_alpha_channel(
+            image, alpha_channel
+        )
+        if (
+            is_jpeg
+            and isinstance(encoder_input, np.ndarray)
+            and encoder_input.ndim == 3
+            and encoder_input.shape[2] == 4
+        ):
             # JPEG 不支持 alpha：透明区域垫白底再转 RGB，避免
             # "cannot write mode RGBA as JPEG" 的 500。
-            background = Image.new("RGB", pil_img.size, (255, 255, 255))
-            background.paste(pil_img, mask=pil_img.getchannel("A"))
-            pil_img = background
+            pil_rgba = Image.fromarray(encoder_input)
+            background = Image.new("RGB", pil_rgba.size, (255, 255, 255))
+            background.paste(pil_rgba, mask=pil_rgba.getchannel("A"))
+            encoder_input = background
         data = pil_to_bytes(
-            pil_img,
+            encoder_input,
             ext=fmt,
             quality=quality,
             infos=infos,

@@ -103,3 +103,46 @@ python -m pytest benchmarks -m bench -s      # 2 tests, ~5s
 **#1 is already landed** (see its section). Of the remaining three: 4 is the cheapest to land; 2 is fast if the
 stubbing stays clean; 3 is the most valuable regression-wise but needs the GPU box, so it goes last — it is also the
 only one of the four with no known cost attached today.
+
+## 6. 请求 CPU 路径：解码/编码/commit 不许重复劳动 — **implemented**
+
+四个点一起守住，`iopaint/tests/test_webui_perf.py`（fast suite）放结构守卫，
+`benchmarks/test_inpaint_cpu_path.py`（`-m bench`，不进 CI）放数字。
+
+- **上传字节只解一次 base64**：`api.py:_inpaint_blocking` / `api_export` 本来就要
+  `_data_url_to_bytes` 拿原始字节（算 sha256、读 JPEG 抽样），再调
+  `decode_base64_to_image(req.image)` 会让同一份 16MB 字符串被解两遍
+  （12MP PNG 每遍 39ms）。守卫：`test_inpaint_decodes_uploaded_bytes_once`
+  数 `base64.b64decode` 调用，一次 inpaint 必须恰好 1 次、revision 轮必须 0 次。
+- **编码不从 ndarray 绕回 PIL**：`pil_to_bytes` 现在接受 uint8 RGB/RGBA ndarray，
+  PNG 分支直接进 `png_bytes_from_numpy`，省掉 `Image.fromarray`(11ms) +
+  `np.asarray`(21ms) 的整图往返；输出字节与传 PIL 图逐字节相同（bench 里断言）。
+  守卫：`test_png_response_skips_pil_roundtrip` 把 `Image.fromarray` 打成炸弹，
+  PNG 响应仍须 200。
+- **revision 命中时别算源哈希**：`sha256_bytes(12MP PNG)=27ms` 只在要走
+  `begin_by_hash` 兜底时才需要。守卫：`test_revision_hit_skips_source_hash`，
+  首轮 2 次（seed + 响应别名）、带 revision 的重传轮只剩别名 1 次。
+- **commit 只比较可能变化的矩形**：`revision_cache._diff_hinted` 拿调用方的
+  `region`（掩膜包围盒 + `hd_strategy_crop_margin`，用 cropper 时并入裁剪框）
+  只做盒内逐像素比较，盒外先 `tobytes()` 逐字节校验，不等就退回全帧
+  （12MP 158ms → 约 25ms）。**正确性不依赖提示准不准**：盒外校验不过就回退。
+  守卫：`iopaint/tests/test_revision_cache_diff.py`（随机/越界/提示框过小
+  三条路径与全帧结果逐像素相等；端到端「带提示 vs 强制 None」导出字节相等）。
+- **预览的 alpha 合成**：`_display_preview_jpeg` 在 `(alpha==255).all()` 时跳过
+  全分辨率 float32 合成（25MP 532ms → 123ms，结果位级不变）。守卫：
+  `test_display_preview_skips_composite_for_opaque_alpha`（`np.clip` 炸弹 +
+  与无 alpha 结果比字节）、`test_display_preview_composites_translucent_alpha`。
+- **PNG 压缩策略按形状选**：`png_bytes_from_numpy` 在 RGB + 默认级别(≤1) 时用
+  `zlib.Z_RLE`（只发距离 1 的匹配，正好吃 Up 滤波后的连续重复字节）；RGBA 与
+  level 6/9 仍用默认策略——RGBA 的 alpha 平面经 Up 滤波成片为 0，与 RGB 交错后
+  只有距离 4 的匹配吃得掉（实测体积 +52%、慢 14%），而 Z_RLE 忽略级别
+  （level 6 与 level 1 同体积），放进小体积档只会让文件更大。守卫：
+  `test_compress_strategy_follows_shape` 数 `zlib.compressobj` 的 strategy 参数
+  （RGB→`Z_RLE`、RGBA→默认、level 6→默认）。
+- **实测（2026-11-01，Xeon E3-1231 v3 / 8 线程，12MP PNG，cv2 模型，假模型固定开销）**：
+  同一份 bench 在改动前后交替各跑 3 轮、
+  `python -m pytest benchmarks/test_inpaint_cpu_path.py -m bench -s -k "cold or warm or export"`：
+  cold **988.2 → 834.1 → 793.0 ms**（−19.8%）、warm **827.7 → 675.3 → 620.8 ms**（−25.0%）、
+  export **566.5 → 536.2 → 472.2 ms**（−16.6%）；单项 A/B：base64 325.0 vs 284.8 ms（−40ms）、
+  PNG 编码 542.5 vs 519.7 ms（−23ms）、预览合成 532.7 vs 123.4 ms（−409ms）、
+  PNG 策略 539.3 vs 462.7 ms（−77ms，同一编码器只换 zlib 策略，体积 13.80 → 15.49 MB）。

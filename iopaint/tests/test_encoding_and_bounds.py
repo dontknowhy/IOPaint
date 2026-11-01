@@ -3,6 +3,8 @@
 import base64
 import io
 import math
+import zlib
+from typing import Any
 
 import cv2
 import numpy as np
@@ -127,6 +129,31 @@ class TestPngFastEncoder:
                 out = pil_to_bytes(img, "png", png_compress_level=level)
                 decoded = np.array(Image.open(io.BytesIO(out)))
                 assert np.array_equal(decoded, arr), (shape, level)
+
+    def test_compress_strategy_follows_shape(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RGB 默认级别用 Z_RLE，RGBA 与高压缩级别仍用默认策略。
+
+        Z_RLE 只发距离 1 的匹配：RGB 的 Up 滤波输出吃这个，RGBA 交错 alpha
+        吃不到（体积 +52%）。它忽略级别，所以 level 6/9 不能让给它。
+        """
+        seen: list[tuple] = []
+        real = zlib.compressobj
+
+        def spy(*args: Any) -> Any:
+            seen.append(args)
+            return real(*args)
+
+        monkeypatch.setattr(zlib, "compressobj", spy)
+        pil_to_bytes(np.zeros((8, 8, 3), np.uint8), "png")
+        pil_to_bytes(np.zeros((8, 8, 4), np.uint8), "png")
+        pil_to_bytes(np.zeros((8, 8, 3), np.uint8), "png", png_compress_level=6)
+        assert [args[-1] for args in seen] == [
+            zlib.Z_RLE,
+            zlib.Z_DEFAULT_STRATEGY,
+            zlib.Z_DEFAULT_STRATEGY,
+        ]
 
     def test_metadata_chunks_match_pillow(self) -> None:
         arr = np.zeros((5, 7, 3), dtype=np.uint8)

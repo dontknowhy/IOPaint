@@ -83,7 +83,7 @@ rm -rf iopaint/web_app && cp -r web_app/dist iopaint/web_app
 
 ## Tests
 
-- `pytest -m "not slow" -q` from the repo root is the fast/offline suite (756 passed, ~72s on this box; no weights, no
+- `pytest -m "not slow" -q` from the repo root is the fast/offline suite (833 passed, ~93s on this box; no weights, no
   GPU, no frontend build — `test_webui` self-skips when `iopaint/web_app` is absent). `pytest.ini` declares the `slow`
   marker; weight-heavy files opt out with a module-level `pytestmark = pytest.mark.slow`, so new test files are never
   missed by hand-maintained lists. Drop that line only if the file is genuinely weightless.
@@ -168,7 +168,17 @@ confirms idle/free VRAM and `CUDA_VISIBLE_DEVICES=<idx>` selects the card.
   resized) and passes it through `commit(alpha=...)`, so later `/export` keeps the source alpha.
 - Interactive masks travel as `mask_strokes` (image-coordinate polylines, rasterized by
   `helper.rasterize_mask_strokes` with `LINE_8` + round caps); `mask` stays as the fallback for extraMasks and old
-  clients. When a canonical revision exists and the result exceeds 16Mi pixels, `/inpaint` answers with a ≤16Mi JPEG
+  clients. Request CPU work is single-pass: uploaded bytes are base64-decoded once (`decode_base64_to_image(...,
+  image_bytes=raw)`), PNG/JPEG responses encode straight from the ndarray (`pil_to_bytes` accepts uint8 RGB/RGBA), and
+  `RevisionCache._commit` compares only the mask-bbox region it is handed (`region=`) while byte-checking the rest, so
+  the hint can be wrong without corrupting a revision. `png_bytes_from_numpy` picks `zlib.Z_RLE` for RGB at the
+  default level (≤1) and the default strategy for RGBA and for levels 6/9 (Z_RLE ignores the level, so letting it
+  into the small-file tier would only make files bigger). Guards live in `iopaint/tests/test_webui_perf.py`
+  (`test_inpaint_decodes_uploaded_bytes_once`, `test_png_response_skips_pil_roundtrip`,
+  `test_revision_hit_skips_source_hash`, `test_display_preview_skips_composite_for_opaque_alpha`),
+  `iopaint/tests/test_encoding_and_bounds.py` (`test_compress_strategy_follows_shape`) and
+  `iopaint/tests/test_revision_cache_diff.py`; numbers in `benchmarks/test_inpaint_cpu_path.py`. When a canonical
+  revision exists and the result exceeds 16Mi pixels, `/inpaint` answers with a ≤16Mi JPEG
   display preview plus `X-Image-Preview: 1` and the logical size in `X-Image-Width`/`X-Image-Height` (all CORS-exposed);
   `/export`, later edits and plugin/interactive-seg inputs still read canonical pixels, never the preview bytes. A render
   whose bytes are a preview is marked `DisplayImage.preview`, and every fallback that would re-upload render bytes (the

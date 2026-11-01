@@ -240,6 +240,14 @@ def png_bytes_from_numpy(
     好压：三张真实照片（24.0/24.4/45.4MP）与 Pillow level 1 相比体积差
     -3.1%~+1.4%，编码耗时从 1.90/2.74/4.08s 降到 1.08/1.82/2.27s（1.5~1.8×）。
 
+    压缩策略按输入形状选（12MP 真实照片放大实测）：
+    - RGB + 默认级别（<=1）用 `Z_RLE`：只发距离 1 的匹配，正好对 Up 滤波后
+      的连续重复字节。三张照片 492/340/203 → 426/303/184 ms（−9%~−14%），
+      体积 +0%~+8%。它忽略级别（level 6 的 Z_RLE 与 level 1 同体积），所以
+      只用在这个“延迟优先”的默认档；显式要小体积（level 6/9）仍走默认策略。
+    - RGBA 用默认策略：alpha 平面经 Up 滤波后成片为 0，与 RGB 交错后默认策略
+      能用距离 4 的匹配吃掉，Z_RLE 只能距离 1 —— 实测体积 +52%、慢 14%。
+
     只有 RGB/RGBA 走这里；其它模式（P/L/I/16 位）由 `pil_to_bytes` 回退
     Pillow，避免为冷门模式重写位深与调色板逻辑。
     """
@@ -250,8 +258,11 @@ def png_bytes_from_numpy(
     rowbytes = w * channels
     rows = np.ascontiguousarray(arr).reshape(h, rowbytes)
 
+    strategy = (
+        zlib.Z_RLE if channels == 3 and level <= 1 else zlib.Z_DEFAULT_STRATEGY
+    )
     compressor = zlib.compressobj(
-        level, zlib.DEFLATED, zlib.MAX_WBITS, 9, zlib.Z_DEFAULT_STRATEGY
+        level, zlib.DEFLATED, zlib.MAX_WBITS, 9, strategy
     )
     idat = bytearray()
     # 一块 256 行：既让滤波的临时数组保持在几 MB，又给 zlib 足够长的连续输入
@@ -300,19 +311,23 @@ def pil_to_bytes(
     webp_method: int = 4,
     webp_lossless: bool = True,
 ) -> bytes:
-    """Encode a PIL image to bytes.
+    """Encode a PIL image (or a uint8 RGB/RGBA ndarray) to bytes.
 
     `png_compress_level` 默认 1：PIL PNG 编码是纯 CPU 的 zlib 压缩，4000x3000
     （12MP）实测 level0=506ms/36MB、level1=979ms/13.0MB、level6=6732ms/11.0MB、
     level9=35317ms——降级只损失 ~18% 体积，却省下数秒延迟。PNG 本身无损，
     降低压缩级别不影响像素，只影响响应延迟与字节数（实测 level1/6 均逐像素相等）。
     响应路径（api.py / batch）都走默认值；需要更小体积时显式传 6/9。
+    走 `png_bytes_from_numpy` 的 RGB 图在 level<=1 时另用 `Z_RLE` 策略：12MP
+    真实照片再省 9%~14% 延迟、体积多 0%~8%，level 6/9 不受影响。
 
     `subsampling` 只对 JPEG 生效：Pillow 不显式传时落 libjpeg 默认 4:2:0。
     导出边界要显式传 0 才是 4:4:4；`None` 保持旧行为。
 
     RGB/RGBA 的 PNG 编码走 `png_bytes_from_numpy`（固定 Up 滤波），大约比
-    Pillow 快一倍；其它模式仍交给 Pillow。
+    Pillow 快一倍；其它模式仍交给 Pillow。直接传 ndarray 可以省掉
+    `Image.fromarray` + `np.asarray` 的整图往返（12MP 实测 32ms），PNG 的输出
+    字节与传 PIL 图完全相同。
 
     `ext="webp"` 默认走 lossless（`method=4`）：无状态无损线格式体积比 PNG
     level1 小约 15%，但 12MP 编码慢 3~4 倍；默认不启用。导出边界需要按
@@ -320,6 +335,17 @@ def pil_to_bytes(
     """
     if infos is None:
         infos = {}
+    if isinstance(pil_img, np.ndarray):
+        if (
+            ext.lower() == "png"
+            and pil_img.dtype == np.uint8
+            and pil_img.ndim == 3
+            and pil_img.shape[2] in (3, 4)
+        ):
+            return png_bytes_from_numpy(
+                pil_img, compress_level=png_compress_level, infos=infos
+            )
+        pil_img = Image.fromarray(pil_img)
     if ext.lower() == "png" and pil_img.mode in ("RGB", "RGBA"):
         return png_bytes_from_numpy(
             np.asarray(pil_img), compress_level=png_compress_level, infos=infos
@@ -664,15 +690,23 @@ def is_mac():
 
 
 def decode_base64_to_image(
-    encoding: str,
+    encoding: Optional[str] = None,
     gray: bool = False,
     max_pixels: Optional[int] = EXTERNAL_MAX_IMAGE_PIXELS,
+    image_bytes: Optional[bytes] = None,
 ) -> Tuple[np.array, Optional[np.array], Dict, str]:
-    if encoding.startswith("data:image/") or encoding.startswith(
-        "data:application/octet-stream;base64,"
-    ):
-        encoding = encoding.split(";")[1].split(",")[1]
-    image_bytes = base64.b64decode(encoding)
+    """base64（含 data: 前缀）→ numpy。`image_bytes` 已解好时传进来，别解第二次。
+
+    调用方本来就要拿原始字节（算 sha256 / 读 JPEG 抽样），再调这里会导致同一份
+    16MB 字符串被 base64 解码两遍（12MP PNG 实测每遍 39ms）。
+    """
+    if image_bytes is None:
+        assert encoding is not None
+        if encoding.startswith("data:image/") or encoding.startswith(
+            "data:application/octet-stream;base64,"
+        ):
+            encoding = encoding.split(";")[1].split(",")[1]
+        image_bytes = base64.b64decode(encoding)
     image = Image.open(io.BytesIO(image_bytes))
     check_image_pixels(image.size, max_pixels)
     # image.format must be read before exif_transpose, which returns a new

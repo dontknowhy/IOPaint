@@ -162,6 +162,37 @@ def test_display_preview_small_image_is_untouched() -> None:
     )
 
 
+def test_display_preview_skips_composite_for_opaque_alpha(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """全不透明 alpha 的合成是恒等变换，不该做全分辨率 float32 运算。
+
+    25MP 上那一步实测 530ms，跳过之后 123ms；把 `np.clip` 打成炸弹证明没走合成，
+    再与「不带 alpha」的字节比较证明结果一致。
+    """
+    arr = np.full((4200, 4200, 3), 90, dtype=np.uint8)
+    alpha = np.full((4200, 4200), 255, dtype=np.uint8)
+
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("全不透明 alpha 不该走 float32 合成")
+
+    monkeypatch.setattr(np, "clip", boom)
+    preview = _display_preview_jpeg(arr, alpha)
+    assert preview is not None
+
+    monkeypatch.undo()
+    assert preview == _display_preview_jpeg(arr, None)
+
+
+def test_display_preview_composites_translucent_alpha() -> None:
+    """全透明 alpha 必须垫白底，不能命中上一条的快路径。"""
+    arr = np.zeros((4200, 4200, 3), dtype=np.uint8)
+    alpha = np.zeros((4200, 4200), dtype=np.uint8)
+    preview = _display_preview_jpeg(arr, alpha)
+    assert preview is not None
+    assert preview != _display_preview_jpeg(arr, None)
+
+
 def test_inpaint_accepts_strokes_without_mask(tmp_path: Path) -> None:
     _, client = _client(tmp_path)
     resp = _inpaint(
@@ -347,3 +378,109 @@ def test_model_manager_injects_module_caches(
 
     assert manager.kwargs["controlnet_module_cache"] is manager.controlnet_module_cache
     assert manager.kwargs["brushnet_module_cache"] is manager.brushnet_module_cache
+
+
+# ---------------------------------------------------------------------------
+# CPU 路径：同一份输入别解两次、别为编码走 PIL 往返、revision 命中时别算源哈希
+# ---------------------------------------------------------------------------
+
+
+def test_inpaint_decodes_uploaded_bytes_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_data_url_to_bytes` 与 `decode_base64_to_image` 不能各解一遍。
+
+    12MP PNG 的 base64 解一次 39ms；改前每请求两次。
+    """
+    import base64 as b64_mod
+
+    calls: list = []
+    real_b64decode = b64_mod.b64decode
+
+    def counting(*args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        return real_b64decode(*args, **kwargs)
+
+    monkeypatch.setattr(b64_mod, "b64decode", counting)
+    _, client = _client(tmp_path)
+
+    resp = _inpaint(
+        client,
+        {"image": _png_b64(640, 480), "mask_strokes": [{"pts": [[10, 10]], "size": 8}]},
+    )
+    assert resp.status_code == 200
+    assert len(calls) == 1, f"一次 inpaint 解了 {len(calls)} 次 base64"
+
+    # 只带 revision 的后续请求根本不该解 base64
+    calls.clear()
+    revision = resp.headers["X-Revision"]
+    resp = _inpaint(
+        client, {"revision": revision, "mask_strokes": [{"pts": [[20, 20]], "size": 8}]}
+    )
+    assert resp.status_code == 200
+    assert calls == [], "revision 命中还解了 base64"
+
+
+def test_revision_hit_skips_source_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """带 revision 又重传图片时，上传字节只用于兜底查表，不该先算 sha256。
+
+    12MP PNG 的 sha256 是 27ms。首轮 2 次（seed 哈希 + 响应字节别名），
+    带 revision 的后续轮只剩别名那 1 次。
+    """
+    from iopaint import api as api_mod
+
+    counts: list = []
+    real = api_mod.sha256_bytes
+
+    def counting(data: bytes) -> str:
+        counts.append(1)
+        return real(data)
+
+    monkeypatch.setattr(api_mod, "sha256_bytes", counting)
+    _, client = _client(tmp_path)
+    image = _png_b64(640, 480)
+
+    first = _inpaint(
+        client, {"image": image, "mask_strokes": [{"pts": [[10, 10]], "size": 8}]}
+    )
+    assert first.status_code == 200
+    assert len(counts) == 2, f"首轮哈希次数 {len(counts)}（应为 seed + 别名 2 次）"
+
+    counts.clear()
+    second = _inpaint(
+        client,
+        {
+            "revision": first.headers["X-Revision"],
+            "image": image,
+            "mask_strokes": [{"pts": [[20, 20]], "size": 8}]},
+    )
+    assert second.status_code == 200
+    assert len(counts) == 1, f"revision 命中后仍算了 {len(counts)} 次哈希（应为别名 1 次）"
+
+
+def test_png_response_skips_pil_roundtrip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PNG 响应直接由 ndarray 编码，不再 `Image.fromarray` → `np.asarray` 来回拷。
+
+    12MP 上这趟往返是 32ms；这里把 `Image.fromarray` 打成炸弹，PNG 路径仍须 200。
+    """
+    from PIL import Image as pil_image
+
+    image = _png_b64(640, 480)  # 先在前端侧造好 payload，别被下面的炸弹波及
+
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("PNG 响应路径不该再经过 Image.fromarray")
+
+    monkeypatch.setattr(pil_image, "fromarray", boom)
+    _, client = _client(tmp_path)
+
+    resp = _inpaint(
+        client,
+        {"image": image, "mask_strokes": [{"pts": [[10, 10]], "size": 8}]},
+    )
+    assert resp.status_code == 200
+    assert resp.headers["Content-Type"] == "image/png"
+
