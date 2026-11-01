@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from iopaint.api import Api
 from iopaint.model.base import DiffusionInpaintModel, InpaintModel
 from iopaint.schema import ApiConfig, HDStrategy, InpaintRequest, ModelInfo, ModelType
-from iopaint.tests.test_api import _b64_image, _b64_mask, _minimal_config
+from iopaint.tests.test_api import _minimal_config, _png_image, _png_mask
 
 
 class _RecordingMixin:
@@ -173,9 +173,7 @@ class TestCropMarginConfig:
         cfg.hd_strategy_crop_margin = 321
         api = Api(FastAPI(), cfg)
 
-        req = InpaintRequest(
-            image=_b64_image(), mask=_b64_mask(), hd_strategy_crop_margin=128
-        )
-        api._inpaint_blocking(req)
+        req = InpaintRequest(hd_strategy_crop_margin=128)
+        api._inpaint_blocking(req, image_bytes=_png_image(), mask_bytes=_png_mask())
 
         assert req.hd_strategy_crop_margin == 321

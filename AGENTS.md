@@ -141,7 +141,7 @@ confirms idle/free VRAM and `CUDA_VISIBLE_DEVICES=<idx>` selects the card.
   clips those modes to 255 instead of scaling, which turns a 16-bit gradient — or a 16-bit mask — solid white.
 - Request bodies are capped by `api_middleware`'s `body_size_limit` (`api.py`): declared `Content-Length` is the fast
   path, then the bytes actually received through the wrapped ASGI `receive` are counted, so chunked / header-less bodies
-  also get the 413 (`error: RequestEntityTooLarge`) instead of reaching the JSON/base64 decoders.
+  also get the 413 (`error: RequestEntityTooLarge`) instead of reaching the multipart/JSON parsers.
 - Plugins are built by `iopaint/plugins/__init__.py:build_plugins` from `--enable-*` flags. Their deps
   (`onnxruntime<=1.19.2`, `rembg[cpu]`) are **not** in `requirements.txt` — use `iopaint install-plugins-packages`.
   `GFPGANPlugin`/`RestoreFormerPlugin` share one `RealESRGANUpscaler` and use its `RealESRGANer` as `bg_upsampler`,
@@ -167,14 +167,17 @@ confirms idle/free VRAM and `CUDA_VISIBLE_DEVICES=<idx>` selects the card.
   extender that changes the canvas rebuilds alpha from the old `(padding_l, padding_t)` geometry (new area opaque, never
   resized) and passes it through `commit(alpha=...)`, so later `/export` keeps the source alpha.
 - Interactive masks travel as `mask_strokes` (image-coordinate polylines, rasterized by
-  `helper.rasterize_mask_strokes` with `LINE_8` + round caps); `mask` stays as the fallback for extraMasks and old
-  clients. Request CPU work is single-pass: uploaded bytes are base64-decoded once (`decode_base64_to_image(...,
-  image_bytes=raw)`), PNG/JPEG responses encode straight from the ndarray (`pil_to_bytes` accepts uint8 RGB/RGBA), and
-  `RevisionCache._commit` compares only the mask-bbox region it is handed (`region=`) while byte-checking the rest, so
-  the hint can be wrong without corrupting a revision. `png_bytes_from_numpy` picks `zlib.Z_RLE` for RGB at the
-  default level (≤1) and the default strategy for RGBA and for levels 6/9 (Z_RLE ignores the level, so letting it
-  into the small-file tier would only make files bigger). Guards live in `iopaint/tests/test_webui_perf.py`
-  (`test_inpaint_decodes_uploaded_bytes_once`, `test_png_response_skips_pil_roundtrip`,
+  `helper.rasterize_mask_strokes` with `LINE_8` + round caps); `mask` stays as the fallback for extraMasks. `/inpaint`
+  and `/export` are **multipart**: `image`/`mask` are file parts (`InpaintForm`/`ExportForm` in `iopaint/schema.py`),
+  `mask_strokes` travels as a JSON form field and is parsed into `InpaintRequest`, and plugin/`/adjust_mask` endpoints
+  keep their base64 JSON bodies. File parts are capped at `MAX_UPLOAD_BYTES` (48MB, the bytes a 64M-char base64 field
+  used to decode to) with a 413; non-image bytes answer 400. Request CPU work is single-pass: uploaded bytes are
+  decoded once (`_decode_uploaded_image`), PNG/JPEG responses encode straight from the ndarray (`pil_to_bytes` accepts
+  uint8 RGB/RGBA), and `RevisionCache._commit` compares only the mask-bbox region it is handed (`region=`) while
+  byte-checking the rest, so the hint can be wrong without corrupting a revision. `png_bytes_from_numpy` picks
+  `zlib.Z_RLE` for RGB at the default level (≤1) and the default strategy for RGBA and for levels 6/9 (Z_RLE ignores
+  the level, so letting it into the small-file tier would only make files bigger). Guards live in
+  `iopaint/tests/test_webui_perf.py` (`test_inpaint_decodes_uploaded_bytes_once`, `test_png_response_skips_pil_roundtrip`,
   `test_revision_hit_skips_source_hash`, `test_display_preview_skips_composite_for_opaque_alpha`),
   `iopaint/tests/test_encoding_and_bounds.py` (`test_compress_strategy_follows_shape`) and
   `iopaint/tests/test_revision_cache_diff.py`; numbers in `benchmarks/test_inpaint_cpu_path.py`. When a canonical

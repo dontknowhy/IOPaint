@@ -33,6 +33,7 @@ from PIL import Image
 
 from iopaint.api import Api
 from iopaint.tests.test_api import _minimal_config
+from iopaint.tests.utils import multipart
 
 pytestmark = pytest.mark.bench
 
@@ -42,11 +43,11 @@ ROUNDS = 5
 # 假模型改写的矩形：落在下面那条笔迹的中段，模拟“只有笔迹覆盖区变了”
 PAINT_BOX = (slice(1400, 1500), slice(1000, 1100))
 
-# 当前实现的实测中位数（含 P7 的 Z_RLE；P1~P5 前后 cold 988.2→834.1 / warm 827.7→675.3
-# / export 566.5→536.2）
-BASELINE_COLD_MS = 793.0
-BASELINE_WARM_MS = 620.8
-BASELINE_EXPORT_MS = 472.2
+# 当前实现的实测中位数（multipart 上传；P1~P7 之前 cold 988.2 / warm 827.7 / export 566.5，
+# 换 multipart 前 cold 793.0 / warm 620.8 / export 472.2）
+BASELINE_COLD_MS = 696.4
+BASELINE_WARM_MS = 617.8
+BASELINE_EXPORT_MS = 473.2
 
 
 class _FixedCostModel:
@@ -99,7 +100,9 @@ def _client(tmp_path):
 
 
 def _inpaint(client, body: dict):
-    resp = client.post("/api/v1/inpaint", json=body)
+    fields = dict(body)
+    image = fields.pop("image", None)
+    resp = client.post("/api/v1/inpaint", **multipart(fields, image=image))
     assert resp.status_code == 200, resp.text[:400]
     return resp
 
@@ -113,23 +116,23 @@ def _median_rounds(fn, rounds: int = ROUNDS) -> float:
     return statistics.median(samples) * 1000
 
 
-def test_cold_round_latency(tmp_path, payload):
-    """首轮：上传 12MP 图片 + 笔迹（base64 解码、sha256、PIL 解码、建 revision）。"""
+def test_cold_round_latency(tmp_path, photo_png):
+    """首轮：上传 12MP 图片 + 笔迹（sha256、PIL 解码、建 revision、编码）。"""
     with _client(tmp_path) as client:
         _inpaint(  # 预热一次，避免首请求的懒加载算进 median
-            client, {"image": payload, "mask_strokes": _strokes()}
+            client, {"image": photo_png, "mask_strokes": _strokes()}
         )
         ms = _median_rounds(
-            lambda: _inpaint(client, {"image": payload, "mask_strokes": _strokes()})
+            lambda: _inpaint(client, {"image": photo_png, "mask_strokes": _strokes()})
         )
     print(f"\ninpaint cold 12MP: median {ms:.1f} ms（基线 {BASELINE_COLD_MS:.1f}）")
     assert ms > 0
 
 
-def test_warm_round_latency(tmp_path, payload):
+def test_warm_round_latency(tmp_path, photo_png):
     """后续每一笔：只带 revision + 笔迹（canonical 像素、commit diff、编码、alias）。"""
     with _client(tmp_path) as client:
-        resp = _inpaint(client, {"image": payload, "mask_strokes": _strokes()})
+        resp = _inpaint(client, {"image": photo_png, "mask_strokes": _strokes()})
         revision = resp.headers["X-Revision"]
         assert resp.headers.get("X-Image-Preview") is None  # 12MP 不该走预览
 
@@ -146,14 +149,14 @@ def test_warm_round_latency(tmp_path, payload):
     assert ms > 0
 
 
-def test_export_latency(tmp_path, payload):
+def test_export_latency(tmp_path, photo_png):
     """导出：revision + 源格式（PNG）整图重编码。"""
     with _client(tmp_path) as client:
-        resp = _inpaint(client, {"image": payload, "mask_strokes": _strokes()})
+        resp = _inpaint(client, {"image": photo_png, "mask_strokes": _strokes()})
         revision = resp.headers["X-Revision"]
 
         def one_export():
-            r = client.post("/api/v1/export", json={"revision": revision})
+            r = client.post("/api/v1/export", data={"revision": revision})
             assert r.status_code == 200, r.text[:400]
 
         one_export()
@@ -178,10 +181,10 @@ def _median_ms(fn, rounds: int = ROUNDS) -> float:
 
 
 def test_decode_uploaded_bytes_avoids_second_base64(payload, photo_png):
-    """P1：调用方已经解好的字节不必再解一遍。
+    """已解好的字节不必再解一遍（插件/调整掩膜端点仍是 base64 入口）。
 
-    左边是旧签名（传入 base64 字符串，内部自己 `b64decode`），右边是新签名
-    （`image_bytes=`）。两者解出的像素必须完全相同，差值就是省下的那次解码。
+    左边是字符串签名（内部自己 `b64decode`），右边是 `image_bytes=`。
+    两者解出的像素必须完全相同，差值就是省下的那次解码（12MP 约 40ms）。
     """
     from iopaint.helper import decode_base64_to_image
 

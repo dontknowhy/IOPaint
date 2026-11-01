@@ -14,20 +14,25 @@ from PIL import Image
 
 from iopaint.api import Api, api_middleware, diffuser_callback
 from iopaint.schema import ApiConfig, Device, InpaintRequest
+from iopaint.tests.utils import form_fields, multipart
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _b64_image(mode="RGB", size=(64, 64)):
+def _png_image(mode: str = "RGB", size: tuple = (64, 64)) -> bytes:
     img = Image.new(mode, size, color=(100, 150, 200))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
+    return buf.getvalue()
 
 
-def _b64_mask(size=(64, 64)):
+def _b64_image(mode: str = "RGB", size: tuple = (64, 64)) -> str:
+    return base64.b64encode(_png_image(mode, size)).decode()
+
+
+def _png_mask(size: tuple = (64, 64)) -> bytes:
     mask = Image.new("L", size, color=0)
     # Draw a white square in the center
     pixels = np.array(mask)
@@ -35,7 +40,11 @@ def _b64_mask(size=(64, 64)):
     mask = Image.fromarray(pixels)
     buf = io.BytesIO()
     mask.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
+    return buf.getvalue()
+
+
+def _b64_mask(size: tuple = (64, 64)) -> str:
+    return base64.b64encode(_png_mask(size)).decode()
 
 
 def _minimal_config(tmp_path):
@@ -209,16 +218,10 @@ class TestApiInpaint:
         api = Api(app, cfg)
         client = TestClient(app)
 
-        req = InpaintRequest(
-            image=_b64_image(),
-            mask=_b64_mask(),
-            hd_strategy="Original",
-            cv2_radius=3,
-        )
+        req = InpaintRequest(hd_strategy="Original", cv2_radius=3)
         resp = client.post(
             "/api/v1/inpaint",
-            content=req.model_dump_json(),
-            headers={"Content-Type": "application/json"},
+            **multipart(form_fields(req), image=_png_image(), mask=_png_mask()),
         )
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("image/")
@@ -230,16 +233,11 @@ class TestApiInpaint:
         client = TestClient(app)
 
         # 64x64 image but 32x32 mask
-        mask_32 = _b64_mask(size=(32, 32))
-        req = InpaintRequest(
-            image=_b64_image(),
-            mask=mask_32,
-            hd_strategy="Original",
-        )
+        mask_32 = _png_mask(size=(32, 32))
+        req = InpaintRequest(hd_strategy="Original")
         resp = client.post(
             "/api/v1/inpaint",
-            content=req.model_dump_json(),
-            headers={"Content-Type": "application/json"},
+            **multipart(form_fields(req), image=_png_image(), mask=mask_32),
         )
         assert resp.status_code == 400
 
@@ -250,15 +248,10 @@ class TestApiInpaint:
         api = Api(app, cfg)
         client = TestClient(app)
 
-        req = InpaintRequest(
-            image=_b64_image(),
-            mask=_b64_mask(),
-            hd_strategy="Original",
-        )
+        req = InpaintRequest(hd_strategy="Original")
         resp = client.post(
             "/api/v1/inpaint",
-            content=req.model_dump_json(),
-            headers={"Content-Type": "application/json"},
+            **multipart(form_fields(req), image=_png_image(), mask=_png_mask()),
         )
         assert resp.status_code == 200
 

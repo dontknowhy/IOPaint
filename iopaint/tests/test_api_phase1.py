@@ -4,6 +4,7 @@ import base64
 import io
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -13,23 +14,32 @@ from PIL import Image
 
 from iopaint.api import Api, api_middleware
 from iopaint.schema import ApiConfig, Device, InpaintRequest
+from iopaint.tests.utils import form_fields, multipart
 
 
-def _b64_image(mode="RGB", size=(64, 64)):
+def _png_image(mode: str = "RGB", size: tuple = (64, 64)) -> bytes:
     img = Image.new(mode, size, color=(100, 150, 200))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
+    return buf.getvalue()
 
 
-def _b64_mask(size=(64, 64)):
+def _b64_image(mode: str = "RGB", size: tuple = (64, 64)) -> str:
+    return base64.b64encode(_png_image(mode, size)).decode()
+
+
+def _png_mask(size: tuple = (64, 64)) -> bytes:
     mask = Image.new("L", size, color=0)
     pixels = np.array(mask)
     pixels[16:48, 16:48] = 255
     mask = Image.fromarray(pixels)
     buf = io.BytesIO()
     mask.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
+    return buf.getvalue()
+
+
+def _b64_mask(size: tuple = (64, 64)) -> str:
+    return base64.b64encode(_png_mask(size)).decode()
 
 
 def _minimal_config(tmp_path):
@@ -146,12 +156,7 @@ class TestInpaintMissingImage:
         Api(app, cfg)
         client = TestClient(app)
 
-        req = InpaintRequest(image=None, mask=_b64_mask())
-        resp = client.post(
-            "/api/v1/inpaint",
-            content=req.model_dump_json(),
-            headers={"Content-Type": "application/json"},
-        )
+        resp = client.post("/api/v1/inpaint", **multipart({}, mask=_png_mask()))
         assert resp.status_code == 400
 
     def test_missing_mask_is_400(self, tmp_path):
@@ -160,26 +165,25 @@ class TestInpaintMissingImage:
         Api(app, cfg)
         client = TestClient(app)
 
-        req = InpaintRequest(image=_b64_image(), mask=None)
-        resp = client.post(
-            "/api/v1/inpaint",
-            content=req.model_dump_json(),
-            headers={"Content-Type": "application/json"},
-        )
+        resp = client.post("/api/v1/inpaint", **multipart({}, image=_png_image()))
         assert resp.status_code == 400
 
-    def test_oversize_image_field_422(self, tmp_path):
+    def test_oversize_image_part_is_413(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """文件部件超过 `MAX_UPLOAD_BYTES` → 413，不被读进内存后当图解码。"""
+        from iopaint import api as api_mod
+
+        monkeypatch.setattr(api_mod, "MAX_UPLOAD_BYTES", 64)
         cfg = _minimal_config(tmp_path)
         app = FastAPI()
         Api(app, cfg)
         client = TestClient(app)
 
         resp = client.post(
-            "/api/v1/inpaint",
-            content='{"image": "%s"}' % ("x" * 64_000_001),
-            headers={"Content-Type": "application/json"},
+            "/api/v1/inpaint", **multipart({}, image=b"x" * 128, mask=_png_mask())
         )
-        assert resp.status_code == 422
+        assert resp.status_code == 413
 
 
 class TestCropperRectValidation:
@@ -188,13 +192,10 @@ class TestCropperRectValidation:
         app = FastAPI()
         Api(app, cfg)
         client = TestClient(app)
-        req = InpaintRequest(
-            image=_b64_image(), mask=_b64_mask(), hd_strategy="Original", **kwargs
-        )
+        req = InpaintRequest(hd_strategy="Original", **kwargs)
         return client.post(
             "/api/v1/inpaint",
-            content=req.model_dump_json(),
-            headers={"Content-Type": "application/json"},
+            **multipart(form_fields(req), image=_png_image(), mask=_png_mask()),
         )
 
     def test_cropper_far_outside_image_is_400(self, tmp_path):
@@ -287,17 +288,14 @@ class TestEventLoopNotBlocked:
             # 单独开一个 portal（独立事件循环，testclient.py:_portal_factory），
             # 那样阻塞就感知不到，测试对修复前后都会“通过”。
             with TestClient(app) as client:
-                req = InpaintRequest(
-                    image=_b64_image(), mask=_b64_mask(), hd_strategy="Original"
+                req = InpaintRequest(hd_strategy="Original")
+                body = multipart(
+                    form_fields(req), image=_png_image(), mask=_png_mask()
                 )
                 result = {}
 
                 def do_inpaint():
-                    result["resp"] = client.post(
-                        "/api/v1/inpaint",
-                        content=req.model_dump_json(),
-                        headers={"Content-Type": "application/json"},
-                    )
+                    result["resp"] = client.post("/api/v1/inpaint", **body)
 
                 t = threading.Thread(target=do_inpaint, daemon=True)
                 t.start()
@@ -325,13 +323,10 @@ class TestEventLoopNotBlocked:
         app = FastAPI()
         Api(app, cfg)
         client = TestClient(app)
-        req = InpaintRequest(
-            image=_b64_image(), mask=_b64_mask(), hd_strategy="Original"
-        )
+        req = InpaintRequest(hd_strategy="Original")
         resp = client.post(
             "/api/v1/inpaint",
-            content=req.model_dump_json(),
-            headers={"Content-Type": "application/json"},
+            **multipart(form_fields(req), image=_png_image(), mask=_png_mask()),
         )
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("image/")

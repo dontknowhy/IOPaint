@@ -12,6 +12,7 @@ import pytest
 from PIL import Image, JpegImagePlugin, PngImagePlugin
 from pydantic import ValidationError
 
+import iopaint.api as api_mod
 from iopaint.exceptions import ModelLoadError
 from iopaint.helper import (
     jpeg_sampling,
@@ -288,18 +289,10 @@ class TestInputBounds:
         assert InpaintRequest(sd_steps=100).sd_steps == 100
         assert InpaintRequest(ldm_steps=50).ldm_steps == 50
 
-    def test_oversize_image_rejected(self):
-        with pytest.raises(ValidationError) as ei:
-            InpaintRequest(image="x" * 64_000_001)
-        assert ei.value.errors()[0]["loc"] == ("image",)
-        # max_length 的上边界：正好 64,000,000 字符仍要接受
-        assert InpaintRequest(image="x" * 64_000_000).image
-
-    def test_oversize_mask_rejected(self):
-        with pytest.raises(ValidationError) as ei:
-            InpaintRequest(mask="x" * 64_000_001)
-        assert ei.value.errors()[0]["loc"] == ("mask",)
-        assert InpaintRequest(mask="x" * 64_000_000).mask
+    def test_upload_part_limit_replaces_base64_field_cap(self) -> None:
+        """图片/掩膜改走 multipart 文件部件后，原来 64M 字符的 base64 字段上限
+        由 `MAX_UPLOAD_BYTES` 承担：64M 字符解码后正好约 48MB 原始字节。"""
+        assert api_mod.MAX_UPLOAD_BYTES == 48 * 1024 * 1024
 
     def test_plugin_image_too_long_rejected(self) -> None:
         with pytest.raises(ValidationError) as ei:
@@ -321,10 +314,6 @@ class TestInputBounds:
             assert ei.value.errors()[0]["loc"] == ("scale",)
         for ok in (2, 4):
             assert RunPluginRequest(name="x", image="aGk=", scale=ok).scale == ok
-
-    def test_normal_size_image_ok(self):
-        req = InpaintRequest(image="a" * 1000, mask="b" * 1000)
-        assert req.image is not None
 
     def test_kernel_size_bounds(self):
         for bad in (0, 1_000_000):

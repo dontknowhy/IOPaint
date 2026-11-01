@@ -1,5 +1,4 @@
 """无损盒子端到端：掩膜外像素、多轮导出、revision 协议与 DCT 局部导出。"""
-import base64
 import io
 import math
 from pathlib import Path
@@ -12,6 +11,7 @@ from fastapi.testclient import TestClient
 from PIL import Image, JpegImagePlugin
 
 from iopaint.api import Api
+from iopaint.tests.utils import multipart
 from iopaint.schema import (
     ApiConfig,
     Device,
@@ -80,17 +80,13 @@ def _encode_jpeg(
     return buf.getvalue()
 
 
-def _b64(data: bytes, mime: str = "image/jpeg") -> str:
-    return f"data:{mime};base64," + base64.b64encode(data).decode()
-
-
-def _mask_b64(shape: Tuple[int, int, int], box: Tuple[int, int, int, int]) -> str:
+def _mask_png(shape: Tuple[int, int, int], box: Tuple[int, int, int, int]) -> bytes:
     mask = np.zeros(shape[:2], dtype=np.uint8)
     x1, y1, x2, y2 = box
     mask[y1:y2, x1:x2] = 255
     buf = io.BytesIO()
     Image.fromarray(mask).save(buf, format="PNG")
-    return _b64(buf.getvalue(), "image/png")
+    return buf.getvalue()
 
 
 def _decode(data: bytes) -> np.ndarray:
@@ -108,26 +104,21 @@ def _psnr(a: np.ndarray, b: np.ndarray) -> float:
 
 def _inpaint(
     client: TestClient,
-    image_b64: Optional[str] = None,
+    image: Optional[bytes] = None,
     revision: Optional[str] = None,
-    mask: Optional[str] = None,
+    mask: Optional[bytes] = None,
     **extra: Any,
 ) -> Any:
-    body: dict[str, Any] = {
-        "mask": mask,
-        "hd_strategy": "Original",
-        "cv2_radius": 3,
-        **extra,
-    }
-    if image_b64 is not None:
-        body["image"] = image_b64
+    fields: dict[str, Any] = {"hd_strategy": "Original", "cv2_radius": 3, **extra}
     if revision is not None:
-        body["revision"] = revision
-    return client.post("/api/v1/inpaint", json=body)
+        fields["revision"] = revision
+    return client.post("/api/v1/inpaint", **multipart(fields, image=image, mask=mask))
 
 
-def _export(client: TestClient, **body: Any) -> Any:
-    return client.post("/api/v1/export", json=body)
+def _export(
+    client: TestClient, image: Optional[bytes] = None, **body: Any
+) -> Any:
+    return client.post("/api/v1/export", **multipart(body, image=image))
 
 
 def test_jpeg_ten_rounds_keep_unmasked_pixels_exact(tmp_path: Path) -> None:
@@ -144,9 +135,9 @@ def test_jpeg_ten_rounds_keep_unmasked_pixels_exact(tmp_path: Path) -> None:
     for i, box in enumerate(boxes):
         resp = _inpaint(
             client,
-            image_b64=None if revision else _b64(source),
+            image=None if revision else source,
             revision=revision,
-            mask=_mask_b64(arr.shape, box),
+            mask=_mask_png(arr.shape, box),
         )
         assert resp.status_code == 200, resp.text
         revision = resp.headers.get("X-Revision")
@@ -169,7 +160,7 @@ def test_export_quality_does_not_drift_across_rounds(tmp_path: Path) -> None:
     arr[:, :, 1] = np.tile(np.arange(64, dtype=np.uint8)[:, None], (1, 96))
     arr[:, :, 2] = 120
     source = _encode_jpeg(arr)
-    mask = _mask_b64(arr.shape, (24, 16, 56, 40))
+    mask = _mask_png(arr.shape, (24, 16, 56, 40))
 
     _, client = _client(tmp_path)
     revision = None
@@ -177,7 +168,7 @@ def test_export_quality_does_not_drift_across_rounds(tmp_path: Path) -> None:
     for _ in range(10):
         resp = _inpaint(
             client,
-            image_b64=None if revision else _b64(source),
+            image=None if revision else source,
             revision=revision,
             mask=mask,
         )
@@ -209,7 +200,7 @@ def test_export_default_is_q100_444(tmp_path: Path) -> None:
     _, client = _client(tmp_path)
     resp = _export(
         client,
-        image=_b64(source),
+        image=source,
         format="jpeg",
         export_mode="full",
     )
@@ -225,7 +216,7 @@ def test_export_keep_uses_source_sampling(tmp_path: Path) -> None:
     _, client = _client(tmp_path)
     resp = _export(
         client,
-        image=_b64(source),
+        image=source,
         format="jpeg",
         subsampling="keep",
         export_mode="full",
@@ -242,16 +233,16 @@ def test_revision_only_request_and_410(tmp_path: Path) -> None:
     source = _encode_jpeg(arr)
     _, client = _client(tmp_path)
 
-    missing = _inpaint(client, revision="deadbeef", mask=_mask_b64(arr.shape, (4, 4, 12, 12)))
+    missing = _inpaint(client, revision="deadbeef", mask=_mask_png(arr.shape, (4, 4, 12, 12)))
     assert missing.status_code == 410
     missing_export = _export(client, revision="deadbeef")
     assert missing_export.status_code == 410
 
     first = _inpaint(
-        client, image_b64=_b64(source), mask=_mask_b64(arr.shape, (4, 4, 12, 12))
+        client, image=source, mask=_mask_png(arr.shape, (4, 4, 12, 12))
     )
     rev = first.headers["X-Revision"]
-    second = _inpaint(client, revision=rev, mask=_mask_b64(arr.shape, (16, 16, 24, 24)))
+    second = _inpaint(client, revision=rev, mask=_mask_png(arr.shape, (16, 16, 24, 24)))
     assert second.status_code == 200
     assert second.headers["X-Revision"] != rev
 
@@ -262,14 +253,14 @@ def test_p0_response_hash_hit_without_revision(tmp_path: Path) -> None:
     api, client = _client(tmp_path)
 
     first = _inpaint(
-        client, image_b64=_b64(source), mask=_mask_b64(arr.shape, (8, 8, 24, 24))
+        client, image=source, mask=_mask_png(arr.shape, (8, 8, 24, 24))
     )
     assert first.status_code == 200
     # 老客户端：下一轮把上一轮响应字节原样传回来
     second = _inpaint(
         client,
-        image_b64=_b64(first.content),
-        mask=_mask_b64(arr.shape, (24, 24, 40, 40)),
+        image=first.content,
+        mask=_mask_png(arr.shape, (24, 24, 40, 40)),
     )
     assert second.status_code == 200
     assert api.revision_cache.stats["hits_hash"] >= 1
@@ -280,7 +271,7 @@ def test_stateless_lossless_wire_format(tmp_path: Path) -> None:
     source = _encode_jpeg(arr)
     _, client = _client(tmp_path, stateless_lossless=True)
     resp = _inpaint(
-        client, image_b64=_b64(source), mask=_mask_b64(arr.shape, (4, 4, 12, 12))
+        client, image=source, mask=_mask_png(arr.shape, (4, 4, 12, 12))
     )
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("image/png")
@@ -291,16 +282,16 @@ def test_stateless_lossless_webp_wire_format(tmp_path: Path) -> None:
     arr = np.full((32, 32, 3), 80, dtype=np.uint8)
     arr[:, :16, 0] = 140
     source = _encode_jpeg(arr)
-    mask = _mask_b64(arr.shape, (4, 4, 12, 12))
+    mask = _mask_png(arr.shape, (4, 4, 12, 12))
 
     _, png_client = _client(tmp_path / "png", stateless_lossless=True)
-    png = _inpaint(png_client, image_b64=_b64(source), mask=mask)
+    png = _inpaint(png_client, image=source, mask=mask)
     assert png.status_code == 200
 
     _, webp_client = _client(
         tmp_path / "webp", stateless_lossless=True, wire_format="webp"
     )
-    webp = _inpaint(webp_client, image_b64=_b64(source), mask=mask)
+    webp = _inpaint(webp_client, image=source, mask=mask)
     assert webp.status_code == 200
     assert webp.headers["content-type"].startswith("image/webp")
     assert webp.headers["X-Internal-Format"] == "webp"
@@ -313,7 +304,7 @@ def test_cache_disabled_still_serves_legacy_path(tmp_path: Path) -> None:
     source = _encode_jpeg(arr)
     _, client = _client(tmp_path, revision_cache_mb=0)
     resp = _inpaint(
-        client, image_b64=_b64(source), mask=_mask_b64(arr.shape, (4, 4, 12, 12))
+        client, image=source, mask=_mask_png(arr.shape, (4, 4, 12, 12))
     )
     assert resp.status_code == 200
     assert "X-Revision" not in resp.headers
@@ -324,13 +315,13 @@ def test_empty_mask_does_not_add_revision(tmp_path: Path) -> None:
     source = _encode_jpeg(arr)
     _, client = _client(tmp_path)
     first = _inpaint(
-        client, image_b64=_b64(source), mask=_mask_b64(arr.shape, (4, 4, 12, 12))
+        client, image=source, mask=_mask_png(arr.shape, (4, 4, 12, 12))
     )
     rev = first.headers["X-Revision"]
     empty = np.zeros(arr.shape[:2], dtype=np.uint8)
     buf = io.BytesIO()
     Image.fromarray(empty).save(buf, format="PNG")
-    second = _inpaint(client, revision=rev, mask=_b64(buf.getvalue(), "image/png"))
+    second = _inpaint(client, revision=rev, mask=buf.getvalue())
     assert second.status_code == 200
     assert second.headers["X-Revision"] == rev
 
@@ -345,7 +336,7 @@ def test_dct_patch_export_keeps_outside_pixels(tmp_path: Path) -> None:
 
     _, client = _client(tmp_path)
     inpainted = _inpaint(
-        client, image_b64=_b64(source), mask=_mask_b64(arr.shape, box)
+        client, image=source, mask=_mask_png(arr.shape, box)
     )
     rev = inpainted.headers["X-Revision"]
     out = _export(client, revision=rev, format="jpeg")
@@ -363,7 +354,7 @@ def test_dct_patch_falls_back_for_progressive(tmp_path: Path) -> None:
     source = _encode_jpeg(arr, progressive=True)
     _, client = _client(tmp_path)
     first = _inpaint(
-        client, image_b64=_b64(source), mask=_mask_b64(arr.shape, (8, 8, 24, 24))
+        client, image=source, mask=_mask_png(arr.shape, (8, 8, 24, 24))
     )
     rev = first.headers["X-Revision"]
     out = _export(client, revision=rev, format="jpeg")
@@ -390,7 +381,7 @@ def test_export_force_overrides_request_format_and_quality(tmp_path: Path) -> No
     )
     resp = _export(
         client,
-        image=_b64(source, "image/png"),
+        image=source,
         format="png",
         quality=1,
         subsampling="420",
@@ -412,7 +403,7 @@ def test_export_force_skips_dct_patch(tmp_path: Path) -> None:
     _, client = _client(
         tmp_path, export_force=True, export_format="jpeg", export_quality=95
     )
-    out = _export(client, image=_b64(source), format="jpeg")
+    out = _export(client, image=source, format="jpeg")
     assert out.status_code == 200
     # 源量化表不再对应强制质量，必须整图重编码
     assert out.headers["X-Export-Mode"] == "full"
@@ -440,7 +431,7 @@ def test_export_force_passes_png_and_webp_encoder_options(
         export_png_compress_level=9,
         export_webp_lossless=True,
     )
-    out = _export(client, image=_b64(source), format="jpeg")
+    out = _export(client, image=source, format="jpeg")
     assert out.status_code == 200
     assert out.headers["content-type"].startswith("image/png")
     assert captured["png_compress_level"] == 9
@@ -451,7 +442,7 @@ def test_export_force_without_format_keeps_source_format(tmp_path: Path) -> None
     arr = np.full((16, 16, 3), 80, dtype=np.uint8)
     source = _encode_jpeg(arr)
     _, client = _client(tmp_path, export_force=True, export_format=None)
-    out = _export(client, image=_b64(source), format="png")
+    out = _export(client, image=source, format="png")
     assert out.status_code == 200
     assert out.headers["content-type"].startswith("image/jpeg")
 
@@ -473,7 +464,7 @@ def test_export_force_webp_lossless_flag_controls_encoder(tmp_path: Path) -> Non
             export_quality=50,
             export_webp_lossless=lossless,
         )
-        out = _export(client, image=_b64(source, "image/png"), format="png")
+        out = _export(client, image=source, format="png")
         assert out.status_code == 200
         assert out.headers["content-type"].startswith("image/webp")
         return _decode(out.content)
@@ -489,7 +480,7 @@ def test_export_force_jpeg_flattens_alpha_onto_white(tmp_path: Path) -> None:
     buf = io.BytesIO()
     Image.fromarray(rgba).save(buf, format="PNG")
     _, client = _client(tmp_path, export_force=True, export_format="jpeg")
-    out = _export(client, image=_b64(buf.getvalue(), "image/png"), format="png")
+    out = _export(client, image=buf.getvalue(), format="png")
     assert out.status_code == 200
     assert out.headers["content-type"].startswith("image/jpeg")
     img = Image.open(io.BytesIO(out.content))
@@ -527,8 +518,8 @@ def test_extender_does_not_stretch_alpha(
     monkeypatch.setattr(api, "model_manager", fake_manager)
     resp = _inpaint(
         client,
-        image_b64=_b64(source, "image/png"),
-        mask=_mask_b64(rgba.shape, (4, 0, 8, 8)),
+        image=source,
+        mask=_mask_png(rgba.shape, (4, 0, 8, 8)),
         use_extender=True,
         extender_x=-4,
         extender_y=0,

@@ -29,24 +29,30 @@ from iopaint.helper import (
     is_private_host,
 )
 from iopaint.schema import ApiConfig, InpaintRequest
+from iopaint.tests.utils import multipart
 
 PRIVATE_CLIENT = ("192.168.1.50", 12345)
 PUBLIC_CLIENT = ("203.0.113.9", 12345)
 
 
-def _b64_png(size: tuple[int, int], mode: str = "RGB") -> str:
+def _png(size: tuple[int, int], mode: str = "RGB") -> bytes:
     img = Image.new(mode, size, color=128)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
+    return buf.getvalue()
 
 
-def _b64_mask(size: tuple[int, int]) -> str:
+def _b64_png(size: tuple[int, int], mode: str = "RGB") -> str:
+    """`decode_base64_to_image` 的单测仍走 base64 入口。"""
+    return base64.b64encode(_png(size, mode)).decode()
+
+
+def _png_mask(size: tuple[int, int]) -> bytes:
     pixels = np.zeros((size[1], size[0]), dtype="uint8")
     pixels[1:-1, 1:-1] = 255
     buf = io.BytesIO()
     Image.fromarray(pixels).save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
+    return buf.getvalue()
 
 
 def _minimal_config(tmp_path: Path) -> ApiConfig:
@@ -229,15 +235,12 @@ class TestApiSourceDependentLimit:
         size: tuple[int, int],
         headers: Optional[Dict[str, str]] = None,
     ) -> httpx.Response:
-        req = InpaintRequest.model_validate(
-            {"image": _b64_png(size), "mask": _b64_mask(size), "hd_strategy": "Original"}
-        )
-        merged = {"Content-Type": "application/json"}
-        merged.update(headers or {})
         return client.post(
             "/api/v1/inpaint",
-            content=req.model_dump_json(),
-            headers=merged,
+            **multipart(
+                {"hd_strategy": "Original"}, image=_png(size), mask=_png_mask(size)
+            ),
+            headers=headers or {},
         )
 
     def test_private_client_bypasses_limit(

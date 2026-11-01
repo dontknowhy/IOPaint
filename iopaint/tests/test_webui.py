@@ -11,6 +11,8 @@ import base64
 import io
 import json
 import time
+from email import policy
+from email.parser import BytesParser
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,32 @@ from playwright.sync_api import (  # noqa: E402
 )
 
 from iopaint.api import WEB_APP_DIR
+
+
+def _parse_multipart(body: bytes, content_type: str) -> dict:
+    """multipart 请求体 → dict：文本字段是 str，文件部件是原始字节。"""
+    msg = BytesParser(policy=policy.HTTP).parsebytes(
+        b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + body
+    )
+    out: dict = {}
+    for part in msg.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        raw = part.get_payload(decode=True)
+        payload = raw if isinstance(raw, bytes) else b""
+        out[name] = payload if part.get_filename() is not None else payload.decode()
+    return out
+
+
+def _inpaint_payload(request: Any) -> dict:
+    """Playwright 捕获到的 /inpaint 请求 → 字段 dict（图片/掩膜是原始字节）。"""
+    return _parse_multipart(
+        request.post_data_buffer or b"", request.headers["content-type"]
+    )
+
+
+def _strokes_from(payload: dict) -> list:
+    raw = payload.get("mask_strokes")
+    return json.loads(raw) if raw else []
 
 pytestmark = pytest.mark.skipif(
     not WEB_APP_DIR.is_dir(),
@@ -462,8 +490,7 @@ class TestMaskContract:
         captured = {}
 
         def capture(route):
-            # post_data_buffer 是属性（bytes），不是方法
-            captured["body"] = route.request.post_data_buffer
+            captured["request"] = route.request
             route.abort()
 
         page.route("**/inpaint", capture)
@@ -476,14 +503,14 @@ class TestMaskContract:
         page.mouse.up()
 
         deadline = time.time() + 8
-        while time.time() < deadline and "body" not in captured:
+        while time.time() < deadline and "request" not in captured:
             page.wait_for_timeout(200)
         page.unroute("**/inpaint")
 
-        assert "body" in captured, "画完一笔却没有发出 /inpaint 请求"
+        assert "request" in captured, "画完一笔却没有发出 /inpaint 请求"
 
-        payload = json.loads(captured["body"].decode("utf-8"))
-        strokes = payload.get("mask_strokes")
+        payload = _inpaint_payload(captured["request"])
+        strokes = _strokes_from(payload)
         assert strokes, "请求里没有 mask_strokes"
         assert "mask" not in payload, "交互笔迹不该再附带整图 PNG"
 
@@ -537,9 +564,8 @@ class TestExtraMaskContract:
             with pg.expect_response("**/inpaint", timeout=15000) as resp_info:
                 pg.get_by_role("button", name="Paint").click()
 
-        body = req_info.value.post_data
-        assert body, "/inpaint 请求体为空"
-        payload = json.loads(body)
+        payload = _inpaint_payload(req_info.value)
+        assert payload, "/inpaint 请求体为空"
         assert payload.get("mask"), "extraMasks 路径没有把掩膜当 PNG 传上去"
         assert "mask_strokes" not in payload, "extraMasks 路径不该再传矢量笔迹"
         assert resp_info.value.status == 200, f"/inpaint 返回 {resp_info.value.status}"
@@ -748,7 +774,7 @@ class TestLosslessRevision:
             with pg.expect_response("**/inpaint", timeout=20000) as second_info:
                 _draw_stroke(pg, dx=30)
 
-        payload = json.loads(req_info.value.post_data)
+        payload = _inpaint_payload(req_info.value)
         assert "image" not in payload, "第二轮仍在上传整张图片"
         assert payload.get("revision") == revision, payload.get("revision")
 
@@ -778,15 +804,24 @@ class TestLosslessRevision:
         _wait_interactive(pg)
 
         raw = (tmp_path / "test.png").read_bytes()
-        original = "data:image/png;base64," + base64.b64encode(raw).decode()
 
-        with pg.expect_request("**/inpaint", timeout=20000) as req_info:
-            with pg.expect_response("**/inpaint", timeout=20000) as second_info:
-                _draw_stroke(pg, dx=30)
+        captured: dict = {}
 
-        payload = json.loads(req_info.value.post_data)
+        def capture(route: Any) -> None:
+            captured["request"] = route.request
+            route.continue_()
+
+        pg.route("**/inpaint", capture)
+        with pg.expect_response("**/inpaint", timeout=20000) as second_info:
+            _draw_stroke(pg, dx=30)
+        pg.unroute("**/inpaint")
+
+        payload = _inpaint_payload(captured["request"])
         assert "revision" not in payload, "undo 后仍复用了已撤销的 revision"
-        assert payload.get("image") == original, "undo 后没有回到原始文件字节"
+        # Chromium 不会把 file input 的 File 内容交给 Playwright 的 postData，
+        # 所以这里看"文件部件存在 + 无 revision + 200"：服务端没有 revision 时
+        # 必须解码上传字节，能 200 就证明源图字节确实重新上传了。
+        assert payload.get("image") is not None, "undo 后没有重新上传源图字节"
         assert second_info.value.status == 200
 
         ctx.close()
@@ -844,7 +879,7 @@ class TestCv2FlagRequest:
         captured = {}
 
         def capture(route):
-            captured["body"] = route.request.post_data_buffer
+            captured["request"] = route.request
             route.abort()
 
         pg.route("**/inpaint", capture)
@@ -852,12 +887,12 @@ class TestCv2FlagRequest:
         _draw_stroke(pg)
 
         deadline = time.time() + 8
-        while time.time() < deadline and "body" not in captured:
+        while time.time() < deadline and "request" not in captured:
             pg.wait_for_timeout(200)
         pg.unroute("**/inpaint")
 
-        assert "body" in captured, "画完一笔却没有发出 /inpaint 请求"
-        payload = json.loads(captured["body"].decode("utf-8"))
+        assert "request" in captured, "画完一笔却没有发出 /inpaint 请求"
+        payload = _inpaint_payload(captured["request"])
         assert payload["cv2_flag"] == "INPAINT_TELEA", payload["cv2_flag"]
 
         ctx.close()
@@ -1055,13 +1090,21 @@ class TestTouchEndLastPoint:
         moved = [1, cx, cy]
         released = [1, cx + 60, cy]
 
-        with pg.expect_request("**/inpaint", timeout=15000) as req_info:
+        captured: dict = {}
+
+        def capture(route: Any) -> None:
+            captured["request"] = route.request
+            route.continue_()
+
+        pg.route("**/inpaint", capture)
+        with pg.expect_response("**/inpaint", timeout=15000):
             _dispatch_touch(pg, "touchstart", [start], [start])
             _dispatch_touch(pg, "touchmove", [moved], [moved])
             _dispatch_touch(pg, "touchend", [], [released])
+        pg.unroute("**/inpaint")
 
-        payload = json.loads(req_info.value.post_data)
-        strokes = payload.get("mask_strokes") or []
+        payload = _inpaint_payload(captured["request"])
+        strokes = _strokes_from(payload)
         pts = [pt for stroke in strokes for pt in stroke["pts"]]
         assert pts, "请求里没有 mask_strokes"
 

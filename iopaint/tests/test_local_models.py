@@ -18,6 +18,7 @@ from iopaint.api import Api
 from iopaint.download import scan_models
 from iopaint.helper import load_img
 from iopaint.schema import ApiConfig, Device, HDStrategy, InpaintRequest
+from iopaint.tests.utils import form_fields, multipart
 
 # 依赖本地已下载的 lama/fcf 权重，没有就 assert 失败
 pytestmark = pytest.mark.slow
@@ -36,20 +37,24 @@ assert len(_LOCAL_MODELS) > 0, "No local erase models found – run the download
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _b64(size=(128, 128)):
+def _png(size: tuple = (128, 128)) -> bytes:
     img = Image.new("RGB", size, color=(200, 100, 50))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
+    return buf.getvalue()
 
 
-def _b64_mask(size=(128, 128)):
+def _png_mask(size: tuple = (128, 128)) -> bytes:
     mask = np.zeros(size, dtype=np.uint8)
     mask[32:96, 32:96] = 255
-    pil_mask = Image.fromarray(mask)
     buf = io.BytesIO()
-    pil_mask.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
+    Image.fromarray(mask).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _b64_mask(size: tuple = (128, 128)) -> str:
+    """/adjust_mask 仍是 JSON + base64 的端点。"""
+    return base64.b64encode(_png_mask(size)).decode()
 
 
 def _make_config(tmp_path, model_name, **overrides):
@@ -104,16 +109,11 @@ class TestLocalModelInpaint:
         Api(app, cfg)
         client = TestClient(app)
 
-        req = InpaintRequest(
-            image=_b64(),
-            mask=_b64_mask(),
-            hd_strategy=HDStrategy.ORIGINAL,
-        )
+        req = InpaintRequest(hd_strategy=HDStrategy.ORIGINAL)
         t0 = time.time()
         resp = client.post(
             "/api/v1/inpaint",
-            content=req.model_dump_json(),
-            headers={"Content-Type": "application/json"},
+            **multipart(form_fields(req), image=_png(), mask=_png_mask()),
         )
         elapsed = (time.time() - t0) * 1000
         assert resp.status_code == 200, f"{model_name} failed: {resp.text}"
@@ -132,16 +132,10 @@ class TestLocalModelInpaint:
         Api(app, cfg)
         client = TestClient(app)
 
-        req = InpaintRequest(
-            image=_b64(),
-            mask=_b64_mask(),
-            hd_strategy=HDStrategy.RESIZE,
-            hd_strategy_resize_limit=256,
-        )
+        req = InpaintRequest(hd_strategy=HDStrategy.RESIZE, hd_strategy_resize_limit=256)
         resp = client.post(
             "/api/v1/inpaint",
-            content=req.model_dump_json(),
-            headers={"Content-Type": "application/json"},
+            **multipart(form_fields(req), image=_png(), mask=_png_mask()),
         )
         assert resp.status_code == 200
         assert len(resp.content) > 0
@@ -153,16 +147,13 @@ class TestLocalModelInpaint:
         client = TestClient(app)
 
         req = InpaintRequest(
-            image=_b64(),
-            mask=_b64_mask(),
             hd_strategy=HDStrategy.CROP,
             hd_strategy_crop_margin=16,
             hd_strategy_crop_trigger_size=64,
         )
         resp = client.post(
             "/api/v1/inpaint",
-            content=req.model_dump_json(),
-            headers={"Content-Type": "application/json"},
+            **multipart(form_fields(req), image=_png(), mask=_png_mask()),
         )
         assert resp.status_code == 200
         assert len(resp.content) > 0
@@ -226,15 +217,10 @@ class TestModelSwitching:
         assert resp.json()["name"] == m2
 
         # Inpaint with m2
-        req = InpaintRequest(
-            image=_b64(),
-            mask=_b64_mask(),
-            hd_strategy=HDStrategy.ORIGINAL,
-        )
+        req = InpaintRequest(hd_strategy=HDStrategy.ORIGINAL)
         resp = client.post(
             "/api/v1/inpaint",
-            content=req.model_dump_json(),
-            headers={"Content-Type": "application/json"},
+            **multipart(form_fields(req), image=_png(), mask=_png_mask()),
         )
         assert resp.status_code == 200
         assert len(resp.content) > 0
@@ -256,17 +242,12 @@ class TestEdgeCases:
         img = Image.new("RGBA", (128, 128), color=(200, 100, 50, 200))
         buf = io.BytesIO()
         img.save(buf, format="PNG")
-        b64_rgba = base64.b64encode(buf.getvalue()).decode()
+        png_rgba = buf.getvalue()
 
-        req = InpaintRequest(
-            image=b64_rgba,
-            mask=_b64_mask(),
-            hd_strategy=HDStrategy.ORIGINAL,
-        )
+        req = InpaintRequest(hd_strategy=HDStrategy.ORIGINAL)
         resp = client.post(
             "/api/v1/inpaint",
-            content=req.model_dump_json(),
-            headers={"Content-Type": "application/json"},
+            **multipart(form_fields(req), image=png_rgba, mask=_png_mask()),
         )
         assert resp.status_code == 200
 
@@ -280,23 +261,20 @@ class TestEdgeCases:
         img = Image.new("RGB", (16, 16), color=(100, 200, 50))
         buf = io.BytesIO()
         img.save(buf, format="PNG")
-        b64_small = base64.b64encode(buf.getvalue()).decode()
+        png_small = buf.getvalue()
 
         mask = np.zeros((16, 16), dtype=np.uint8)
         mask[4:12, 4:12] = 255
         mask_buf = io.BytesIO()
         Image.fromarray(mask).save(mask_buf, format="PNG")
-        b64_mask_small = base64.b64encode(mask_buf.getvalue()).decode()
+        png_mask_small = mask_buf.getvalue()
 
-        req = InpaintRequest(
-            image=b64_small,
-            mask=b64_mask_small,
-            hd_strategy=HDStrategy.ORIGINAL,
-        )
+        req = InpaintRequest(hd_strategy=HDStrategy.ORIGINAL)
         resp = client.post(
             "/api/v1/inpaint",
-            content=req.model_dump_json(),
-            headers={"Content-Type": "application/json"},
+            **multipart(
+                form_fields(req), image=png_small, mask=png_mask_small
+            ),
         )
         assert resp.status_code == 200
 
@@ -310,24 +288,22 @@ class TestEdgeCases:
         img = Image.new("RGB", (600, 400), color=(100, 200, 50))
         buf = io.BytesIO()
         img.save(buf, format="PNG")
-        b64_large = base64.b64encode(buf.getvalue()).decode()
+        png_large = buf.getvalue()
 
         mask = np.zeros((400, 600), dtype=np.uint8)
         mask[100:300, 150:450] = 255
         mask_buf = io.BytesIO()
         Image.fromarray(mask).save(mask_buf, format="PNG")
-        b64_mask_large = base64.b64encode(mask_buf.getvalue()).decode()
+        png_mask_large = mask_buf.getvalue()
 
         req = InpaintRequest(
-            image=b64_large,
-            mask=b64_mask_large,
-            hd_strategy=HDStrategy.RESIZE,
-            hd_strategy_resize_limit=512,
+            hd_strategy=HDStrategy.RESIZE, hd_strategy_resize_limit=512
         )
         resp = client.post(
             "/api/v1/inpaint",
-            content=req.model_dump_json(),
-            headers={"Content-Type": "application/json"},
+            **multipart(
+                form_fields(req), image=png_large, mask=png_mask_large
+            ),
         )
         assert resp.status_code == 200
         np_img, _ = load_img(resp.content)

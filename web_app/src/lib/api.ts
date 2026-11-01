@@ -120,67 +120,78 @@ export default async function inpaint(
   paintByExampleImage: File | null = null,
   revision: string | null = null
 ): Promise<InpaintResponse> {
-  const imageBase64 = imageFile ? await convertToBase64(imageFile) : null
-  const maskBase64 = mask ? await convertToBase64(mask) : null
-  const exampleImageBase64 = paintByExampleImage
-    ? await convertToBase64(paintByExampleImage)
-    : null
+  // 图片/掩膜作为 multipart 文件部件上传：省掉浏览器侧的 base64 编码和
+  // 33% 的请求体膨胀，服务端拿到的就是原始字节。
+  const form = new FormData()
+  // revision 命中时服务端忽略 image；省略它可以把上传字节降到 0。
+  if (imageFile) {
+    form.append("image", imageFile)
+  }
+  if (revision) {
+    form.append("revision", revision)
+  }
+  // 交互编辑优先传笔迹，服务端按原图尺寸栅格化；只有插件/调整掩膜
+  //（extraMasks 非空）才回退到整图 PNG。
+  if (maskStrokes !== null) {
+    form.append("mask_strokes", JSON.stringify(maskStrokes))
+  }
+  if (mask) {
+    form.append("mask", mask)
+  }
+  if (paintByExampleImage) {
+    form.append(
+      "paint_by_example_example_image",
+      await convertToBase64(paintByExampleImage)
+    )
+  }
+  const fields: Record<string, string | number | boolean> = {
+    ldm_steps: settings.ldmSteps,
+    ldm_sampler: settings.ldmSampler,
+    zits_wireframe: settings.zitsWireframe,
+    cv2_flag: settings.cv2Flag,
+    cv2_radius: settings.cv2Radius,
+    hd_strategy: HD_STRATEGY,
+    hd_strategy_crop_trigger_size: HD_STRATEGY_CROP_TRIGGER_SIZE,
+    hd_strategy_crop_margin: HD_STRATEGY_CROP_MARGIN,
+    hd_strategy_resize_limit: HD_STRATEGY_RESIZE_LIMIT,
+    prompt: settings.prompt,
+    negative_prompt: settings.negativePrompt,
+    use_croper: settings.showCropper,
+    croper_x: croperRect.x,
+    croper_y: croperRect.y,
+    croper_height: croperRect.height,
+    croper_width: croperRect.width,
+    use_extender: settings.showExtender,
+    extender_x: extenderState.x,
+    extender_y: extenderState.y,
+    extender_height: extenderState.height,
+    extender_width: extenderState.width,
+    sd_strength: settings.sdStrength,
+    sd_steps: settings.sdSteps,
+    sd_guidance_scale: settings.sdGuidanceScale,
+    sd_sampler: settings.sdSampler,
+    sd_seed: settings.seedFixed ? settings.seed : -1,
+    sd_match_histograms: settings.sdMatchHistograms,
+    sd_lcm_lora: settings.enableLCMLora,
+    p2p_image_guidance_scale: settings.p2pImageGuidanceScale,
+    enable_controlnet: settings.enableControlnet,
+    controlnet_conditioning_scale: settings.controlnetConditioningScale,
+    controlnet_method: settings.controlnetMethod
+      ? settings.controlnetMethod
+      : "",
+    enable_brushnet: settings.enableBrushNet,
+    brushnet_method: settings.brushnetMethod ? settings.brushnetMethod : "",
+    brushnet_conditioning_scale: settings.brushnetConditioningScale,
+    enable_powerpaint_v2: settings.enablePowerPaintV2,
+    powerpaint_task: settings.showExtender
+      ? PowerPaintTask.outpainting
+      : settings.powerpaintTask,
+  }
+  for (const [key, value] of Object.entries(fields)) {
+    form.append(key, String(value))
+  }
 
-  const res = await api.post(
-    "/inpaint",
-    {
-      // revision 命中时服务端忽略 image；省略它可以把上传字节降到 0。
-      ...(imageBase64 ? { image: imageBase64 } : {}),
-      ...(revision ? { revision } : {}),
-      // 交互编辑优先传笔迹，服务端按原图尺寸栅格化；只有插件/调整掩膜
-      //（extraMasks 非空）才回退到整图 PNG。
-      ...(maskStrokes !== null ? { mask_strokes: maskStrokes } : {}),
-      ...(maskBase64 ? { mask: maskBase64 } : {}),
-      ldm_steps: settings.ldmSteps,
-      ldm_sampler: settings.ldmSampler,
-      zits_wireframe: settings.zitsWireframe,
-      cv2_flag: settings.cv2Flag,
-      cv2_radius: settings.cv2Radius,
-      hd_strategy: HD_STRATEGY,
-      hd_strategy_crop_trigger_size: HD_STRATEGY_CROP_TRIGGER_SIZE,
-      hd_strategy_crop_margin: HD_STRATEGY_CROP_MARGIN,
-      hd_strategy_resize_limit: HD_STRATEGY_RESIZE_LIMIT,
-      prompt: settings.prompt,
-      negative_prompt: settings.negativePrompt,
-      use_croper: settings.showCropper,
-      croper_x: croperRect.x,
-      croper_y: croperRect.y,
-      croper_height: croperRect.height,
-      croper_width: croperRect.width,
-      use_extender: settings.showExtender,
-      extender_x: extenderState.x,
-      extender_y: extenderState.y,
-      extender_height: extenderState.height,
-      extender_width: extenderState.width,
-      sd_strength: settings.sdStrength,
-      sd_steps: settings.sdSteps,
-      sd_guidance_scale: settings.sdGuidanceScale,
-      sd_sampler: settings.sdSampler,
-      sd_seed: settings.seedFixed ? settings.seed : -1,
-      sd_match_histograms: settings.sdMatchHistograms,
-      sd_lcm_lora: settings.enableLCMLora,
-      paint_by_example_example_image: exampleImageBase64,
-      p2p_image_guidance_scale: settings.p2pImageGuidanceScale,
-      enable_controlnet: settings.enableControlnet,
-      controlnet_conditioning_scale: settings.controlnetConditioningScale,
-      controlnet_method: settings.controlnetMethod
-        ? settings.controlnetMethod
-        : "",
-      enable_brushnet: settings.enableBrushNet,
-      brushnet_method: settings.brushnetMethod ? settings.brushnetMethod : "",
-      brushnet_conditioning_scale: settings.brushnetConditioningScale,
-      enable_powerpaint_v2: settings.enablePowerPaintV2,
-      powerpaint_task: settings.showExtender
-        ? PowerPaintTask.outpainting
-        : settings.powerpaintTask,
-    },
-    { responseType: "blob" }
-  )
+  const res = await api.post("/inpaint", form, { responseType: "blob" })
   return {
     blob: res.data as Blob,
     seed: res.headers["x-seed"] as string | undefined,
@@ -268,8 +279,16 @@ export async function exportImage(
   revision: string | null,
   fallback: () => Promise<File>
 ): Promise<{ blob: Blob; mimeType: string }> {
-  const request = (body: Record<string, unknown>) =>
-    api.post("/export", body, { responseType: "blob" })
+  const request = (fields: Record<string, string>, image?: File) => {
+    const form = new FormData()
+    for (const [key, value] of Object.entries(fields)) {
+      form.append(key, value)
+    }
+    if (image) {
+      form.append("image", image)
+    }
+    return api.post("/export", form, { responseType: "blob" })
+  }
 
   let res: AxiosResponse<Blob> | undefined
   if (revision) {
@@ -282,8 +301,7 @@ export async function exportImage(
     }
   }
   if (!res) {
-    const image = await convertToBase64(await fallback())
-    res = await request({ image })
+    res = await request({}, await fallback())
   }
   return {
     blob: res.data as Blob,

@@ -109,11 +109,12 @@ only one of the four with no known cost attached today.
 四个点一起守住，`iopaint/tests/test_webui_perf.py`（fast suite）放结构守卫，
 `benchmarks/test_inpaint_cpu_path.py`（`-m bench`，不进 CI）放数字。
 
-- **上传字节只解一次 base64**：`api.py:_inpaint_blocking` / `api_export` 本来就要
-  `_data_url_to_bytes` 拿原始字节（算 sha256、读 JPEG 抽样），再调
-  `decode_base64_to_image(req.image)` 会让同一份 16MB 字符串被解两遍
-  （12MP PNG 每遍 39ms）。守卫：`test_inpaint_decodes_uploaded_bytes_once`
-  数 `base64.b64decode` 调用，一次 inpaint 必须恰好 1 次、revision 轮必须 0 次。
+- **上传字节不再 base64，也不解两遍**：`/inpaint`、`/export` 是 multipart，
+  `image`/`mask` 是文件部件，handler 读成原始字节后只解码一次
+  （`_decode_uploaded_image`）。12MP PNG 的一次 base64 解码是 39ms、JSON 解析
+  16ms、体积多 33%。守卫：`test_inpaint_decodes_uploaded_bytes_once` 数
+  `_decode_uploaded_image` 调用，一次冷 inpaint 必须恰好 1 次、revision 轮 0 次。
+  文件部件超过 `MAX_UPLOAD_BYTES`(48MB) → 413，非图片字节 → 400。
 - **编码不从 ndarray 绕回 PIL**：`pil_to_bytes` 现在接受 uint8 RGB/RGBA ndarray，
   PNG 分支直接进 `png_bytes_from_numpy`，省掉 `Image.fromarray`(11ms) +
   `np.asarray`(21ms) 的整图往返；输出字节与传 PIL 图逐字节相同（bench 里断言）。
@@ -142,7 +143,9 @@ only one of the four with no known cost attached today.
 - **实测（2026-11-01，Xeon E3-1231 v3 / 8 线程，12MP PNG，cv2 模型，假模型固定开销）**：
   同一份 bench 在改动前后交替各跑 3 轮、
   `python -m pytest benchmarks/test_inpaint_cpu_path.py -m bench -s -k "cold or warm or export"`：
-  cold **988.2 → 834.1 → 793.0 ms**（−19.8%）、warm **827.7 → 675.3 → 620.8 ms**（−25.0%）、
-  export **566.5 → 536.2 → 472.2 ms**（−16.6%）；单项 A/B：base64 325.0 vs 284.8 ms（−40ms）、
+  cold **988.2 → 834.1 → 793.0 → 696.4 ms**（−29.5%）、warm **827.7 → 675.3 → 620.8 → 617.8 ms**（−25.4%）、
+  export **566.5 → 536.2 → 472.2 → 473.2 ms**（−16.5%）；单项 A/B：base64 325.0 vs 284.8 ms（−40ms）、
   PNG 编码 542.5 vs 519.7 ms（−23ms）、预览合成 532.7 vs 123.4 ms（−409ms）、
   PNG 策略 539.3 vs 462.7 ms（−77ms，同一编码器只换 zlib 策略，体积 13.80 → 15.49 MB）。
+  multipart 一步只动冷请求（warm 请求本来就不传图）：793.0 → 696.4 ms（−96ms，base64 46ms + JSON 21ms +
+  传输拷贝），上传字节同时少 33%（17.3MB → 13.0MB）。

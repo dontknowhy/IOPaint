@@ -9,7 +9,7 @@ import io
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import httpx
 import numpy as np
@@ -27,7 +27,14 @@ from iopaint.schema import (
     RunPluginRequest,
     SwitchPluginModelRequest,
 )
-from iopaint.tests.test_api_phase1 import _b64_image, _b64_mask, _minimal_config
+from iopaint.tests.test_api_phase1 import (
+    _b64_image,
+    _b64_mask,
+    _minimal_config,
+    _png_image,
+    _png_mask,
+)
+from iopaint.tests.utils import form_fields, multipart
 
 
 class FakePlugin(BasePlugin):
@@ -123,13 +130,19 @@ class TestBodyLimitReceivedBytes:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """httpx 对迭代器 content 用 chunked 编码，不带 Content-Length；
-        累计 3000 字节超过 2048 上限，必须在进入 JSON 解析前回 413。"""
+        累计超过 2048 上限，必须在表单解析（读进 spool）之前回 413。"""
         monkeypatch.setattr(api_mod, "MAX_REQUEST_BODY_BYTES", 2048)
         _, client = _client(tmp_path)
+        body = (
+            b'--b\r\nContent-Disposition: form-data; name="image"; '
+            b'filename="a.png"\r\nContent-Type: image/png\r\n\r\n'
+            + b"x" * 3000
+            + b"\r\n--b--\r\n"
+        )
         resp = client.post(
             "/api/v1/inpaint",
-            content=iter([b"x" * 1500, b"y" * 1500]),
-            headers={"Content-Type": "application/json"},
+            content=iter([body]),
+            headers={"Content-Type": "multipart/form-data; boundary=b"},
         )
         assert resp.status_code == 413
         assert resp.json()["error"] == "RequestEntityTooLarge"
@@ -611,13 +624,28 @@ class TestAdjustMaskImageEndpoint:
 # ---------------------------------------------------------------------------
 
 
+
+def _post_inpaint(
+    client: TestClient,
+    req: InpaintRequest,
+    image: Optional[bytes] = None,
+    mask: Optional[bytes] = None,
+) -> httpx.Response:
+    """`/inpaint` 是 multipart：参数走文本部件，图片/掩膜走文件部件。"""
+    return client.post(
+        "/api/v1/inpaint", **multipart(form_fields(req), image=image, mask=mask)
+    )
+
+
 class TestFailedInpaintReleasesLease:
-    def _post(self, client: TestClient, req: InpaintRequest) -> httpx.Response:
-        return client.post(
-            "/api/v1/inpaint",
-            content=req.model_dump_json(),
-            headers={"Content-Type": "application/json"},
-        )
+    def _post(
+        self,
+        client: TestClient,
+        req: InpaintRequest,
+        image: Optional[bytes] = None,
+        mask: Optional[bytes] = None,
+    ) -> httpx.Response:
+        return _post_inpaint(client, req, image=image, mask=mask)
 
     def test_cropper_error_releases_lease_and_revision_still_usable(
         self, tmp_path: Path
@@ -627,9 +655,9 @@ class TestFailedInpaintReleasesLease:
         api, client = _client(tmp_path)
         first = self._post(
             client,
-            InpaintRequest(
-                image=_b64_image(), mask=_b64_mask(), hd_strategy="Original"
-            ),
+            InpaintRequest(hd_strategy="Original"),
+            image=_png_image(),
+            mask=_png_mask(),
         )
         assert first.status_code == 200
         revision = first.headers["X-Revision"]
@@ -638,12 +666,12 @@ class TestFailedInpaintReleasesLease:
             client,
             InpaintRequest(
                 revision=revision,
-                mask=_b64_mask(),
                 hd_strategy="Original",
                 use_croper=True,
                 croper_x=10_000,
                 croper_y=10_000,
             ),
+            mask=_png_mask(),
         )
         assert bad.status_code == 400
 
@@ -660,9 +688,8 @@ class TestFailedInpaintReleasesLease:
         def follow_up() -> None:
             result["resp"] = self._post(
                 client,
-                InpaintRequest(
-                    revision=revision, mask=_b64_mask(), hd_strategy="Original"
-                ),
+                InpaintRequest(revision=revision, hd_strategy="Original"),
+                mask=_png_mask(),
             )
 
         worker = threading.Thread(target=follow_up, daemon=True)
@@ -679,9 +706,9 @@ class TestFailedInpaintReleasesLease:
         api, client = _client(tmp_path)
         first = self._post(
             client,
-            InpaintRequest(
-                image=_b64_image(), mask=_b64_mask(), hd_strategy="Original"
-            ),
+            InpaintRequest(hd_strategy="Original"),
+            image=_png_image(),
+            mask=_png_mask(),
         )
         assert first.status_code == 200
         revision = first.headers["X-Revision"]
@@ -697,6 +724,7 @@ class TestFailedInpaintReleasesLease:
                 mask_strokes=[{"pts": [[1, 1], [2, 2]], "size": 3}],
                 hd_strategy="Original",
             ),
+            image=None,
         )
         assert bad.status_code == 500
 
@@ -713,9 +741,8 @@ class TestFailedInpaintReleasesLease:
         def follow_up() -> None:
             result["resp"] = self._post(
                 client,
-                InpaintRequest(
-                    revision=revision, mask=_b64_mask(), hd_strategy="Original"
-                ),
+                InpaintRequest(revision=revision, hd_strategy="Original"),
+                mask=_png_mask(),
             )
 
         worker = threading.Thread(target=follow_up, daemon=True)
@@ -732,14 +759,8 @@ class TestFailedInpaintReleasesLease:
 
 class TestExtenderCanvasBounds:
     def _post(self, client: TestClient, **kwargs: Any) -> httpx.Response:
-        req = InpaintRequest(
-            image=_b64_image(), mask=_b64_mask(), hd_strategy="Original", **kwargs
-        )
-        return client.post(
-            "/api/v1/inpaint",
-            content=req.model_dump_json(),
-            headers={"Content-Type": "application/json"},
-        )
+        req = InpaintRequest(hd_strategy="Original", **kwargs)
+        return _post_inpaint(client, req, image=_png_image(), mask=_png_mask())
 
     def test_oversized_canvas_is_413_without_inference(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -874,7 +895,7 @@ class TestExportFormat:
         _, client = _client(tmp_path)
         resp = client.post(
             "/api/v1/export",
-            json={"image": _b64_image(), "format": "notaformat"},
+            **multipart({"format": "notaformat"}, image=_png_image()),
         )
         assert resp.status_code == 422
         assert resp.json()["detail"][0]["loc"] == ["body", "format"]
@@ -882,30 +903,21 @@ class TestExportFormat:
     def test_valid_format_still_exports(self, tmp_path: Path) -> None:
         _, client = _client(tmp_path)
         resp = client.post(
-            "/api/v1/export",
-            json={"image": _b64_image(), "format": "png"},
+            "/api/v1/export", **multipart({"format": "png"}, image=_png_image())
         )
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "image/png"
 
 
-class TestDataUrlErrors:
-    def test_missing_base64_marker_is_400(self, tmp_path: Path) -> None:
-        """缺 ";base64," 的 data URL 是客户端错误：400，而不是 500。"""
+class TestUploadErrors:
+    def test_not_an_image_is_400(self, tmp_path: Path) -> None:
+        """文件部件不是图片时是客户端错误：400，而不是 500。"""
         _, client = _client(tmp_path)
-        resp = client.post("/api/v1/export", json={"image": "data:image/png"})
+        resp = client.post("/api/v1/export", **multipart({}, image=b"notanimage"))
         assert resp.status_code == 400
-        assert resp.json()["detail"] == "invalid data URL"
+        assert resp.json()["detail"] == "invalid image data"
 
-    def test_invalid_base64_payload_is_400(self, tmp_path: Path) -> None:
+    def test_missing_image_and_revision_is_400(self, tmp_path: Path) -> None:
         _, client = _client(tmp_path)
-        resp = client.post(
-            "/api/v1/export", json={"image": "data:image/png;base64,!!!!"}
-        )
+        resp = client.post("/api/v1/export", data={"format": "png"})
         assert resp.status_code == 400
-        assert resp.json()["detail"] == "invalid data URL"
-
-    def test_plain_base64_still_accepted(self, tmp_path: Path) -> None:
-        _, client = _client(tmp_path)
-        resp = client.post("/api/v1/export", json={"image": _b64_image()})
-        assert resp.status_code == 200

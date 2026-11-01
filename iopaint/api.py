@@ -1,12 +1,21 @@
 import asyncio
-import base64
-import binascii
+import json
 import math
 import os
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, MutableMapping, Optional, Tuple, Type, Union
+from typing import (
+    Annotated,
+    Any,
+    Dict,
+    List,
+    MutableMapping,
+    Optional,
+    Tuple,
+    Type,
+    Union,
+)
 
 import cv2
 import numpy as np
@@ -23,14 +32,15 @@ except Exception:
     pass
 
 import uvicorn
-from PIL import Image
-from fastapi import APIRouter, FastAPI, Request, UploadFile
+from PIL import Image, UnidentifiedImageError
+from fastapi import APIRouter, FastAPI, Form, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
-from fastapi.exceptions import HTTPException
+from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
+from pydantic import ValidationError
 from socketio import AsyncServer
 
 from iopaint.exceptions import ModelLoadError
@@ -62,7 +72,9 @@ from iopaint.schema import (
     ServerConfigResponse,
     SwitchModelRequest,
     InpaintRequest,
+    InpaintForm,
     ExportRequest,
+    ExportForm,
     RunPluginRequest,
     SDSampler,
     PluginInfo,
@@ -81,6 +93,11 @@ WEB_APP_DIR = CURRENT_DIR / "web_app"
 # 单个请求体上限（256MB）。12MP PNG 的 base64 约 15MB，留足余量；
 # 超过则 413，避免超大 body 打爆内存（DOS-1）。
 MAX_REQUEST_BODY_BYTES = 256 * 1024 * 1024
+
+# 单个上传图片/掩膜文件部件的上限（48MB）。原来 schema 用 64M 字符卡 base64
+# 字段，换成 multipart 后这条约束随 base64 一起消失，这里按解码后字节补回来：
+# 64M 字符的 base64 正好约 48MB 原始字节。超过则 413，不读进内存再交给解码器。
+MAX_UPLOAD_BYTES = 48 * 1024 * 1024
 
 # /inpaint 的显示预览上限，与前端 Editor 的 IMAGE_CANVAS_MAX_PIXELS 一致：
 # 编辑器最终只把这些像素画进显示画布，多出来的分辨率只会在网络上和浏览器
@@ -150,19 +167,49 @@ def _max_pixels_for_request(request: Optional[Request]) -> Optional[int]:
     return EXTERNAL_MAX_IMAGE_PIXELS
 
 
-def _data_url_to_bytes(encoding: str) -> bytes:
-    """base64/data-url → 原始字节（不落盘、不二次编码）。"""
-    if not encoding.startswith("data:"):
-        return base64.b64decode(encoding)
-    # 只接受 data:*;base64,<payload>：缺 ";base64" 标记或载荷不是合法
-    # base64 都是客户端错误，按 400 回，而不是 500。
+def _inpaint_request_from_form(form: InpaintForm) -> InpaintRequest:
+    """multipart 表单 → `InpaintRequest`：笔迹是 JSON 文本部件，这里解码再校验。"""
+    data = form.model_dump(exclude={"image", "mask", "mask_strokes"})
+    if form.mask_strokes:
+        try:
+            data["mask_strokes"] = json.loads(form.mask_strokes)
+        except json.JSONDecodeError as e:
+            raise HTTPException(
+                status_code=422, detail=f"mask_strokes is not valid JSON: {e}"
+            )
     try:
-        header, payload = encoding.split(",", 1)
-        if not header.endswith(";base64"):
-            raise ValueError("data URL is not base64 encoded")
-        return base64.b64decode(payload, validate=True)
-    except (ValueError, binascii.Error):
-        raise HTTPException(status_code=400, detail="invalid data URL")
+        return InpaintRequest(**data)
+    except ValidationError as e:
+        # 表单模型的字段约束在 FastAPI 里已经校验过一轮；这里只剩跨字段规则
+        #（笔迹总点数），仍按 422 回，保持与 JSON 时代一致的错误形状。
+        raise RequestValidationError(e.errors())
+
+
+def _decode_uploaded_image(
+    raw: bytes, max_pixels: Optional[int], gray: bool = False
+) -> Tuple[np.ndarray, Optional[np.ndarray], Dict, str]:
+    """上传的图片字节 → numpy。非图片字节按 400 回，不是 500。"""
+    try:
+        return decode_base64_to_image(
+            gray=gray, max_pixels=max_pixels, image_bytes=raw
+        )
+    except UnidentifiedImageError:
+        raise HTTPException(status_code=400, detail="invalid image data")
+
+
+async def _read_upload(
+    file: Optional[UploadFile], name: str
+) -> Optional[bytes]:
+    """multipart 文件部件 → 字节。超过 `MAX_UPLOAD_BYTES` 直接 413。"""
+    if file is None:
+        return None
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"{name} exceeds limit of {MAX_UPLOAD_BYTES} bytes",
+        )
+    return data
 
 
 def _media_type_for_ext(ext: str) -> str:
@@ -546,12 +593,19 @@ class Api:
             negative_prompt = parts[1].split("\n")[0].strip()
         return GenInfoResponse(prompt=prompt, negative_prompt=negative_prompt)
 
-    async def api_inpaint(self, req: InpaintRequest, request: Request) -> Response:
-        if not req.mask and req.mask_strokes is None:
+    async def api_inpaint(
+        self, form: Annotated[InpaintForm, Form()], request: Request
+    ) -> Response:
+        # 图片/掩膜是 multipart 文件部件：拿到的就是原始字节，省掉 33% 的
+        # base64 膨胀和一次十几 MB 的 JSON 解析。
+        image_bytes = await _read_upload(form.image, "image")
+        mask_bytes = await _read_upload(form.mask, "mask")
+        req = _inpaint_request_from_form(form)
+        if mask_bytes is None and req.mask_strokes is None:
             raise HTTPException(
                 status_code=400, detail="mask or mask_strokes is required"
             )
-        if not req.image and not req.revision:
+        if image_bytes is None and not req.revision:
             raise HTTPException(
                 status_code=400, detail="image or revision is required"
             )
@@ -570,7 +624,12 @@ class Api:
             image_height,
             is_preview,
         ) = await loop.run_in_executor(
-            None, self._inpaint_blocking, req, _max_pixels_for_request(request)
+            None,
+            self._inpaint_blocking,
+            req,
+            _max_pixels_for_request(request),
+            image_bytes,
+            mask_bytes,
         )
 
         await self.sio.emit("diffusion_finish")
@@ -649,28 +708,26 @@ class Api:
         self,
         req: InpaintRequest,
         max_pixels: Optional[int] = EXTERNAL_MAX_IMAGE_PIXELS,
+        image_bytes: Optional[bytes] = None,
+        mask_bytes: Optional[bytes] = None,
     ) -> tuple:
         """同步版 inpaint：decode → inference → encode。跑在线程池里。
 
+        `image_bytes` / `mask_bytes` 是请求上传的原始字节（multipart 文件部件）；
         revision 命中时**忽略上传的图片字节**，直接在当前 canonical 像素上
         继续推理；未命中才回退到旧路径，并在日志里写明三类原因。
         """
         # 裁剪边距以服务端 config.json 为准（前端下发的是常量，不暴露给用户）
         req.hd_strategy_crop_margin = self.config.hd_strategy_crop_margin
         mask: Optional[np.ndarray] = None
-        if req.mask:
-            mask, _, _, _ = decode_base64_to_image(
-                req.mask, gray=True, max_pixels=max_pixels
+        if mask_bytes is not None:
+            mask, _, _, _ = _decode_uploaded_image(
+                mask_bytes, max_pixels, gray=True
             )
             mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)[1]
 
-        raw_bytes: Optional[bytes] = None
+        raw_bytes = image_bytes
         source_hash: Optional[str] = None
-        if req.image:
-            # 原始字节只解一次 base64：既喂给下面的解码器，也用来算哈希。
-            # 哈希推迟到真要查表时——12MP PNG 的 sha256 是 27ms，revision
-            # 命中时上传的字节根本用不上。
-            raw_bytes = _data_url_to_bytes(req.image)
         lease = None
         if req.revision:
             lease = self.revision_cache.begin_by_revision(req.revision)
@@ -679,12 +736,14 @@ class Api:
                     "revision cache miss: revision expired (evicted/restart); "
                     f"revision={req.revision[:16]}…"
                 )
-                if not req.image:
+                if raw_bytes is None:
                     raise HTTPException(
                         status_code=410,
                         detail="revision expired; resend the image bytes",
                     )
         if lease is None and raw_bytes is not None:
+            # 哈希推迟到真要查表时：12MP PNG 的 sha256 是 27ms，revision
+            # 命中时上传的字节根本用不上。
             source_hash = sha256_bytes(raw_bytes)
             lease = self.revision_cache.begin_by_hash(source_hash)
             if lease is None:
@@ -705,9 +764,9 @@ class Api:
                 f"generation={lease.branch_generation()}"
             )
         else:
-            assert req.image is not None
-            image, alpha_channel, infos, ext = decode_base64_to_image(
-                req.image, max_pixels=max_pixels, image_bytes=raw_bytes
+            assert raw_bytes is not None
+            image, alpha_channel, infos, ext = _decode_uploaded_image(
+                raw_bytes, max_pixels
             )
             source_sampling = (
                 jpeg_sampling_from_bytes(raw_bytes) if raw_bytes else None
@@ -876,9 +935,13 @@ class Api:
             preview is not None,
         )
 
-    def api_export(self, req: ExportRequest, request: Request) -> Response:
+    async def api_export(
+        self, form: Annotated[ExportForm, Form()], request: Request
+    ) -> Response:
         """唯一编码出口：canonical/上传像素 → 源格式的交付字节。"""
-        if not req.revision and not req.image:
+        image_bytes = await _read_upload(form.image, "image")
+        req = ExportRequest(**form.model_dump(exclude={"image"}))
+        if not req.revision and image_bytes is None:
             raise HTTPException(
                 status_code=400, detail="revision or image is required"
             )
@@ -907,19 +970,17 @@ class Api:
                     "export revision miss: revision expired (evicted/restart); "
                     f"revision={req.revision[:16]}…"
                 )
-                if not req.image:
+                if image_bytes is None:
                     raise HTTPException(
                         status_code=410,
                         detail="revision expired; resend the image bytes",
                     )
 
         if image is None:
-            assert req.image is not None
-            raw = _data_url_to_bytes(req.image)
-            image, alpha_channel, infos, decoded_ext = decode_base64_to_image(
-                req.image,
-                max_pixels=_max_pixels_for_request(request),
-                image_bytes=raw,
+            assert image_bytes is not None
+            raw = image_bytes
+            image, alpha_channel, infos, decoded_ext = _decode_uploaded_image(
+                raw, _max_pixels_for_request(request)
             )
             source_ext = decoded_ext
             source_sampling = jpeg_sampling_from_bytes(raw)

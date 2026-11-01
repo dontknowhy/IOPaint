@@ -18,6 +18,7 @@ from PIL import Image
 from iopaint.api import Api
 from iopaint.revision_cache import _diff_hinted, _outside_equal
 from iopaint.tests.test_api import _minimal_config
+from iopaint.tests.utils import multipart
 
 
 def _frame(seed: int, shape: Tuple[int, int, int] = (120, 160, 3)) -> np.ndarray:
@@ -78,12 +79,12 @@ class TestDiffHinted:
 # ---------------------------------------------------------------------------
 
 
-def _png_b64(width: int, height: int) -> str:
+def _png(width: int, height: int) -> bytes:
     rng = np.random.default_rng(7)
     arr = rng.integers(0, 255, (height, width, 3), dtype=np.uint8)
     buf = io.BytesIO()
     Image.fromarray(arr).save(buf, format="PNG")
-    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    return buf.getvalue()
 
 
 def _run_edits(
@@ -98,26 +99,30 @@ def _run_edits(
     with TestClient(app) as client:
         resp = client.post(
             "/api/v1/inpaint",
-            json={
-                "image": _png_b64(320, 240),
-                "mask_strokes": [{"pts": [[40, 40], [120, 90]], "size": 16}],
-            },
+            **multipart(
+                {"mask_strokes": [{"pts": [[40, 40], [120, 90]], "size": 16}]},
+                image=_png(320, 240),
+            ),
         )
         assert resp.status_code == 200, resp.text[:200]
         revision = resp.headers["X-Revision"]
         for i in range(3):
             resp = client.post(
                 "/api/v1/inpaint",
-                json={
-                    "revision": revision,
-                    "mask_strokes": [
-                        {"pts": [[60 + i * 20, 50 + i * 15], [200, 150]], "size": 12}
-                    ],
-                },
+                **multipart(
+                    {
+                        "revision": revision,
+                        "mask_strokes": [
+                            {"pts": [[60 + i * 20, 50 + i * 15], [200, 150]], "size": 12}
+                        ],
+                    }
+                ),
             )
             assert resp.status_code == 200, resp.text[:200]
             revision = resp.headers["X-Revision"]
-        exported = client.post("/api/v1/export", json={"revision": revision})
+        exported = client.post(
+            "/api/v1/export", **multipart({"revision": revision})
+        )
         assert exported.status_code == 200
         return exported.content
 

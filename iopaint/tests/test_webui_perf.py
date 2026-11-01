@@ -22,6 +22,7 @@ from iopaint.api import (
     _display_preview_jpeg,
 )
 from iopaint.helper import rasterize_mask_strokes
+from iopaint.tests.utils import multipart
 from iopaint.model.brushnet import brushnet_wrapper
 from iopaint.model.controlnet import ControlNet
 from iopaint.schema import (
@@ -129,15 +130,18 @@ def _client(tmp_path: Path, **kwargs: Any) -> Tuple[Api, TestClient]:
     return api, TestClient(api.app)
 
 
-def _png_b64(width: int, height: int) -> str:
+def _png(width: int, height: int) -> bytes:
     arr = np.full((height, width, 3), 120, dtype=np.uint8)
     buf = io.BytesIO()
     Image.fromarray(arr).save(buf, format="PNG")
-    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    return buf.getvalue()
 
 
 def _inpaint(client: TestClient, body: dict) -> Any:
-    return client.post("/api/v1/inpaint", json=body)
+    """`/inpaint` 是 multipart：body 里的 `image` 是原始字节，走文件部件。"""
+    fields = dict(body)
+    image = fields.pop("image", None)
+    return client.post("/api/v1/inpaint", **multipart(fields, image=image))
 
 
 def _decode(data: bytes) -> Image.Image:
@@ -198,7 +202,7 @@ def test_inpaint_accepts_strokes_without_mask(tmp_path: Path) -> None:
     resp = _inpaint(
         client,
         {
-            "image": _png_b64(64, 64),
+            "image": _png(64, 64),
             "mask_strokes": [
                 {"pts": [[10, 10], [50, 50]], "size": 5},
             ],
@@ -219,7 +223,7 @@ def test_inpaint_large_image_returns_display_preview(tmp_path: Path) -> None:
         client,
         {
             # 17.64MP：超过 16Mi 的预览上限。空笔迹 = 不跑推理，只测响应路径。
-            "image": _png_b64(4200, 4200),
+            "image": _png(4200, 4200),
             "mask_strokes": [],
             "hd_strategy": "Original",
         },
@@ -235,7 +239,7 @@ def test_inpaint_large_image_returns_display_preview(tmp_path: Path) -> None:
 
 def test_inpaint_without_mask_or_strokes_is_rejected(tmp_path: Path) -> None:
     _, client = _client(tmp_path)
-    resp = _inpaint(client, {"image": _png_b64(16, 16)})
+    resp = _inpaint(client, {"image": _png(16, 16)})
     assert resp.status_code == 400
     assert "mask or mask_strokes" in resp.text
 
@@ -245,7 +249,7 @@ def test_large_image_without_cache_stays_full_resolution(tmp_path: Path) -> None
     resp = _inpaint(
         client,
         {
-            "image": _png_b64(4200, 4200),
+            "image": _png(4200, 4200),
             "mask_strokes": [],
             "hd_strategy": "Original",
         },
@@ -388,37 +392,37 @@ def test_model_manager_injects_module_caches(
 def test_inpaint_decodes_uploaded_bytes_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`_data_url_to_bytes` 与 `decode_base64_to_image` 不能各解一遍。
+    """上传的图片字节只解码一次：冷请求 1 次，只带 revision 的请求 0 次。
 
-    12MP PNG 的 base64 解一次 39ms；改前每请求两次。
+    12MP PNG 解码是 272ms，重复解码会直接翻倍。
     """
-    import base64 as b64_mod
+    from iopaint import api as api_mod
 
     calls: list = []
-    real_b64decode = b64_mod.b64decode
+    real = api_mod._decode_uploaded_image
 
     def counting(*args: Any, **kwargs: Any) -> Any:
         calls.append(1)
-        return real_b64decode(*args, **kwargs)
+        return real(*args, **kwargs)
 
-    monkeypatch.setattr(b64_mod, "b64decode", counting)
+    monkeypatch.setattr(api_mod, "_decode_uploaded_image", counting)
     _, client = _client(tmp_path)
 
     resp = _inpaint(
         client,
-        {"image": _png_b64(640, 480), "mask_strokes": [{"pts": [[10, 10]], "size": 8}]},
+        {"image": _png(640, 480), "mask_strokes": [{"pts": [[10, 10]], "size": 8}]},
     )
     assert resp.status_code == 200
-    assert len(calls) == 1, f"一次 inpaint 解了 {len(calls)} 次 base64"
+    assert len(calls) == 1, f"一次 inpaint 解码了 {len(calls)} 次上传字节"
 
-    # 只带 revision 的后续请求根本不该解 base64
+    # 只带 revision 的后续请求根本不该碰上传字节
     calls.clear()
     revision = resp.headers["X-Revision"]
     resp = _inpaint(
         client, {"revision": revision, "mask_strokes": [{"pts": [[20, 20]], "size": 8}]}
     )
     assert resp.status_code == 200
-    assert calls == [], "revision 命中还解了 base64"
+    assert calls == [], "revision 命中还解码了上传字节"
 
 
 def test_revision_hit_skips_source_hash(
@@ -440,7 +444,7 @@ def test_revision_hit_skips_source_hash(
 
     monkeypatch.setattr(api_mod, "sha256_bytes", counting)
     _, client = _client(tmp_path)
-    image = _png_b64(640, 480)
+    image = _png(640, 480)
 
     first = _inpaint(
         client, {"image": image, "mask_strokes": [{"pts": [[10, 10]], "size": 8}]}
@@ -469,7 +473,7 @@ def test_png_response_skips_pil_roundtrip(
     """
     from PIL import Image as pil_image
 
-    image = _png_b64(640, 480)  # 先在前端侧造好 payload，别被下面的炸弹波及
+    image = _png(640, 480)  # 先在前端侧造好 payload，别被下面的炸弹波及
 
     def boom(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("PNG 响应路径不该再经过 Image.fromarray")

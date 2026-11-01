@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Optional, Literal, List, Tuple, get_args
 
 from loguru import logger
+from fastapi import UploadFile
 
 from iopaint.const import (
     INSTRUCT_PIX2PIX_NAME,
@@ -337,19 +338,14 @@ class MaskStroke(BaseModel):
     size: float = Field(..., gt=0, le=32767, description="brush size in pixels")
 
 
-class InpaintRequest(BaseModel):
-    image: Optional[str] = Field(
-        None, description="base64 encoded image", max_length=64_000_000
-    )
-    mask: Optional[str] = Field(
-        None, description="base64 encoded mask", max_length=64_000_000
-    )
-    # 交互编辑的主路径：传笔迹，由服务端按原图尺寸栅格化，省掉整图 PNG 的
-    # 生成/编解码。mask 仍是 fallback（交互分割、/adjust_mask、旧客户端）。
-    mask_strokes: Optional[List[MaskStroke]] = Field(
-        None, max_length=10_000, description="vector mask strokes in image coords"
-    )
-    # 服务端 canonical 的 revision。命中时 image 可省略（服务端忽略上传字节）。
+class InpaintParams(BaseModel):
+    """`/inpaint` 的全部标量参数，JSON 与 multipart 两种请求体共用。
+
+    图像/掩膜不走这里：`/inpaint` 是 multipart，文件部件由 handler 读成原始
+    字节直接喂解码器（不再 base64）；`InpaintRequest` 在其上补 `mask_strokes`。
+    """
+
+    # 服务端 canonical 的 revision。命中时不用上传图片字节。
     revision: Optional[str] = Field(
         None, max_length=128, description="Canonical revision from X-Revision"
     )
@@ -498,7 +494,7 @@ class InpaintRequest(BaseModel):
     )
 
     @model_validator(mode="after")
-    def validate_field(self) -> "InpaintRequest":
+    def validate_field(self) -> "InpaintParams":
         if self.sd_seed == -1:
             self.sd_seed = random.randint(1, 99999999)
             logger.info(f"Generate random seed: {self.sd_seed}")
@@ -524,6 +520,18 @@ class InpaintRequest(BaseModel):
 
         return self
 
+
+class InpaintRequest(InpaintParams):
+    """推理侧请求：`_inpaint_blocking` 及其模型拿到的那份参数。
+
+    # 交互编辑的主路径：传笔迹，由服务端按原图尺寸栅格化，省掉整图 PNG 的
+    # 生成/编解码。整图掩膜（`mask`）仍是 fallback，来自交互分割或 /adjust_mask。
+    """
+
+    mask_strokes: Optional[List[MaskStroke]] = Field(
+        None, max_length=10_000, description="vector mask strokes in image coords"
+    )
+
     @model_validator(mode="after")
     def validate_mask_strokes_total(self) -> "InpaintRequest":
         # 单条笔迹和条数都有上限，但光栅化是逐点 cv2.circle：总点数也必须
@@ -537,20 +545,38 @@ class InpaintRequest(BaseModel):
         return self
 
 
+class InpaintForm(InpaintParams):
+    """`POST /api/v1/inpaint` 的 multipart 表单。
+
+    `image` / `mask` 是文件部件，handler 读成原始字节直接解码，省掉 33% 的
+    base64 膨胀和一次 17MB 的 JSON 解析。`mask_strokes` 只能是文本部件，所以
+    是 JSON 字符串，handler 解析后交给 `InpaintRequest` 校验。
+    """
+
+    mask_strokes: Optional[str] = Field(None, description="JSON: mask_strokes")
+    image: Optional[UploadFile] = None
+    mask: Optional[UploadFile] = None
+
+
 class ExportRequest(BaseModel):
     """导出边界：唯一编码出口。
 
-    revision 命中时使用服务端 canonical 像素；否则用上传的 base64 图片。
-    未命中且没有 image 时返回 410，前端回传图片字节重试。
+    revision 命中时使用服务端 canonical 像素；否则用本次上传的图片字节。
+    未命中且没有图片时返回 410，前端回传图片字节重试。
     """
 
     revision: Optional[str] = Field(None, max_length=128)
-    image: Optional[str] = Field(None, max_length=64_000_000)
     # 目标格式；缺省跟随 revision 的源格式 / 上传图片的真实格式
     format: Optional[ExportFormat] = None
     quality: Optional[int] = Field(None, ge=1, le=100)
     subsampling: Optional[Literal["444", "420", "keep"]] = None
     export_mode: Optional[Literal["dct_patch", "full"]] = None
+
+
+class ExportForm(ExportRequest):
+    """`POST /api/v1/export` 的 multipart 表单：图片是文件部件，不是 base64。"""
+
+    image: Optional[UploadFile] = None
 
 
 class RunPluginRequest(BaseModel):
