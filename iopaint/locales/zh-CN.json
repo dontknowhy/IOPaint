@@ -103,6 +103,8 @@
       "export_png_compress_level": "\nPNG 的 zlib 压缩级别 0-9。无损：级别越高文件越小，但编码越慢。默认 1 与 WebUI 响应路径一致。\n",
       "export_webp_lossless": "\nWebP 导出使用无损编码（默认）。仅在 export_force=true 时读取，未强制时导出始终无损。关闭后由 export_quality 控制有损 WebP 的压缩率。\n",
       "hd_strategy_crop_margin": "\nhd_strategy=Crop 时围绕掩膜包围盒外扩的像素边距。作用于擦除模型（lama/mat/...）和扩散模型（SD/SDXL/...）。边距越大给模型的周边上下文越多，代价是更多显存和耗时。\n",
+      "hd_strategy_crop_merge": "\nhd_strategy=Crop 时把相互重叠的裁块并成一次前向，多笔掩膜因此少跑几次。合并会改变掩膜内的像素（掩膜外仍逐像素保持原图），所以默认关闭。\n",
+      "hd_strategy_crop_merge_max_pixels": "\n合并后单个裁块的面积上限（像素）。显存随面积涨：LaMa 这类 fp32 模型峰值约 1GB/百万像素，上限就是给它兜底的。\n",
       "enable_interactive_seg": "启用基于 Segment Anything 的交互式分割。",
       "interactive_seg_model": "模型大小：mobile_sam < vit_b < vit_l < vit_h。模型越大分割效果越好，但速度越慢。",
       "enable_remove_bg": "启用移除背景插件。",

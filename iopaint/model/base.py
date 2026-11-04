@@ -1,5 +1,5 @@
 import abc
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import cv2
 import torch
@@ -8,6 +8,8 @@ from loguru import logger
 
 from iopaint.helper import (
     boxes_from_mask,
+    crop_rect,
+    merge_overlapping_rects,
     resize_max_size,
     pad_img_to_modulo,
     switch_mps_device,
@@ -109,11 +111,12 @@ class InpaintModel:
         if config.hd_strategy == HDStrategy.CROP:
             if max(image.shape) > config.hd_strategy_crop_trigger_size:
                 logger.info("Run crop strategy")
-                boxes = boxes_from_mask(mask)
                 crop_result = []
-                for box in boxes:
-                    crop_image, crop_box = self._run_box(image, mask, box, config)
-                    crop_result.append((crop_image, crop_box))
+                for rect in self._crop_rects(mask, config):
+                    crop_image, crop_mask = self._crop_region(image, mask, rect)
+                    crop_result.append(
+                        (self._forward_region(crop_image, crop_mask, config), rect)
+                    )
 
                 # image[:, :, ::-1] 是负步长视图，直接赋值会写穿调用方的 image
                 inpaint_result = image[:, :, ::-1].copy()
@@ -170,10 +173,11 @@ class InpaintModel:
 
         crop_result = []
         # 上下文边距固定 128，不随 config.hd_strategy_crop_margin 变化：瓦片要缩放到
-        # 定尺寸，边距一旦变化连像素结果都会变。
+        # 定尺寸，边距一旦变化连像素结果都会变。合并间距仍按 config 走。
         config.hd_strategy_crop_margin = 128
-        for box in boxes_from_mask(mask):
-            crop_image, crop_mask, crop_box = self._crop_box(image, mask, box, config)
+        for rect in self._crop_rects(mask, config):
+            crop_image, crop_mask = self._crop_region(image, mask, rect)
+            crop_box = list(rect)
             origin_size = crop_image.shape[:2]
             resize_image = resize_max_size(crop_image, size_limit=size)
             resize_mask = resize_max_size(crop_mask, size_limit=size)
@@ -200,6 +204,27 @@ class InpaintModel:
 
         return inpaint_result
 
+    def _crop_rects(
+        self, mask: np.ndarray, config: InpaintRequest
+    ) -> List[Tuple[int, int, int, int]]:
+        """CROP 策略要跑的裁剪矩形：每个掩膜轮廓一个，可按距离把相邻的并成一个。"""
+        rects = [
+            crop_rect(box, config.hd_strategy_crop_margin, mask.shape)
+            for box in boxes_from_mask(mask)
+        ]
+        if config.hd_strategy_crop_merge and len(rects) > 1:
+            rects = merge_overlapping_rects(
+                rects, config.hd_strategy_crop_merge_max_pixels
+            )
+        return rects
+
+    @staticmethod
+    def _crop_region(
+        image: np.ndarray, mask: np.ndarray, rect: Tuple[int, int, int, int]
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        l, t, r, b = rect
+        return image[t:b, l:r, :], mask[t:b, l:r]
+
     def _crop_box(self, image, mask, box, config: InpaintRequest):
         """
 
@@ -211,46 +236,9 @@ class InpaintModel:
         Returns:
             BGR IMAGE, (l, r, r, b)
         """
-        box_h = box[3] - box[1]
-        box_w = box[2] - box[0]
-        cx = (box[0] + box[2]) // 2
-        cy = (box[1] + box[3]) // 2
-        img_h, img_w = image.shape[:2]
-
-        w = box_w + config.hd_strategy_crop_margin * 2
-        h = box_h + config.hd_strategy_crop_margin * 2
-
-        _l = cx - w // 2
-        _r = cx + w // 2
-        _t = cy - h // 2
-        _b = cy + h // 2
-
-        l = max(_l, 0)
-        r = min(_r, img_w)
-        t = max(_t, 0)
-        b = min(_b, img_h)
-
-        # try to get more context when crop around image edge
-        if _l < 0:
-            r += abs(_l)
-        if _r > img_w:
-            l -= _r - img_w
-        if _t < 0:
-            b += abs(_t)
-        if _b > img_h:
-            t -= _b - img_h
-
-        l = max(l, 0)
-        r = min(r, img_w)
-        t = max(t, 0)
-        b = min(b, img_h)
-
-        crop_img = image[t:b, l:r, :]
-        crop_mask = mask[t:b, l:r]
-
-        # logger.info(f"box size: ({box_h},{box_w}) crop size: {crop_img.shape}")
-
-        return crop_img, crop_mask, [l, t, r, b]
+        rect = crop_rect(box, config.hd_strategy_crop_margin, image.shape)
+        crop_img, crop_mask = self._crop_region(image, mask, rect)
+        return crop_img, crop_mask, list(rect)
 
     def _calculate_cdf(self, histogram):
         cdf = histogram.cumsum()
@@ -318,22 +306,6 @@ class InpaintModel:
         crop_img = image[t:b, l:r, :]
         crop_mask = mask[t:b, l:r]
         return crop_img, crop_mask, (l, t, r, b)
-
-    def _run_box(self, image, mask, box, config: InpaintRequest):
-        """
-
-        Args:
-            image: [H, W, C] RGB
-            mask: [H, W, 1]
-            box: [left,top,right,bottom]
-
-        Returns:
-            BGR IMAGE
-        """
-        crop_img, crop_mask, [l, t, r, b] = self._crop_box(image, mask, box, config)
-
-        return self._forward_region(crop_img, crop_mask, config), [l, t, r, b]
-
 
 class DiffusionInpaintModel(InpaintModel):
     def __init__(self, device, **kwargs):

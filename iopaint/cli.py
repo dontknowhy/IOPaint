@@ -231,6 +231,13 @@ def start(
     hd_strategy_crop_margin: int = Option(
         128, help=cli_text("cli.help.hd_strategy_crop_margin")
     ),
+    hd_strategy_crop_merge: bool = Option(
+        False, help=cli_text("cli.help.hd_strategy_crop_merge")
+    ),
+    hd_strategy_crop_merge_max_pixels: int = Option(
+        4 * 1024 * 1024,
+        help=cli_text("cli.help.hd_strategy_crop_merge_max_pixels"),
+    ),
     enable_interactive_seg: bool = Option(
         False, help=cli_text("cli.help.enable_interactive_seg")
     ),
@@ -358,6 +365,8 @@ def start(
         wire_format=cast(Literal["png", "webp"], wire_format),
         empty_cache_after_inpaint=empty_cache_after_inpaint,
         hd_strategy_crop_margin=hd_strategy_crop_margin,
+        hd_strategy_crop_merge=hd_strategy_crop_merge,
+        hd_strategy_crop_merge_max_pixels=hd_strategy_crop_merge_max_pixels,
         enable_interactive_seg=enable_interactive_seg,
         interactive_seg_model=interactive_seg_model,
         interactive_seg_device=interactive_seg_device,

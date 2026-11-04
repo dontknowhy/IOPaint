@@ -133,6 +133,10 @@ confirms idle/free VRAM and `CUDA_VISIBLE_DEVICES=<idx>` selects the card.
   `iopaint/model/helper/tensors.py` (uint8 on the bus, float and the `*255`/`clamp` on the device, results bit-identical
   to `norm_img` + `np.clip`), and CUDA's `tensor / scalar` is an approximate division — divide by a 0-dim tensor instead,
   or a few pixel values drift by 1. migan/fcf's tile-`__call__` lives in `InpaintModel._fixed_size_call` (`fixed_size`).
+  CROP strategy's per-contour crops come from `InpaintModel._crop_rects`: `hd_strategy_crop_merge`
+  merges only *overlapping* crops (union no larger than the sum of the parts) into one forward pass,
+  because merging strokes that are merely close computes extra pixels — measured 11% slower on 12MP;
+  merged area is capped by `hd_strategy_crop_merge_max_pixels` (LaMa peaks around 1GB per megapixel).
 - Image size limits are per-source, not global: `iopaint/__init__.py` disables Pillow's `MAX_IMAGE_PIXELS`, and every
   decode takes `max_pixels` from `_max_pixels_for_request` (`api.py`) — 100MP for external clients, unlimited for
   loopback/RFC1918 (a request carrying `Forwarded`/`X-Forwarded-For`/`X-Real-IP` counts as external, since a same-host

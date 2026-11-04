@@ -312,6 +312,11 @@ class ApiConfig(BaseModel):
     wire_format: Literal["png", "webp"] = "png"
     # hd_strategy=Crop 时掩膜外扩的边距；同时作用于 erase 与 diffusion 模型
     hd_strategy_crop_margin: int = 128
+    # hd_strategy=Crop 时把相互重叠的裁块并成一次前向（默认关：会改变掩膜内像素，
+    # 掩膜外仍逐像素保持原图）
+    hd_strategy_crop_merge: bool = False
+    # 合并后单个裁块的面积上限，防止相邻笔迹一路并成整张图把显存吃穿
+    hd_strategy_crop_merge_max_pixels: int = 4 * 1024 * 1024
     enable_interactive_seg: bool
     interactive_seg_model: InteractiveSegModel
     interactive_seg_device: Device
@@ -366,6 +371,22 @@ class InpaintParams(BaseModel):
     )
     hd_strategy_crop_margin: int = Field(
         128, ge=0, le=65536, description="Crop margin for hd_strategy=CROP"
+    )
+    hd_strategy_crop_merge: bool = Field(
+        False,
+        description=(
+            "Merge overlapping crops so a multi-stroke mask needs fewer forward "
+            "passes; merging changes the pixels inside the mask, the area outside "
+            "it stays untouched"
+        ),
+    )
+    hd_strategy_crop_merge_max_pixels: int = Field(
+        4 * 1024 * 1024,
+        ge=1,
+        description=(
+            "Upper bound on a merged crop's area in pixels; bounds peak VRAM "
+            "(LaMa-class fp32 models need about 1GB per megapixel)"
+        ),
     )
     hd_strategy_resize_limit: int = Field(
         1280, ge=1, le=65536, description="Resize limit for hd_strategy=RESIZE"

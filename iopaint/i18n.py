@@ -236,6 +236,15 @@ def build_en_cli_catalog() -> Dict[str, Any]:
                 "export_png_compress_level": EXPORT_PNG_COMPRESS_LEVEL_HELP,
                 "export_webp_lossless": EXPORT_WEBP_LOSSLESS_HELP,
                 "hd_strategy_crop_margin": HD_STRATEGY_CROP_MARGIN_HELP,
+            "hd_strategy_crop_merge": (
+                "\nMerge overlapping crops so a multi-stroke mask needs fewer forward "
+                "passes. The pixels inside the mask change (the region outside it stays "
+                "untouched), so it is off by default.\n"
+            ),
+            "hd_strategy_crop_merge_max_pixels": (
+                "\nArea cap (pixels) for a merged crop. Bounds peak VRAM: LaMa-class fp32 "
+                "models need about 1GB per megapixel.\n"
+            ),
                 "enable_interactive_seg": INTERACTIVE_SEG_HELP,
                 "interactive_seg_model": INTERACTIVE_SEG_MODEL_HELP,
                 "enable_remove_bg": REMOVE_BG_HELP,

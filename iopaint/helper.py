@@ -608,6 +608,90 @@ def boxes_from_mask(mask: np.ndarray) -> List[np.ndarray]:
     return boxes
 
 
+def crop_rect(
+    box: np.ndarray, margin: int, image_shape: Tuple[int, ...]
+) -> Tuple[int, int, int, int]:
+    """把掩膜轮廓盒扩成裁剪矩形 `(left, top, right, bottom)`。
+
+    以盒心为中心左右上下各外扩 `margin`；贴边时把多出来的那一条补向图内，
+    尽量保住窗口大小，最后整体裁进画面。`InpaintModel._crop_box` 和多盒合并
+    都按这个几何算，保持一致。
+    """
+    height, width = image_shape[:2]
+    box_w = int(box[2]) - int(box[0])
+    box_h = int(box[3]) - int(box[1])
+    cx = (int(box[0]) + int(box[2])) // 2
+    cy = (int(box[1]) + int(box[3])) // 2
+
+    w = box_w + margin * 2
+    h = box_h + margin * 2
+
+    _l = cx - w // 2
+    _r = cx + w // 2
+    _t = cy - h // 2
+    _b = cy + h // 2
+
+    l = max(_l, 0)
+    r = min(_r, width)
+    t = max(_t, 0)
+    b = min(_b, height)
+
+    # try to get more context when crop around image edge
+    if _l < 0:
+        r += abs(_l)
+    if _r > width:
+        l -= _r - width
+    if _t < 0:
+        b += abs(_t)
+    if _b > height:
+        t -= _b - height
+
+    return max(l, 0), max(t, 0), min(r, width), min(b, height)
+
+
+def merge_overlapping_rects(
+    rects: List[Tuple[int, int, int, int]], max_pixels: int
+) -> List[Tuple[int, int, int, int]]:
+    """把相互重叠（或相接）的裁剪矩形贪心合并成一个。
+
+    多笔掩膜本来每个轮廓单独前向，固定开销乘上笔画数；掩膜边距 128 起步，密集
+    笔画（文字、一排小物件）各自的裁剪框本来就大面积重叠，并成一块能少跑几次
+    且总面积更小。散开的笔画不合并——并集一旦大于各块面积之和就是多算像素，
+    实测 12MP 上 30 条 620px 间距的笔画合成一行宽裁剪反而慢 11%。
+    `max_pixels` 是合并后矩形的面积上限：挨着的笔迹一路并下去可以覆盖整张图，
+    显存跟着面积涨（LaMa 这类 fp32 模型实测峰值约 1GB/百万像素），必须设上限。
+    """
+    merged = list(rects)
+    changed = True
+    while changed:
+        changed = False
+        for i in range(len(merged)):
+            for j in range(i + 1, len(merged)):
+                a, b = merged[i], merged[j]
+                union = (
+                    min(a[0], b[0]),
+                    min(a[1], b[1]),
+                    max(a[2], b[2]),
+                    max(a[3], b[3]),
+                )
+                union_area = (union[2] - union[0]) * (union[3] - union[1])
+                if union_area > max_pixels:
+                    continue
+                if union_area > _rect_area(a) + _rect_area(b):
+                    continue
+                merged[i] = union
+                del merged[j]
+                changed = True
+                break
+            if changed:
+                break
+    return merged
+
+
+def _rect_area(rect: Tuple[int, int, int, int]) -> int:
+    return (rect[2] - rect[0]) * (rect[3] - rect[1])
+
+
 def rasterize_mask_strokes(
     shape: Tuple[int, ...], strokes: List[Any]
 ) -> np.ndarray:

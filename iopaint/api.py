@@ -719,6 +719,10 @@ class Api:
         """
         # 裁剪边距以服务端 config.json 为准（前端下发的是常量，不暴露给用户）
         req.hd_strategy_crop_margin = self.config.hd_strategy_crop_margin
+        req.hd_strategy_crop_merge = self.config.hd_strategy_crop_merge
+        req.hd_strategy_crop_merge_max_pixels = (
+            self.config.hd_strategy_crop_merge_max_pixels
+        )
         mask: Optional[np.ndarray] = None
         if mask_bytes is not None:
             mask, _, _, _ = _decode_uploaded_image(
