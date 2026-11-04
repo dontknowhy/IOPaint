@@ -129,7 +129,10 @@ confirms idle/free VRAM and `CUDA_VISIBLE_DEVICES=<idx>` selects the card.
   the event loop stays responsive.
 - Model contract: each model implements `forward(image, mask, config: InpaintRequest)` and returns a **BGR** numpy array.
   Input image is RGB, mask is single-channel 0/255 with the same HxW as the image (API returns 400 on mismatch). Respect
-  each class's `pad_mod` and `is_erase_model` flags.
+  each class's `pad_mod` and `is_erase_model` flags. Erase models upload/quantize through
+  `iopaint/model/helper/tensors.py` (uint8 on the bus, float and the `*255`/`clamp` on the device, results bit-identical
+  to `norm_img` + `np.clip`), and CUDA's `tensor / scalar` is an approximate division — divide by a 0-dim tensor instead,
+  or a few pixel values drift by 1. migan/fcf's tile-`__call__` lives in `InpaintModel._fixed_size_call` (`fixed_size`).
 - Image size limits are per-source, not global: `iopaint/__init__.py` disables Pillow's `MAX_IMAGE_PIXELS`, and every
   decode takes `max_pixels` from `_max_pixels_for_request` (`api.py`) — 100MP for external clients, unlimited for
   loopback/RFC1918 (a request carrying `Forwarded`/`X-Forwarded-For`/`X-Real-IP` counts as external, since a same-host

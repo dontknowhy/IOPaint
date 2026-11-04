@@ -22,6 +22,8 @@ class InpaintModel:
     min_size: Optional[int] = None
     pad_mod = 8
     pad_to_square = False
+    # 只能吃正方形定尺寸瓦片的模型（migan/fcf）：非空时 __call__ 走 _fixed_size_call
+    fixed_size: Optional[int] = None
     is_erase_model = False
     # 只有纯 SD/SDXL 的 UNet 支持运行时 torch.compile（见 model/torch_compile.py）
     supports_torch_compile = False
@@ -67,8 +69,6 @@ class InpaintModel:
 
         # logger.info(f"final forward pad size: {pad_image.shape}")
 
-        image, mask = self.forward_pre_process(image, mask, config)
-
         result = self.forward(pad_image, pad_mask, config)
         result = result[0:origin_height, 0:origin_width, :]
 
@@ -82,9 +82,6 @@ class InpaintModel:
             alpha = mask[:, :, np.newaxis].astype(np.float32) / 255.0
             result = result * alpha + image[:, :, ::-1] * (1.0 - alpha)
         return result
-
-    def forward_pre_process(self, image, mask, config):
-        return image, mask
 
     def forward_post_process(self, result, image, mask, config):
         return result, image, mask
@@ -104,6 +101,9 @@ class InpaintModel:
         masks: [H, W]
         return: BGR IMAGE
         """
+        if self.fixed_size is not None:
+            return self._fixed_size_call(image, mask, config)
+
         inpaint_result = None
         # logger.info(f"hd_strategy: {config.hd_strategy}")
         if config.hd_strategy == HDStrategy.CROP:
@@ -152,6 +152,51 @@ class InpaintModel:
 
         if inpaint_result is None:
             inpaint_result = self._forward_region(image, mask, config)
+
+        return inpaint_result
+
+    def _fixed_size_call(
+        self, image: np.ndarray, mask: np.ndarray, config: InpaintRequest
+    ) -> np.ndarray:
+        """定尺寸模型（fixed_size 非空）的瓦片推理。
+
+        按 mask 找出瓦片，缩到 fixed_size 以内做前向，再把结果放回原尺寸，掩膜外的
+        像素一律回贴原图。这类模型不读 hd_strategy：输入必须是正方形且边长固定。
+        """
+        size = self.fixed_size
+        assert size is not None  # __call__ 只在 fixed_size 非空时分派到这里
+        if image.shape[0] == size and image.shape[1] == size:
+            return self._pad_forward(image, mask, config)
+
+        crop_result = []
+        # 上下文边距固定 128，不随 config.hd_strategy_crop_margin 变化：瓦片要缩放到
+        # 定尺寸，边距一旦变化连像素结果都会变。
+        config.hd_strategy_crop_margin = 128
+        for box in boxes_from_mask(mask):
+            crop_image, crop_mask, crop_box = self._crop_box(image, mask, box, config)
+            origin_size = crop_image.shape[:2]
+            resize_image = resize_max_size(crop_image, size_limit=size)
+            resize_mask = resize_max_size(crop_mask, size_limit=size)
+            inpaint_result = self._pad_forward(resize_image, resize_mask, config)
+
+            # only paste masked area result
+            inpaint_result = cv2.resize(
+                inpaint_result,
+                (origin_size[1], origin_size[0]),
+                interpolation=cv2.INTER_CUBIC,
+            )
+            np.copyto(
+                inpaint_result,
+                crop_image[:, :, ::-1],
+                where=(crop_mask < 127)[..., np.newaxis],
+            )
+
+            crop_result.append((inpaint_result, crop_box))
+
+        inpaint_result = image[:, :, ::-1].copy()
+        for crop_image, crop_box in crop_result:
+            x1, y1, x2, y2 = crop_box
+            inpaint_result[y1:y2, x1:x2, :] = crop_image
 
         return inpaint_result
 
@@ -437,8 +482,8 @@ class DiffusionInpaintModel(InpaintModel):
     COMPOSITE_MASK_BLUR = 11
 
     def forward_post_process(self, result, image, mask, config):
-        # 羽化放在直方图匹配之前：删除前它发生在 forward_pre_process，
-        # _match_histograms 拿到的一向是羽化后的 mask，口径不能变
+        # 羽化放在直方图匹配之前：_match_histograms 拿到的一向是羽化后的 mask，
+        # 这个口径不能变
         k = 2 * self.COMPOSITE_MASK_BLUR + 1
         mask = cv2.GaussianBlur(mask, (k, k), 0)
 

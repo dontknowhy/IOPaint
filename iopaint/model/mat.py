@@ -1,7 +1,6 @@
 import os
 import random
 
-import cv2
 import numpy as np
 import torch
 import torch.nn as nn
@@ -11,11 +10,11 @@ import torch.utils.checkpoint as checkpoint
 from iopaint.helper import (
     load_model,
     get_cache_path_by_url,
-    norm_img,
     download_model,
 )
 from iopaint.schema import InpaintRequest
 from .base import InpaintModel
+from .helper.tensors import binary_mask, to_bgr_uint8, upload_uint8
 from .utils import (
     setup_filter,
     Conv2dLayer,
@@ -1919,34 +1918,13 @@ class MAT(InpaintModel):
         return: BGR IMAGE
         """
 
-        image = norm_img(image)  # [0, 1]
-        image *= 2
-        image -= 1  # [0, 1] -> [-1, 1]
-
-        mask = (mask > 127) * 255
-        mask = 255 - mask
-        mask = norm_img(mask)
-
-        image = (
-            torch.from_numpy(image)
-            .unsqueeze(0)
-            .to(device=self.device, dtype=self.torch_dtype)
-        )
-        mask = (
-            torch.from_numpy(mask)
-            .unsqueeze(0)
-            .to(device=self.device, dtype=self.torch_dtype)
-        )
+        image = upload_uint8(image, self.device)
+        image.mul_(2).sub_(1)  # [0, 1] -> [-1, 1]
+        mask = 1 - binary_mask(mask, self.device, threshold=127)
+        image = image.to(dtype=self.torch_dtype)
+        mask = mask.to(dtype=self.torch_dtype)
 
         output = self.model(
             image, mask, self.z, self.label, truncation_psi=1, noise_mode="none"
         )
-        output = (
-            (output.permute(0, 2, 3, 1) * 127.5 + 127.5)
-            .round()
-            .clamp(0, 255)
-            .to(torch.uint8)
-        )
-        output = output[0].cpu().numpy()
-        cur_res = cv2.cvtColor(output, cv2.COLOR_RGB2BGR)
-        return cur_res
+        return to_bgr_uint8(output, scale=127.5, offset=127.5, rounding=True)

@@ -4,6 +4,7 @@ import time
 import cv2
 import torch
 import torch.nn.functional as F
+from loguru import logger
 
 from iopaint.helper import get_cache_path_by_url, load_jit_model, download_model
 from iopaint.schema import InpaintRequest
@@ -290,7 +291,7 @@ class ZITS(InpaintModel):
         except Exception:
             line_256 = torch.zeros_like(items["mask_256"])
 
-        print(f"wireframe_forward time: {(time.time() - start) * 1000:.2f}ms")
+        logger.debug(f"wireframe_forward time: {(time.time() - start) * 1000:.2f}ms")
 
         # np_line = (line[0][0].numpy() * 255).astype(np.uint8)
         # cv2.imwrite("line.jpg", np_line)
@@ -303,7 +304,9 @@ class ZITS(InpaintModel):
             add_v=0.05,
             mul_v=4,
         )
-        print(f"sample_edge_line_logits time: {(time.time() - start) * 1000:.2f}ms")
+        logger.debug(
+            f"sample_edge_line_logits time: {(time.time() - start) * 1000:.2f}ms"
+        )
 
         # np_edge_pred = (edge_pred[0][0].numpy() * 255).astype(np.uint8)
         # cv2.imwrite("edge_pred.jpg", np_edge_pred)

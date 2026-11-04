@@ -13,10 +13,10 @@ torch.manual_seed(42)
 import torch.nn as nn
 from iopaint.helper import (
     download_model,
-    norm_img,
     get_cache_path_by_url,
     load_jit_model,
 )
+from .helper.tensors import binary_mask, to_bgr_uint8, upload_uint8
 from .utils import (
     make_beta_schedule,
     timestep_embedding,
@@ -294,14 +294,9 @@ class LDM(InpaintModel):
             raise ValueError()
 
         steps = config.ldm_steps
-        image = norm_img(image)
-        mask = norm_img(mask)
+        image = upload_uint8(image, self.device)
+        mask = binary_mask(mask, self.device, threshold=127)
 
-        mask[mask < 0.5] = 0
-        mask[mask >= 0.5] = 1
-
-        image = torch.from_numpy(image).unsqueeze(0).to(self.device)
-        mask = torch.from_numpy(mask).unsqueeze(0).to(self.device)
         masked_image = (1 - mask) * image
 
         mask = self._norm(mask)
@@ -325,9 +320,7 @@ class LDM(InpaintModel):
         inpainted_image = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
 
         # inpainted = (1 - mask) * image + mask * predicted_image
-        inpainted_image = inpainted_image.cpu().numpy().transpose(0, 2, 3, 1)[0] * 255
-        inpainted_image = inpainted_image.astype(np.uint8)[:, :, ::-1]
-        return inpainted_image
+        return to_bgr_uint8(inpainted_image, scale=255)
 
     def _norm(self, tensor):
         return tensor * 2.0 - 1.0

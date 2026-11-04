@@ -1,17 +1,13 @@
 import os
 
-import cv2
-import numpy as np
-import torch
-
 from iopaint.helper import (
-    norm_img,
     get_cache_path_by_url,
     load_jit_model,
     download_model,
 )
 from iopaint.schema import InpaintRequest
 from .base import InpaintModel
+from .helper.tensors import binary_mask, to_bgr_uint8, upload_uint8
 
 LAMA_MODEL_URL = os.environ.get(
     "LAMA_MODEL_URL",
@@ -50,19 +46,11 @@ class LaMa(InpaintModel):
         mask: [H, W]
         return: BGR IMAGE
         """
-        image = norm_img(image)
-        mask = norm_img(mask)
-
-        mask = (mask > 0) * 1
-        image = torch.from_numpy(image).unsqueeze(0).to(self.device)
-        mask = torch.from_numpy(mask).unsqueeze(0).to(self.device)
+        image = upload_uint8(image, self.device)
+        mask = binary_mask(mask, self.device)
 
         inpainted_image = self.model(image, mask)
-
-        cur_res = inpainted_image[0].permute(1, 2, 0).detach().cpu().numpy()
-        cur_res = np.clip(cur_res * 255, 0, 255).astype("uint8")
-        cur_res = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)
-        return cur_res
+        return to_bgr_uint8(inpainted_image, scale=255)
 
 
 class AnimeLaMa(LaMa):

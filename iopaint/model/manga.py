@@ -1,14 +1,13 @@
 import os
-import random
+import time
 
 import cv2
-import numpy as np
 import torch
-import time
 from loguru import logger
 
 from iopaint.helper import get_cache_path_by_url, load_jit_model, download_model
 from .base import InpaintModel
+from .helper.tensors import binary_mask, to_bgr_uint8
 from iopaint.schema import InpaintRequest
 
 
@@ -62,25 +61,23 @@ class Manga(InpaintModel):
         mask: [H, W, 1]
         return: BGR IMAGE
         """
-        seed = self.seed
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
+        # 局部 generator：噪声序列与原先的全局 manual_seed 逐位相同，但不再每请求
+        # 重置 random/numpy/torch 的全局种子。
+        generator = torch.Generator(device=self.device).manual_seed(self.seed)
 
-        gray_img = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        gray_img = torch.from_numpy(
-            gray_img[np.newaxis, np.newaxis, :, :].astype(np.float32)
-        ).to(self.device)
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        gray_img = (
+            torch.from_numpy(gray).unsqueeze(0).unsqueeze(0).to(self.device).float()
+        )
         start = time.time()
         lines = self.line_model(gray_img)
         lines = torch.clamp(lines, 0, 255)
-        logger.info(f"erika_model time: {time.time() - start}")
+        logger.debug(f"erika_model time: {time.time() - start}")
 
-        mask = torch.from_numpy(mask[np.newaxis, :, :, :]).to(self.device)
-        mask = mask.permute(0, 3, 1, 2)
-        mask = torch.where(mask > 0.5, 1.0, 0.0)
-        noise = torch.randn_like(mask)
+        mask = binary_mask(mask, self.device)
+        noise = torch.randn(
+            mask.shape, generator=generator, dtype=mask.dtype, device=self.device
+        )
         ones = torch.ones_like(mask)
 
         gray_img = gray_img / 255 * 2 - 1.0
@@ -88,9 +85,6 @@ class Manga(InpaintModel):
 
         start = time.time()
         inpainted_image = self.inpaintor_model(gray_img, lines, mask, noise, ones)
-        logger.info(f"image_inpaintor_model time: {time.time() - start}")
+        logger.debug(f"image_inpaintor_model time: {time.time() - start}")
 
-        cur_res = inpainted_image[0].permute(1, 2, 0).detach().cpu().numpy()
-        cur_res = (cur_res * 127.5 + 127.5).astype(np.uint8)
-        cur_res = cv2.cvtColor(cur_res, cv2.COLOR_GRAY2BGR)
-        return cur_res
+        return to_bgr_uint8(inpainted_image, scale=127.5, offset=127.5)
