@@ -64,7 +64,11 @@ const Header = () => {
         handleFileManagerMaskSelect(maskBlob)
       } else {
         const newFile = await getMediaFile(tab, filename)
-        setFile(newFile)
+        // 首次编辑让服务端按这个引用读原图；后续编辑都走 revision。
+        setFile(newFile, {
+          tab: tab === "output" ? "output" : "input",
+          filename,
+        })
       }
     } catch (e) {
       toast({

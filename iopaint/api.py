@@ -10,6 +10,7 @@ from typing import (
     Any,
     Dict,
     List,
+    Literal,
     MutableMapping,
     Optional,
     Tuple,
@@ -67,6 +68,7 @@ from iopaint.plugins import build_plugins, RealESRGANUpscaler, InteractiveSeg
 from iopaint.plugins.base_plugin import BasePlugin
 from iopaint.plugins.remove_bg import RemoveBG
 from iopaint.schema import (
+    GenInfoForm,
     GenInfoResponse,
     ApiConfig,
     ServerConfigResponse,
@@ -105,6 +107,11 @@ MAX_UPLOAD_BYTES = 48 * 1024 * 1024
 PREVIEW_MAX_PIXELS = 16 * 1024 * 1024
 PREVIEW_QUALITY = 92
 
+# 不透明 PNG 在这个区间内也返回全分辨率 JPEG 显示预览：canonical 像素仍在
+# RevisionCache，/export 与后续编辑不受影响；小图继续走 PNG，避免为了几 MB
+# 的图引入不必要的一次有损显示。
+PREVIEW_FULL_JPEG_MIN_PIXELS = 4 * 1024 * 1024
+
 # 插件模型在 ApiConfig / ServerConfigResponse 里是 enum 字段：先按同一枚举
 # 校验再写回 config，否则非法值会让后续 /server-config 一直 500。
 PLUGIN_MODEL_ENUMS: Dict[str, Type[Choices]] = {
@@ -115,19 +122,27 @@ PLUGIN_MODEL_ENUMS: Dict[str, Type[Choices]] = {
 
 
 def _display_preview_jpeg(
-    rgb: np.ndarray, alpha_channel: Optional[np.ndarray]
+    rgb: np.ndarray,
+    alpha_channel: Optional[np.ndarray],
+    force: bool = False,
 ) -> Optional[bytes]:
-    """超过 PREVIEW_MAX_PIXELS 时返回显示用 JPEG，否则 None。
+    """返回显示用 JPEG；`force` 时小图也编码，否则只处理超过上限的图。
 
-    只在 revision 可用时调用：canonical 像素仍在服务端，/export 与后续编辑
-    都不依赖这份有损字节；revision 不可用时继续回全分辨率源格式。
+    正常路径只处理 >PREVIEW_MAX_PIXELS 的图并缩放；`force=True` 用于
+    4–16Mi 的不透明 PNG，返回全分辨率 JPEG。只在 revision 可用时调用：
+    canonical 像素仍在服务端，/export 与后续编辑都不依赖这份有损字节；
+    revision 不可用时继续回全分辨率源格式。
     """
     height, width = rgb.shape[:2]
-    if height * width <= PREVIEW_MAX_PIXELS:
-        return None
-    scale = math.sqrt(PREVIEW_MAX_PIXELS / (height * width))
-    new_w = max(1, int(round(width * scale)))
-    new_h = max(1, int(round(height * scale)))
+    area = height * width
+    if area <= PREVIEW_MAX_PIXELS:
+        if not force:
+            return None
+        new_w, new_h = width, height
+    else:
+        scale = math.sqrt(PREVIEW_MAX_PIXELS / area)
+        new_w = max(1, int(round(width * scale)))
+        new_h = max(1, int(round(height * scale)))
     arr = rgb
     if alpha_channel is not None:
         alpha = alpha_channel
@@ -143,7 +158,8 @@ def _display_preview_jpeg(
             arr = np.clip(
                 rgb.astype(np.float32) * a + 255.0 * (1.0 - a), 0, 255
             ).astype(np.uint8)
-    arr = cv2.resize(arr, dsize=(new_w, new_h), interpolation=cv2.INTER_AREA)
+    if (new_w, new_h) != (width, height):
+        arr = cv2.resize(arr, dsize=(new_w, new_h), interpolation=cv2.INTER_AREA)
     return pil_to_bytes(arr, ext="jpeg", quality=PREVIEW_QUALITY)
 
 
@@ -169,7 +185,9 @@ def _max_pixels_for_request(request: Optional[Request]) -> Optional[int]:
 
 def _inpaint_request_from_form(form: InpaintForm) -> InpaintRequest:
     """multipart 表单 → `InpaintRequest`：笔迹是 JSON 文本部件，这里解码再校验。"""
-    data = form.model_dump(exclude={"image", "mask", "mask_strokes"})
+    data = form.model_dump(
+        exclude={"image", "mask", "mask_strokes", "media_tab", "media_name"}
+    )
     if form.mask_strokes:
         try:
             data["mask_strokes"] = json.loads(form.mask_strokes)
@@ -580,9 +598,19 @@ class Api:
             return FileResponse(self.config.input)
         raise HTTPException(status_code=404, detail="Input image not found")
 
-    def api_geninfo(self, file: UploadFile, request: Request) -> GenInfoResponse:
+    def api_geninfo(
+        self, form: Annotated[GenInfoForm, Form()], request: Request
+    ) -> GenInfoResponse:
+        if form.file is not None:
+            raw = form.file.file.read()
+        elif form.media_tab is not None and form.media_name is not None:
+            raw = self._read_media_file(form.media_tab, form.media_name)
+        else:
+            raise HTTPException(
+                status_code=400, detail="file or media reference is required"
+            )
         _, _, info = load_img(
-            file.file.read(),
+            raw,
             return_info=True,
             max_pixels=_max_pixels_for_request(request),
         )
@@ -592,6 +620,29 @@ class Api:
         if len(parts) > 1:
             negative_prompt = parts[1].split("\n")[0].strip()
         return GenInfoResponse(prompt=prompt, negative_prompt=negative_prompt)
+
+    def _read_media_file(self, tab: Literal["input", "output"], name: str) -> bytes:
+        """FileManager 目录内的文件 → 原始字节；路径校验复用 `_get_file`。
+
+        这是一条本机读盘路径，不经过 HTTP 上传，所以不需要 multipart 解析；
+        仍按 `MAX_UPLOAD_BYTES` 限制单文件，避免外部客户端借 media 引用让
+        服务端一次读入超大文件。
+        """
+        if self.file_manager is None:
+            raise HTTPException(status_code=422, detail="file manager is not enabled")
+        path = self.file_manager._get_file(tab, name)
+        try:
+            size = path.stat().st_size
+            if size > MAX_UPLOAD_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"media file exceeds limit of {MAX_UPLOAD_BYTES} bytes",
+                )
+            return path.read_bytes()
+        except OSError as e:
+            raise HTTPException(
+                status_code=422, detail=f"cannot read media file: {name}"
+            ) from e
 
     async def api_inpaint(
         self, form: Annotated[InpaintForm, Form()], request: Request
@@ -606,9 +657,12 @@ class Api:
                 status_code=400, detail="mask or mask_strokes is required"
             )
         if image_bytes is None and not req.revision:
-            raise HTTPException(
-                status_code=400, detail="image or revision is required"
-            )
+            if form.media_tab is not None and form.media_name is not None:
+                image_bytes = self._read_media_file(form.media_tab, form.media_name)
+            else:
+                raise HTTPException(
+                    status_code=400, detail="image or revision is required"
+                )
 
         # PERF-1: base64 解码、后处理、PNG/JPEG 编码都是 CPU 密集操作。
         # 原实现里它们跑在事件循环上，一张 12MP 图的 PNG 编码就要 ~7s，
@@ -644,8 +698,9 @@ class Api:
         if internal_format:
             headers["X-Internal-Format"] = internal_format
         if is_preview:
-            # 响应字节是有损缩放的显示预览，canonical 像素只存在于 revision；
-            # 客户端据此拒绝把这份字节当源图重传（否则会永久降分辨率）。
+            # 响应字节是有损显示预览（可能全分辨率、也可能已缩放），canonical
+            # 像素只存在于 revision；客户端据此拒绝把这份字节当源图重传
+            #（否则会永久降分辨率）。
             headers["X-Image-Preview"] = "1"
         return Response(
             content=res_img_bytes,
@@ -905,9 +960,19 @@ class Api:
         image_height, image_width = result_rgb.shape[:2]
         # 大图只在 canonical revision 可用时才回显示预览：此时 /export 和后续
         # 编辑都从服务端 canonical 像素出发，响应字节只负责「看得见」。
+        # 4–16Mi 的不透明 PNG 也走全分辨率 JPEG：PNG 编码/传输在这个尺寸上
+        # 已经明显大于 JPEG，且 canonical 像素仍可用于无损导出。
         preview = None
         if revision and not self.config.stateless_lossless:
-            preview = _display_preview_jpeg(result_rgb, alpha_channel)
+            area = image_width * image_height
+            force_full_jpeg = (
+                ext.lower() == "png"
+                and alpha_channel is None
+                and PREVIEW_FULL_JPEG_MIN_PIXELS <= area <= PREVIEW_MAX_PIXELS
+            )
+            preview = _display_preview_jpeg(
+                result_rgb, alpha_channel, force=force_full_jpeg
+            )
 
         if preview is not None:
             wire_ext = "jpeg"

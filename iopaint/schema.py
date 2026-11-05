@@ -577,6 +577,10 @@ class InpaintForm(InpaintParams):
     mask_strokes: Optional[str] = Field(None, description="JSON: mask_strokes")
     image: Optional[UploadFile] = None
     mask: Optional[UploadFile] = None
+    # FileManager 打开的文件：首次编辑直接让服务端从 input/output 目录读，
+    # 不再把原图上传一遍。后续编辑仍然走 revision。
+    media_tab: Optional[Literal["input", "output"]] = None
+    media_name: Optional[str] = None
 
 
 class ExportRequest(BaseModel):
@@ -628,6 +632,18 @@ class MediasResponse(BaseModel):
 class GenInfoResponse(BaseModel):
     prompt: str = ""
     negative_prompt: str = ""
+
+
+class GenInfoForm(BaseModel):
+    """`POST /api/v1/gen-info` 的 multipart 表单。
+
+    FileManager 打开的文件可以只给 tab+filename，让服务端直接读盘，避免为了
+    抽取 prompt 再把整张原图上传一次。
+    """
+
+    file: Optional[UploadFile] = None
+    media_tab: Optional[Literal["input", "output"]] = None
+    media_name: Optional[str] = None
 
 
 class ServerConfigResponse(BaseModel):

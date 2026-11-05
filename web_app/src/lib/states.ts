@@ -12,6 +12,7 @@ import {
   LDMSampler,
   Line,
   LineGroup,
+  MediaRef,
   ModelInfo,
   PluginParams,
   PowerPaintTask,
@@ -179,6 +180,7 @@ type EditorState = {
 
 type AppState = {
   file: File | null
+  mediaRef: MediaRef | null
   paintByExampleFile: File | null
   imageHeight: number
   imageWidth: number
@@ -203,7 +205,7 @@ type AppState = {
 
 type AppAction = {
   updateAppState: (newState: Partial<AppState>) => void
-  setFile: (file: File) => Promise<void>
+  setFile: (file: File, mediaRef?: MediaRef | null) => Promise<void>
   setIsInpainting: (newValue: boolean) => void
   getIsProcessing: () => boolean
   setBaseBrushSize: (newValue: number) => void
@@ -267,6 +269,7 @@ type AppAction = {
 
 const defaultValues: AppState = {
   file: null,
+  mediaRef: null,
   paintByExampleFile: null,
   imageHeight: 0,
   imageWidth: 0,
@@ -619,6 +622,7 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           }
 
           let targetFile: File | null = file
+          let mediaRef: MediaRef | null = null
           const revision = getRenderRevision(targetRender?.src)
           if (targetRender && !revision) {
             targetFile = await srcToFile(
@@ -626,6 +630,10 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
               file.name,
               file.type
             )
+          } else if (!targetRender) {
+            // 第一次编辑仍是最初打开的那张图：FileManager 来源可以直接让
+            // 服务端读盘；普通上传的 mediaRef 为 null，沿用文件上传。
+            mediaRef = get().mediaRef
           }
 
           // 没有 extraMasks（交互分割/插件/调整掩膜）时只传矢量笔迹：
@@ -662,7 +670,11 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           }
 
           try {
-            const request = (img: File | null, rev: string | null) =>
+            const request = (
+              img: File | null,
+              rev: string | null,
+              media: MediaRef | null = null
+            ) =>
               inpaint(
                 img,
                 settings,
@@ -671,11 +683,16 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
                 maskBlob,
                 strokes,
                 paintByExampleFile,
-                rev
+                rev,
+                media
               )
             let res
             try {
-              res = await request(revision ? null : targetFile, revision)
+              res = await request(
+                revision ? null : targetFile,
+                revision,
+                mediaRef
+              )
             } catch (e) {
               // revision 失效（逐出/重启/切图）→ 回传当前 render 字节重试。
               // 这是唯一允许的回退分支，首次导入也走这里；本地只剩有损预览时
@@ -1163,7 +1180,7 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           state.isInpainting = newValue
         }),
 
-      setFile: async (file: File) => {
+      setFile: async (file: File, mediaRef?: MediaRef | null) => {
         // 三步的顺序是有意的，别调换：
         //
         // 1) 先在同一 tick 里把「新图 + 所有由上一张图派生的状态」一起落下去。
@@ -1180,6 +1197,9 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         //    图片没被切走时才写回。
         set((state) => {
           state.file = file
+          // 普通上传/拖拽没有 mediaRef，必须清掉上一张图的 FileManager 引用，
+          // 否则第一次编辑会去读上一张图。
+          state.mediaRef = mediaRef ?? null
           state.imageWidth = 0
           state.imageHeight = 0
           state.isInpainting = false
@@ -1200,7 +1220,9 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         _renderRevisions.clear()
 
         if (get().settings.enableAutoExtractPrompt) {
-          getGenInfo(file)
+          // FileManager 来源同样让服务端按 tab+filename 读盘，避免为了抽取
+          // prompt 再把整张原图上传一次。
+          getGenInfo(mediaRef ? null : file, mediaRef ?? null)
             .then((res) => {
               if (get().file !== file) {
                 return

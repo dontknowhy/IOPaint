@@ -256,6 +256,98 @@ class TestApiInpaint:
         assert resp.status_code == 200
 
 
+class TestApiInpaintMediaRef:
+    """FileManager 首次编辑：服务端按 tab+filename 读原图，跳过上传。"""
+
+    def _client(self, tmp_path: Path) -> TestClient:
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        (input_dir / "source.png").write_bytes(_png_image())
+        cfg = _minimal_config(tmp_path)
+        cfg.input = input_dir
+        app = FastAPI()
+        Api(app, cfg)
+        return TestClient(app)
+
+    def test_media_ref_reads_input_file(self, tmp_path: Path) -> None:
+        client = self._client(tmp_path)
+        resp = client.post(
+            "/api/v1/inpaint",
+            **multipart(
+                {
+                    "media_tab": "input",
+                    "media_name": "source.png",
+                    "mask_strokes": [],
+                    "hd_strategy": "Original",
+                }
+            ),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.headers["content-type"].startswith("image/")
+        assert resp.headers["X-Revision"]
+
+    def test_media_ref_gen_info_reads_input_file(self, tmp_path: Path) -> None:
+        client = self._client(tmp_path)
+        resp = client.post(
+            "/api/v1/gen-info",
+            files={
+                "media_tab": (None, "input"),
+                "media_name": (None, "source.png"),
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert "prompt" in resp.json()
+
+    def test_media_ref_rejects_path_traversal(self, tmp_path: Path) -> None:
+        client = self._client(tmp_path)
+        resp = client.post(
+            "/api/v1/inpaint",
+            **multipart(
+                {
+                    "media_tab": "input",
+                    "media_name": "../../etc/passwd",
+                    "mask_strokes": [],
+                    "hd_strategy": "Original",
+                }
+            ),
+        )
+        assert resp.status_code == 422
+
+    def test_media_ref_rejects_missing_file(self, tmp_path: Path) -> None:
+        client = self._client(tmp_path)
+        resp = client.post(
+            "/api/v1/inpaint",
+            **multipart(
+                {
+                    "media_tab": "input",
+                    "media_name": "missing.png",
+                    "mask_strokes": [],
+                    "hd_strategy": "Original",
+                }
+            ),
+        )
+        assert resp.status_code == 422
+
+    def test_media_ref_without_file_manager(self, tmp_path: Path) -> None:
+        cfg = _minimal_config(tmp_path)
+        cfg.input = None
+        app = FastAPI()
+        Api(app, cfg)
+        client = TestClient(app)
+        resp = client.post(
+            "/api/v1/inpaint",
+            **multipart(
+                {
+                    "media_tab": "input",
+                    "media_name": "source.png",
+                    "mask_strokes": [],
+                    "hd_strategy": "Original",
+                }
+            ),
+        )
+        assert resp.status_code == 422
+
+
 # ---------------------------------------------------------------------------
 # Api.api_adjust_mask
 # ---------------------------------------------------------------------------

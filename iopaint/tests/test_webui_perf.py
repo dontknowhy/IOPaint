@@ -166,6 +166,15 @@ def test_display_preview_small_image_is_untouched() -> None:
     )
 
 
+def test_display_preview_force_keeps_full_resolution() -> None:
+    preview = _display_preview_jpeg(
+        np.full((10, 10, 3), 90, dtype=np.uint8), None, force=True
+    )
+    assert preview is not None
+    assert preview.startswith(b"\xff\xd8")
+    assert _decode(preview).size == (10, 10)
+
+
 def test_display_preview_skips_composite_for_opaque_alpha(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -215,6 +224,26 @@ def test_inpaint_accepts_strokes_without_mask(tmp_path: Path) -> None:
     assert "X-Image-Preview" not in resp.headers
     assert resp.headers["X-Revision"]
     _decode(resp.content)
+
+
+def test_inpaint_mid_size_opaque_png_returns_full_res_jpeg(tmp_path: Path) -> None:
+    _, client = _client(tmp_path)
+    resp = _inpaint(
+        client,
+        {
+            # 4Mi：刚好进入全分辨率 JPEG 显示预览的区间，canonical 仍在 revision。
+            "image": _png(2048, 2048),
+            "mask_strokes": [],
+            "hd_strategy": "Original",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("image/jpeg")
+    assert resp.headers["X-Image-Width"] == "2048"
+    assert resp.headers["X-Image-Height"] == "2048"
+    assert resp.headers["X-Image-Preview"] == "1"
+    assert resp.headers["X-Revision"]
+    assert _decode(resp.content).size == (2048, 2048)
 
 
 def test_inpaint_large_image_returns_display_preview(tmp_path: Path) -> None:

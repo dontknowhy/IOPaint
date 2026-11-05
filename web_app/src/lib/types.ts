@@ -129,8 +129,14 @@ export interface DisplayImage {
   height: number
   logicalWidth: number
   logicalHeight: number
-  /** 响应字节是有损、缩小的显示预览；canonical 像素只存在于 revision。 */
+  /** 响应字节是有损的显示预览（可能全分辨率或已缩小）；canonical 只在 revision。 */
   preview?: boolean
+}
+
+/** FileManager 打开的文件；首次编辑让服务端直接读盘，省掉一次原图上传。 */
+export interface MediaRef {
+  tab: "input" | "output"
+  filename: string
 }
 
 export interface Size {

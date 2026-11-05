@@ -5,6 +5,7 @@ import {
   Filename,
   GenInfo,
   MaskStroke,
+  MediaRef,
   ModelInfo,
   PowerPaintTask,
   Rect,
@@ -118,7 +119,8 @@ export default async function inpaint(
   mask: File | Blob | null,
   maskStrokes: MaskStroke[] | null = null,
   paintByExampleImage: File | null = null,
-  revision: string | null = null
+  revision: string | null = null,
+  mediaRef: MediaRef | null = null
 ): Promise<InpaintResponse> {
   // 图片/掩膜作为 multipart 文件部件上传：省掉浏览器侧的 base64 编码和
   // 33% 的请求体膨胀，服务端拿到的就是原始字节。
@@ -129,6 +131,12 @@ export default async function inpaint(
   }
   if (revision) {
     form.append("revision", revision)
+  }
+  // FileManager 打开的原图：首次编辑让服务端按 tab+filename 读盘，省掉
+  // 一次原图上传；有 revision 后服务端已经在 canonical 像素上继续编辑。
+  if (!imageFile && !revision && mediaRef) {
+    form.append("media_tab", mediaRef.tab)
+    form.append("media_name", mediaRef.filename)
   }
   // 交互编辑优先传笔迹，服务端按原图尺寸栅格化；只有插件/调整掩膜
   //（extraMasks 非空）才回退到整图 PNG。
@@ -338,9 +346,18 @@ export async function downloadToOutput(
   return saveBlobToOutput(blob, filename, mimeType)
 }
 
-export async function getGenInfo(file: File): Promise<GenInfo> {
+export async function getGenInfo(
+  file: File | null,
+  mediaRef: MediaRef | null = null
+): Promise<GenInfo> {
   const fd = new FormData()
-  fd.append("file", file)
+  if (file) {
+    fd.append("file", file)
+  }
+  if (!file && mediaRef) {
+    fd.append("media_tab", mediaRef.tab)
+    fd.append("media_name", mediaRef.filename)
+  }
   const res = await api.post(`/gen-info`, fd)
   return res.data
 }
