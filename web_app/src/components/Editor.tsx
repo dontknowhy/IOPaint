@@ -556,6 +556,12 @@ export default function Editor(props: EditorProps) {
   ])
 
   useEffect(() => {
+    // 尺寸为 0 是 setFile 清空旧尺寸的瞬间（新图还没解码）：此时 centerView
+    // 会把旧图重置回 fit 比例，而屏幕上的内容要等新图 onload 才换，看起来就是
+    // 换图时先闪一下重置。等 0 → 新尺寸后再居中，顺带覆盖 undo/redo 的尺寸变化。
+    if (imageWidth <= 0 || imageHeight <= 0) {
+      return
+    }
     // render 改变尺寸以后，undo/redo 重新 center
     viewportRef?.current?.centerView(minScale, 1)
   }, [imageHeight, imageWidth, viewportRef, minScale])
