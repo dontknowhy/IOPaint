@@ -57,10 +57,10 @@ export function Shortcuts() {
           <Keyboard />
         </IconButton>
       </DialogTrigger>
-      <DialogContent>
-        <DialogHeader>
+      <DialogContent className="max-h-[calc(100vh-2rem)]">
+        <DialogHeader className="min-h-0">
           <DialogTitle>{t("shortcuts.title")}</DialogTitle>
-          <div className="flex gap-2 flex-col pt-4">
+          <div className="flex gap-2 flex-col pt-4 overflow-y-auto min-h-0 pr-1">
             <ShortCut content={t("shortcuts.pan")} keys={["Space + Drag"]} />
             <ShortCut content={t("shortcuts.resetZoomPan")} keys={["Esc"]} />
             <ShortCut content={t("shortcuts.zoomIn")} keys={["PageUp"]} />
