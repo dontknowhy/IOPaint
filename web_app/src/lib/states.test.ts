@@ -292,6 +292,65 @@ describe("clearMask", () => {
   })
 })
 
+describe("brush size steps", () => {
+  const getSize = () => useStore.getState().editorState.baseBrushSize
+  const setSize = (size: number) =>
+    useStore.getState().setBaseBrushSize(size)
+
+  it("steps by 1 inside the first 20% of the slider range", () => {
+    setSize(39)
+    useStore.getState().increaseBaseBrushSize()
+    expect(getSize()).toBe(40)
+
+    setSize(39)
+    useStore.getState().decreaseBaseBrushSize()
+    expect(getSize()).toBe(38)
+  })
+
+  it("steps by 4 between 20% and 50% of the slider range", () => {
+    setSize(41)
+    useStore.getState().increaseBaseBrushSize()
+    expect(getSize()).toBe(45)
+
+    setSize(99)
+    useStore.getState().increaseBaseBrushSize()
+    expect(getSize()).toBe(103)
+
+    setSize(99)
+    useStore.getState().decreaseBaseBrushSize()
+    expect(getSize()).toBe(95)
+  })
+
+  it("steps by 16 from 50% of the slider range upward", () => {
+    setSize(100)
+    useStore.getState().increaseBaseBrushSize()
+    expect(getSize()).toBe(116)
+
+    setSize(116)
+    useStore.getState().decreaseBaseBrushSize()
+    expect(getSize()).toBe(100)
+  })
+
+  it("returns to the same size after a step up and down at a tier boundary", () => {
+    for (const size of [40, 97, 100]) {
+      setSize(size)
+      useStore.getState().increaseBaseBrushSize()
+      useStore.getState().decreaseBaseBrushSize()
+      expect(getSize()).toBe(size)
+    }
+  })
+
+  it("clamps to the 1..200 slider range", () => {
+    setSize(200)
+    useStore.getState().increaseBaseBrushSize()
+    expect(getSize()).toBe(200)
+
+    setSize(1)
+    useStore.getState().decreaseBaseBrushSize()
+    expect(getSize()).toBe(1)
+  })
+})
+
 describe("persist options", () => {
   it("merge tolerates a null persisted state", () => {
     const options = useStore.persist.getOptions()

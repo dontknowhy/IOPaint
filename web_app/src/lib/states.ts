@@ -26,6 +26,7 @@ import {
   DEFAULT_BRUSH_SIZE,
   DEFAULT_NEGATIVE_PROMPT,
   MAX_BRUSH_SIZE,
+  MIN_BRUSH_SIZE,
   MODEL_TYPE_INPAINT,
   PAINT_BY_EXAMPLE,
 } from "./const"
@@ -265,6 +266,19 @@ type AppAction = {
 
   adjustMask: (operate: AdjustMaskOperate) => Promise<void>
   clearMask: () => void
+}
+
+// 笔刷步长按滑杆百分比分三档：0~20% 用滑杆方向键的 1，20~50% 为 4，50~100% 为 16。
+// 档位取移动一步后（size ± 1）的值，40 与 100 这两个边界上连按 `]` 再按 `[` 能回到原值。
+const getBrushSizeStep = (size: number, direction: 1 | -1) => {
+  const target = size + direction
+  if (target <= MAX_BRUSH_SIZE * 0.2) {
+    return 1
+  }
+  if (target <= MAX_BRUSH_SIZE * 0.5) {
+    return 4
+  }
+  return 16
 }
 
 const defaultValues: AppState = {
@@ -1255,19 +1269,19 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
 
       decreaseBaseBrushSize: () => {
         const baseBrushSize = get().editorState.baseBrushSize
-        let newBrushSize = baseBrushSize
-        if (baseBrushSize > 10) {
-          newBrushSize = baseBrushSize - 10
-        }
-        if (baseBrushSize <= 10 && baseBrushSize > 0) {
-          newBrushSize = baseBrushSize - 3
-        }
+        const newBrushSize = Math.max(
+          baseBrushSize - getBrushSizeStep(baseBrushSize, -1),
+          MIN_BRUSH_SIZE
+        )
         get().setBaseBrushSize(newBrushSize)
       },
 
       increaseBaseBrushSize: () => {
         const baseBrushSize = get().editorState.baseBrushSize
-        const newBrushSize = Math.min(baseBrushSize + 10, MAX_BRUSH_SIZE)
+        const newBrushSize = Math.min(
+          baseBrushSize + getBrushSizeStep(baseBrushSize, 1),
+          MAX_BRUSH_SIZE
+        )
         get().setBaseBrushSize(newBrushSize)
       },
 
