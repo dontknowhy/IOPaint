@@ -249,3 +249,24 @@ def test_missing_package_version_recorded_as_na(monkeypatch):
     except md.PackageNotFoundError:
         expected = "N/A"
     assert runtime._package_versions["rembg"] == expected
+
+
+def test_pillow_simd_reports_its_version(monkeypatch):
+    """pillow-simd 是 Pillow 的二进制替换发行版，distribution 名不同：
+    装了它时 `version("Pillow")` 抛 PackageNotFoundError，要按别名再找一次。"""
+    real_version = md.version
+
+    def fake_version(name):
+        if name == "Pillow":
+            raise md.PackageNotFoundError(name)
+        if name == "Pillow-SIMD":
+            return "9.5.0.post1"
+        return real_version(name)
+
+    monkeypatch.setattr(md, "version", fake_version)
+    try:
+        importlib.reload(runtime)
+        assert runtime._package_versions["Pillow"] == "9.5.0.post1"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(runtime)

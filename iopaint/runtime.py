@@ -30,13 +30,21 @@ _CANDIDATES = [
     "rembg",
     "onnxruntime",
 ]
+# Pillow-SIMD 是能直接替换 Pillow 的二进制发行版，模块名相同但 distribution 名不同，
+# 装了它时 `version("Pillow")` 会抛 PackageNotFoundError，这里按发行版名再找一次。
+_PACKAGE_ALIASES = {
+    "Pillow": ("Pillow-SIMD",),
+}
+
 # Check once at runtime
 for name in _CANDIDATES:
     _package_versions[name] = "N/A"
-    try:
-        _package_versions[name] = importlib_metadata.version(name)
-    except importlib_metadata.PackageNotFoundError:
-        pass
+    for dist in (name,) + _PACKAGE_ALIASES.get(name, ()):
+        try:
+            _package_versions[name] = importlib_metadata.version(dist)
+            break
+        except importlib_metadata.PackageNotFoundError:
+            pass
 
 
 def dump_environment_info() -> Dict[str, str]:
