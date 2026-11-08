@@ -27,7 +27,7 @@ from iopaint.runtime import (
     query_free_mb,
     setup_model_dir,
 )
-from iopaint.schema import Device
+from iopaint.schema import Device, ModelType
 
 
 @pytest.fixture(autouse=True)
@@ -220,8 +220,27 @@ class TestSetupModelDir:
         assert os.environ["XDG_CACHE_HOME"] == str(new_dir.absolute())
 
 
+class TestEstimateModelVram:
+    def test_none_for_architectures_without_a_table_entry(self) -> None:
+        # inpaint/erase 类模型的显存取决于权重和笔画 crop，没有统一的 1024² 估算
+        assert runtime.estimate_model_vram_mb(ModelType.INPAINT, half=True) is None
+        assert runtime.estimate_model_vram_mb(ModelType.DIFFUSERS_OTHER, half=False) is None
+
+    def test_fp16_is_cheaper_than_fp32(self) -> None:
+        for model_type in (
+            ModelType.DIFFUSERS_SD,
+            ModelType.DIFFUSERS_SD_INPAINT,
+            ModelType.DIFFUSERS_SDXL,
+            ModelType.DIFFUSERS_SDXL_INPAINT,
+        ):
+            half = runtime.estimate_model_vram_mb(model_type, half=True)
+            full = runtime.estimate_model_vram_mb(model_type, half=False)
+            assert half is not None and full is not None
+            assert half < full
+
+
 def test_missing_package_version_recorded_as_na(monkeypatch):
-    """import 期某个候选包没装时版本记 "N/A"（runtime.py:45-46）。
+    """import 期某个候选包没装时版本记 "N/A"（runtime.py 的版本探测循环）。
 
     本机候选包装齐了，直接 import 走不到 except 分支，所以用 reload +
     临时打桩 importlib.metadata.version 覆盖。reload 共享 module dict，
@@ -251,12 +270,12 @@ def test_missing_package_version_recorded_as_na(monkeypatch):
     assert runtime._package_versions["rembg"] == expected
 
 
-def test_pillow_simd_reports_its_version(monkeypatch):
+def test_pillow_simd_reports_its_version(monkeypatch: pytest.MonkeyPatch) -> None:
     """pillow-simd 是 Pillow 的二进制替换发行版，distribution 名不同：
     装了它时 `version("Pillow")` 抛 PackageNotFoundError，要按别名再找一次。"""
     real_version = md.version
 
-    def fake_version(name):
+    def fake_version(name: str) -> str:
         if name == "Pillow":
             raise md.PackageNotFoundError(name)
         if name == "Pillow-SIMD":

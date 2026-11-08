@@ -1,4 +1,4 @@
-from typing import List, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import threading
 
 import torch
@@ -18,6 +18,9 @@ from iopaint.runtime import (
     device_str,
     is_out_of_memory,
     next_bigger_gpu,
+    cuda_device_index,
+    estimate_model_vram_mb,
+    list_gpus,
     _release_memory,
 )
 from iopaint.schema import InpaintRequest, ModelInfo, ModelType
@@ -63,6 +66,64 @@ class ModelManager:
         """去重后的回退提示，空列表返回 None。"""
         return "; ".join(dict.fromkeys(self.device_notices)) or None
 
+    def _plan_launch(
+        self, name: str, device: torch.device, kwargs: Dict[str, Any]
+    ) -> Tuple[torch.device, Dict[str, Any], List[str]]:
+        """加载前按显存估算挑卡和精度，避免「先装 fp32 → OOM → 换卡再装一遍」。
+
+        只对登记了估算值的扩散模型生效；`--device cuda`（没点名具体卡）时才替用户
+        换卡，点名 `cuda:N` 视为用户自己的选择，最多只调精度。
+        返回 (device, kwargs, notices)。
+        """
+        model_info = self.available_models.get(name)
+        if model_info is None or device_str(device).split(":")[0] != "cuda":
+            return device, kwargs, []
+        if kwargs.get("no_half") or kwargs.get("cpu_offload"):
+            return device, kwargs, []
+
+        model_type = getattr(model_info, "model_type", None)
+        need16 = estimate_model_vram_mb(model_type, half=True)
+        need32 = estimate_model_vram_mb(model_type, half=False)
+        if need16 is None or need32 is None:
+            return device, kwargs, []
+
+        notices: List[str] = []
+        gpus = {it.index: it for it in list_gpus(query_free=True)}
+        current = cuda_device_index(device)
+        gpu = gpus.get(current)
+        free_mb = None if gpu is None else gpu.free_mb
+        if free_mb is None:
+            return device, kwargs, notices
+
+        if device_str(device) == "cuda" and free_mb < need16:
+            candidates = [
+                it
+                for it in gpus.values()
+                if it.index != current and (it.free_mb or 0) >= need16
+            ]
+            if candidates:
+                best = max(candidates, key=lambda it: it.room)
+                msg = (
+                    f"cuda:{current} has only {free_mb} MB free, less than the "
+                    f"~{need16} MB a 1024x1024 run needs, preloaded on cuda:{best.index}"
+                )
+                logger.warning(msg)
+                notices.append(msg)
+                device = torch.device(f"cuda:{best.index}")
+                current, free_mb = best.index, best.free_mb or 0
+
+        if free_mb < need32:
+            # Pascal 等老卡的 fp16 是 1/64 速率，但 fp32 装不下时它至少能跑完；
+            # 用户显式 --no-half 时上面已经提前返回，不会被这里改掉。
+            msg = (
+                f"~{need32} MB needed for fp32 on a 1024x1024 run, only "
+                f"{free_mb} MB free on cuda:{current}, loading fp16"
+            )
+            logger.warning(msg)
+            notices.append(msg)
+            kwargs = {**kwargs, "force_fp16": True}
+        return device, kwargs, notices
+
     def _load(self, name: str, device, **extra_kwargs):
         """加载模型；显存不足时自动换到更有富余的 GPU，最后回退 CPU。
 
@@ -70,6 +131,10 @@ class ModelManager:
         """
         base_kwargs = {**self.kwargs, **extra_kwargs}
         notices: List[str] = []
+        device, base_kwargs, plan_notices = self._plan_launch(
+            name, device, base_kwargs
+        )
+        notices.extend(plan_notices)
 
         def loader(dev):
             try:
@@ -88,6 +153,10 @@ class ModelManager:
                 # 同一张卡退 fp16：大模型（PowerPaint V2/SDXL）fp32 装不下但 fp16 能装；
                 # 这排在 load_with_fallback 换卡/回退 CPU 之前。fp16 也失败就交给外层换卡，
                 # 不额外记提示，免得和换卡提示重复。
+                # 先记住这次降级再重试：load_with_fallback 下面还要换卡/回退 CPU，
+                # 不写回去的话下一张卡会再从 fp32 装一遍（本机 30s）再 OOM。
+                # fp16 在这张卡上也失败时，这个标记同样要留住 —— fp32 已经证明装不下。
+                base_kwargs["force_fp16"] = True
                 model = self.init_model(
                     name, dev, **{**base_kwargs, "force_fp16": True}
                 )
@@ -300,6 +369,10 @@ class ModelManager:
             # 原实现是 del self.model，失败后 AttributeError 会级联；
             # 置 None 让 _run 能给出 503
             self.model = None
+            # 换架构时旧的 ControlNet/BrushNet 模块对新模型没用，但它们是完整
+            # pipeline 级别的显存占用，留着会让新模型在旧架构腾不出的卡上 OOM
+            self.controlnet_module_cache.clear()
+            self.brushnet_module_cache.clear()
             torch_gc()
 
             try:

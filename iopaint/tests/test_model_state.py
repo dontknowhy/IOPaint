@@ -6,6 +6,8 @@
 import numpy as np
 import pytest
 import torch
+from typing import Any
+
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
@@ -110,6 +112,18 @@ class TestSwitchValidation:
         mm, state = build(name=LAMA)
         mm.switch(LAMA)
         assert state["init_calls"] == [LAMA]  # 只有构造时那一次
+
+    def test_switch_drops_controlnet_and_brushnet_modules(self, build: Any) -> None:
+        """旧架构的 ControlNet/BrushNet 模块对新模型没用，但占着整份显存，
+        SD→lama 这种架构切换会因此在新模型上 OOM。"""
+        mm, state = build(name=SD_NAME)
+        mm.controlnet_module_cache["softedge"] = object()
+        mm.brushnet_module_cache["random_mask"] = object()
+
+        mm.switch(LAMA)
+
+        assert mm.controlnet_module_cache == {}
+        assert mm.brushnet_module_cache == {}
 
 
 class TestSwitchFailureRollback:

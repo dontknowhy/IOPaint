@@ -921,10 +921,13 @@ class Conv2dLayer(torch.nn.Module):
 
 
 def torch_gc():
+    # 顺序和 runtime._release_memory 一致：先 gc 回收掉 pipeline 之间的循环引用，
+    # 再 empty_cache 把释放出来的块还给驱动。反过来（先 empty 再 gc）那些块
+    # 只会在 torch 的缓存分配器里过一遍，nvidia-smi 里仍然算作已占用。
+    gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
-    gc.collect()
 
 
 def set_seed(seed: int):

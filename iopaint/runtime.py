@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from iopaint.i18n import cli_text
-from iopaint.schema import Device
+from iopaint.schema import Device, ModelType
 from loguru import logger
 from rich import print
 from typing import Dict, Any, List, Optional, Tuple
@@ -328,6 +328,33 @@ def cuda_device_index(device) -> int:
         return int(index) if index else 0
     except ValueError:
         return 0
+
+
+# 加载期显存估算（MiB）：按一次 1024x1024 推理的峰值给出，fp16 / fp32 分开。
+# 只有扩散模型（SD/SDXL 系列）需要这么估 —— erase/inpaint 类模型的大小由权重和
+# 笔画裁出的 crop 决定，单张卡装不下时会走推理 OOM 的换卡回退。
+_MODEL_VRAM_MB: Dict[ModelType, Tuple[int, int]] = {
+    ModelType.DIFFUSERS_SD: (7168, 9216),
+    ModelType.DIFFUSERS_SD_INPAINT: (7168, 9216),
+    ModelType.DIFFUSERS_SDXL: (10240, 20480),
+    ModelType.DIFFUSERS_SDXL_INPAINT: (10240, 20480),
+}
+
+
+def estimate_model_vram_mb(model_type: Optional[ModelType], half: bool) -> Optional[int]:
+    """估算一次性 1024x1024 推理要多少显存（MiB），fp16/fp32 分开；未知架构返回 None。
+
+    数值由本机 SD1.5 inpainting 的实测峰值外推：512² 加载峰值 fp16 2638 MB / fp32
+    5253 MB，推理峰值 fp16 3519 MB / fp32 6031 MB；权重部分取加载峰值，激活部分
+    按像素数线性放大到 1Mi 像素再向上取整。SDXL 的权重不在本机缓存里，按同倍率
+    估算，实际值待验证。
+    """
+    if model_type is None:
+        return None
+    sizes = _MODEL_VRAM_MB.get(model_type)
+    if sizes is None:
+        return None
+    return sizes[0] if half else sizes[1]
 
 
 def _release_memory(device=None) -> None:

@@ -11,7 +11,7 @@ from collections.abc import Iterator
 
 from loguru import logger
 
-from iopaint.model.utils import get_torch_dtype
+from iopaint.model.utils import get_torch_dtype, torch_gc
 from iopaint.model_manager import ModelManager
 from iopaint.runtime import (
     GpuInfo,
@@ -25,7 +25,7 @@ from iopaint.runtime import (
     resolve_gpu_id,
     to_torch_device,
 )
-from iopaint.schema import Device, InpaintRequest
+from iopaint.schema import Device, InpaintRequest, ModelInfo, ModelType
 
 
 def _gpus(*specs):
@@ -36,10 +36,10 @@ def _gpus(*specs):
 
 
 def _fake_gpus(monkeypatch, *specs):
-    # 签名要跟真身对齐：next_bigger_gpu 会带 query_free=True 调用
-    monkeypatch.setattr(
-        "iopaint.runtime.list_gpus", lambda query_free=False: _gpus(*specs)
-    )
+    # 签名要跟真身对齐：next_bigger_gpu / ModelManager._plan_launch 会带 query_free=True 调用
+    fake = lambda query_free=False: _gpus(*specs)
+    monkeypatch.setattr("iopaint.runtime.list_gpus", fake)
+    monkeypatch.setattr("iopaint.model_manager.list_gpus", fake)
 
 
 @contextmanager
@@ -676,6 +676,7 @@ def _bare_manager(device):
     mm.device = device
     mm.device_notices = []
     mm.kwargs = {}
+    mm.available_models = {}
     return mm
 
 
@@ -743,13 +744,14 @@ class TestModelManagerFallback:
         assert mm.device_notice is not None and "fp16" in mm.device_notice
 
     def test_fp16_retry_only_once_then_switches_device(self, monkeypatch):
-        # 若 fp16 也 OOM，交给 load_with_fallback 换卡，且不重复记 fp16 提示
+        # 若 fp16 也 OOM，交给 load_with_fallback 换卡；换过去的卡必须沿用 fp16，
+        # 否则又要从头装一遍 fp32（实测 30s）再 OOM 一次
         _fake_gpus(monkeypatch, (1989, 1383), (8109, 8018))
         mm = _bare_manager(torch.device("cuda"))
         monkeypatch.setattr("iopaint.model_manager._release_memory", lambda dev: None)
         seen = []
 
-        def fake_init(name, device, **kwargs):
+        def fake_init(name: str, device: torch.device, **kwargs: object) -> str:
             seen.append((device_str(device), kwargs.get("force_fp16", False)))
             if (device.index or 0) == 0:
                 raise RuntimeError("CUDA out of memory")
@@ -759,9 +761,88 @@ class TestModelManagerFallback:
         model, device = mm._load("cv2", torch.device("cuda"))
 
         assert model == "model@cuda:1"
-        assert seen == [("cuda", False), ("cuda", True), ("cuda:1", False)]
+        assert seen == [("cuda", False), ("cuda", True), ("cuda:1", True)]
         assert mm.device_notice is not None
         assert "fp16" not in mm.device_notice  # 退 fp16 没成功，不该留这条提示
+
+    def _diffusion_manager(
+        self, device: torch.device, model_type: ModelType = ModelType.DIFFUSERS_SD_INPAINT
+    ) -> ModelManager:
+        mm = _bare_manager(device)
+        mm.name = "sd-inpaint"
+        mm.available_models = {
+            mm.name: ModelInfo(name=mm.name, path="/fake", model_type=model_type)
+        }
+        return mm
+
+    def test_plan_moves_diffusion_model_to_card_with_room(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 0 号卡连 fp16 都装不下 1024²：加载前就换到 1 号卡，不靠装到一半 OOM 触发
+        _fake_gpus(monkeypatch, (8192, 1200), (24576, 12000))
+        mm = self._diffusion_manager(torch.device("cuda"))
+        seen = []
+
+        def fake_init(name: str, device: torch.device, **kwargs: object) -> str:
+            seen.append((device_str(device), kwargs.get("force_fp16", False)))
+            return "model"
+
+        monkeypatch.setattr(mm, "init_model", fake_init)
+        _, device = mm._load(mm.name, torch.device("cuda"))
+
+        assert str(device) == "cuda:1"
+        assert seen == [("cuda:1", False)]
+        notice = mm.device_notice
+        assert notice is not None and "preloaded on cuda:1" in notice
+
+    def test_plan_prefers_fp16_when_fp32_does_not_fit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 8G 卡：fp16 的 7168MB 装得下，fp32 的 9216MB 装不下，第一次装载就该是 fp16
+        _fake_gpus(monkeypatch, (8192, 8000))
+        mm = self._diffusion_manager(torch.device("cuda"))
+        seen = []
+
+        def fake_init(name: str, device: torch.device, **kwargs: object) -> str:
+            seen.append((device_str(device), kwargs.get("force_fp16", False)))
+            return "model"
+
+        monkeypatch.setattr(mm, "init_model", fake_init)
+        mm._load(mm.name, torch.device("cuda"))
+
+        assert seen == [("cuda", True)]
+        notice = mm.device_notice
+        assert notice is not None and "loading fp16" in notice
+
+    def test_plan_keeps_pinned_gpu(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 用户点名 cuda:1 就是他的选择，不能因为别的卡空就搬过去；只调精度
+        _fake_gpus(monkeypatch, (24576, 20000), (8192, 8000))
+        mm = self._diffusion_manager(torch.device("cuda:1"))
+        seen = []
+
+        def fake_init(name: str, device: torch.device, **kwargs: object) -> str:
+            seen.append((device_str(device), kwargs.get("force_fp16", False)))
+            return "model"
+
+        monkeypatch.setattr(mm, "init_model", fake_init)
+        _, device = mm._load(mm.name, torch.device("cuda:1"))
+
+        assert str(device) == "cuda:1"
+        assert seen == [("cuda:1", True)]
+        notice = mm.device_notice
+        assert notice is None or "preloaded" not in notice
+
+    def test_plan_skipped_for_non_diffusion_models(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # inpaint/erase 类模型的大小取决于权重和笔画 crop，没有统一的 1024² 估算
+        _fake_gpus(monkeypatch, (8192, 1200))
+        mm = self._diffusion_manager(torch.device("cuda"), ModelType.INPAINT)
+        seen = []
+
+        def fake_init(name: str, device: torch.device, **kwargs: object) -> str:
+            seen.append(kwargs.get("force_fp16", False))
+            return "model"
+
+        monkeypatch.setattr(mm, "init_model", fake_init)
+        mm._load(mm.name, torch.device("cuda"))
+
+        assert seen == [False]
+        assert mm.device_notice is None
 
     def test_no_half_disables_fp16_retry(self, monkeypatch):
         _fake_gpus(monkeypatch, (8109, 8018))
@@ -957,3 +1038,20 @@ class TestInferenceOomFallback:
 
         assert loaded == ["cuda:1"]
         assert mm.model.calls == 2
+
+
+class TestTorchGc:
+    def test_collects_cycles_before_empty_cache(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 反过来的顺序（先 empty_cache 再 gc）等于把刚释放的块又留在 torch 的缓存里，
+        # nvidia-smi 上看不到下降，换架构时新模型就拿不到这些显存
+        order = []
+        monkeypatch.setattr("iopaint.model.utils.gc.collect", lambda: order.append("gc"))
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "empty_cache", lambda: order.append("empty"))
+        monkeypatch.setattr(torch.cuda, "ipc_collect", lambda: order.append("ipc"))
+
+        torch_gc()
+
+        assert order == ["gc", "empty", "ipc"]
