@@ -1,4 +1,6 @@
+import functools
 import os
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -234,6 +236,22 @@ class LatentDiffusion(DDPM):
         return x_recon
 
 
+def _autocast_on_device(func: Callable[..., Any]) -> Callable[..., Any]:
+    """按模型所在设备开 amp autocast。
+
+    设备类型不能写死 "cuda"：ROCm 的 device.type 也是 "cuda"，但 Intel XPU 报的是
+    "xpu"，写死 cuda 在 xpu 上等于没开；cpu/mps 保持旧行为（不进 autocast）。
+    """
+
+    @functools.wraps(func)
+    def wrapper(self: Any, image: Any, *args: Any, **kwargs: Any) -> Any:
+        device_type = self.device.type
+        with torch.autocast(device_type, enabled=device_type in ("cuda", "xpu")):
+            return func(self, image, *args, **kwargs)
+
+    return wrapper
+
+
 class LDM(InpaintModel):
     name = "ldm"
     pad_mod = 32
@@ -276,7 +294,7 @@ class LDM(InpaintModel):
         ]
         return all([os.path.exists(it) for it in model_paths])
 
-    @torch.cuda.amp.autocast()
+    @_autocast_on_device
     def forward(self, image, mask, config: InpaintRequest):
         """
         image: [H, W, C] RGB

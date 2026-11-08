@@ -23,11 +23,23 @@ import numpy as np
 import socketio
 import torch
 
+
+def _torch_major_minor() -> tuple:
+    """torch 的主/次版本号；解析失败当作新版本（旧版专用开关一律不调）。"""
+    try:
+        return tuple(int(p) for p in torch.__version__.split("+")[0].split(".")[:2])
+    except ValueError:
+        return (99, 99)
+
+
 try:
     torch._C._jit_override_can_fuse_on_cpu(False)
     torch._C._jit_override_can_fuse_on_gpu(False)
     torch._C._jit_set_texpr_fuser_enabled(False)
-    torch._C._jit_set_nvfuser_enabled(False)
+    # nvfuser 在 torch 2.2 已移除，这个开关只剩「空操作 + init.cpp 的 C++ 警告」；
+    # 2.1 及更早它仍会真的关掉 fuser（lama/zits 的 TorchScript 依赖它），故按版本调用。
+    if _torch_major_minor() < (2, 2):
+        torch._C._jit_set_nvfuser_enabled(False)
     torch._C._jit_set_profiling_mode(False)
 except Exception:
     pass
