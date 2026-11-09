@@ -181,7 +181,12 @@ def start(
         callback=setup_model_dir,
     ),
     low_mem: bool = Option(False, help=cli_text("cli.help.low_mem")),
-    no_half: bool = Option(False, help=cli_text("cli.help.no_half")),
+    no_half: bool = Option(
+        # 显式声明成单名 flag：由参数名 no_half 自动派生会生成 --no-half/--no-no-half 一对
+        False,
+        "--no-half",
+        help=cli_text("cli.help.no_half"),
+    ),
     force_fp16: bool = Option(False, help=cli_text("cli.help.force_fp16")),
     cpu_offload: bool = Option(False, help=cli_text("cli.help.cpu_offload")),
     torch_compile: bool = Option(False, help=cli_text("cli.help.torch_compile")),
