@@ -127,7 +127,7 @@ def run(
     mask: Path = Option(..., help=cli_text("cli.help.mask")),
     output: Path = Option(..., help=cli_text("cli.help.output")),
     config: Path = Option(None, help=cli_text("cli.help.config")),
-    concat: bool = Option(False, help=cli_text("cli.help.concat")),
+    concat: bool = Option(False, "--concat", help=cli_text("cli.help.concat")),
     model_dir: Path = Option(
         DEFAULT_MODEL_DIR,
         help=cli_text("cli.help.model_dir"),
@@ -159,12 +159,22 @@ def run(
     )
 
 
-@typer_app.command(help=cli_text("cli.command.start"))
+# bool 开关显式给一个名字：typer 按参数名派生 `--x/--no-x`，默认 False 时 `--no-x`
+# 与不传等价，只把帮助表撑宽并把默认值写成 `[default: no-x]`；默认 True 的开关用语义
+# 相反的单名正开关表达（`--export-webp-lossy`），同样不需要 `--no-…` 那一列。
+@typer_app.command(
+    help=cli_text("cli.command.start"),
+    epilog=cli_text(
+        "cli.epilog.start_models",
+        erase_models=", ".join(AVAILABLE_MODELS),
+        diffusion_models=", ".join(DIFFUSION_MODELS),
+    ),
+)
 @use_json_config(param_help=cli_text("cli.help.start_config"))
 def start(
     host: str = Option("127.0.0.1", help=cli_text("cli.help.host")),
     port: int = Option(8080, help=cli_text("cli.help.port")),
-    inbrowser: bool = Option(False, help=cli_text("cli.help.inbrowser")),
+    inbrowser: bool = Option(False, "--inbrowser", help=cli_text("cli.help.inbrowser")),
     model: str = Option(
         DEFAULT_MODEL,
         help=cli_text(
@@ -172,6 +182,7 @@ def start(
             erase_models=", ".join(AVAILABLE_MODELS),
             diffusion_models=", ".join(DIFFUSION_MODELS),
         ),
+        rich_help_panel=cli_text("cli.panel.model"),
     ),
     model_dir: Path = Option(
         DEFAULT_MODEL_DIR,
@@ -179,27 +190,66 @@ def start(
         dir_okay=True,
         file_okay=False,
         callback=setup_model_dir,
+        rich_help_panel=cli_text("cli.panel.model"),
     ),
-    low_mem: bool = Option(False, help=cli_text("cli.help.low_mem")),
+    low_mem: bool = Option(
+        False,
+        "--low-mem",
+        help=cli_text("cli.help.low_mem"),
+        rich_help_panel=cli_text("cli.panel.diffusion"),
+    ),
     no_half: bool = Option(
-        # 显式声明成单名 flag：由参数名 no_half 自动派生会生成 --no-half/--no-no-half 一对
         False,
         "--no-half",
         help=cli_text("cli.help.no_half"),
+        rich_help_panel=cli_text("cli.panel.diffusion"),
     ),
-    force_fp16: bool = Option(False, help=cli_text("cli.help.force_fp16")),
-    cpu_offload: bool = Option(False, help=cli_text("cli.help.cpu_offload")),
-    torch_compile: bool = Option(False, help=cli_text("cli.help.torch_compile")),
+    force_fp16: bool = Option(
+        False,
+        "--force-fp16",
+        help=cli_text("cli.help.force_fp16"),
+        rich_help_panel=cli_text("cli.panel.diffusion"),
+    ),
+    cpu_offload: bool = Option(
+        False,
+        "--cpu-offload",
+        help=cli_text("cli.help.cpu_offload"),
+        rich_help_panel=cli_text("cli.panel.diffusion"),
+    ),
+    torch_compile: bool = Option(
+        False,
+        "--torch-compile",
+        help=cli_text("cli.help.torch_compile"),
+        rich_help_panel=cli_text("cli.panel.diffusion"),
+    ),
     disable_nsfw_checker: bool = Option(
-        False, help=cli_text("cli.help.disable_nsfw_checker")
+        False,
+        "--disable-nsfw-checker",
+        help=cli_text("cli.help.disable_nsfw_checker"),
+        rich_help_panel=cli_text("cli.panel.diffusion"),
     ),
-    cpu_textencoder: bool = Option(False, help=cli_text("cli.help.cpu_textencoder")),
-    local_files_only: bool = Option(False, help=cli_text("cli.help.local_files_only")),
+    cpu_textencoder: bool = Option(
+        False,
+        "--cpu-textencoder",
+        help=cli_text("cli.help.cpu_textencoder"),
+        rich_help_panel=cli_text("cli.panel.diffusion"),
+    ),
+    local_files_only: bool = Option(
+        False,
+        "--local-files-only",
+        help=cli_text("cli.help.local_files_only"),
+        rich_help_panel=cli_text("cli.panel.diffusion"),
+    ),
     device: str = Option(
         "cpu",
         help=cli_text("cli.help.device", values=cli_text("cli.help.device_values")),
+        rich_help_panel=cli_text("cli.panel.model"),
     ),
-    gpu_id: Optional[int] = Option(None, help=cli_text("cli.help.gpu_id")),
+    gpu_id: Optional[int] = Option(
+        None,
+        help=cli_text("cli.help.gpu_id"),
+        rich_help_panel=cli_text("cli.panel.model"),
+    ),
     input: Optional[Path] = Option(None, help=cli_text("cli.help.input")),
     mask_dir: Optional[Path] = Option(
         None, help=cli_text("cli.help.mask_dir"), dir_okay=True, file_okay=False
@@ -208,75 +258,176 @@ def start(
         None, help=cli_text("cli.help.output_dir"), dir_okay=True, file_okay=False
     ),
     # 默认 95 与 const.QUALITY_HELP、helper.pil_to_bytes 的默认值保持一致
-    quality: int = Option(95, help=cli_text("cli.help.quality")),
+    quality: int = Option(
+        95,
+        help=cli_text("cli.help.quality"),
+        rich_help_panel=cli_text("cli.panel.inpaint"),
+    ),
     revision_cache_mb: int = Option(
-        512, help=cli_text("cli.help.revision_cache_mb")
+        512,
+        help=cli_text("cli.help.revision_cache_mb"),
+        rich_help_panel=cli_text("cli.panel.inpaint"),
     ),
-    delta_compress: bool = Option(False, help=cli_text("cli.help.delta_compress")),
-    export_quality: int = Option(100, help=cli_text("cli.help.export_quality")),
-    export_subsampling: str = Option(
-        "444", help=cli_text("cli.help.export_subsampling")
-    ),
-    export_mode: str = Option("dct_patch", help=cli_text("cli.help.export_mode")),
-    export_force: bool = Option(False, help=cli_text("cli.help.export_force")),
-    export_format: str = Option("", help=cli_text("cli.help.export_format")),
-    export_png_compress_level: int = Option(
-        1, help=cli_text("cli.help.export_png_compress_level")
-    ),
-    export_webp_lossless: bool = Option(
-        True, help=cli_text("cli.help.export_webp_lossless")
+    delta_compress: bool = Option(
+        False,
+        "--delta-compress",
+        help=cli_text("cli.help.delta_compress"),
+        rich_help_panel=cli_text("cli.panel.inpaint"),
     ),
     stateless_lossless: bool = Option(
-        False, help=cli_text("cli.help.stateless_lossless")
+        False,
+        "--stateless-lossless",
+        help=cli_text("cli.help.stateless_lossless"),
+        rich_help_panel=cli_text("cli.panel.inpaint"),
     ),
-    wire_format: str = Option("png", help=cli_text("cli.help.wire_format")),
+    wire_format: str = Option(
+        "png",
+        help=cli_text("cli.help.wire_format"),
+        rich_help_panel=cli_text("cli.panel.inpaint"),
+    ),
     empty_cache_after_inpaint: bool = Option(
-        False, help=cli_text("cli.help.empty_cache_after_inpaint")
+        False,
+        "--empty-cache-after-inpaint",
+        help=cli_text("cli.help.empty_cache_after_inpaint"),
+        rich_help_panel=cli_text("cli.panel.inpaint"),
+    ),
+    export_quality: int = Option(
+        100,
+        help=cli_text("cli.help.export_quality"),
+        rich_help_panel=cli_text("cli.panel.export"),
+    ),
+    export_subsampling: str = Option(
+        "444",
+        help=cli_text("cli.help.export_subsampling"),
+        rich_help_panel=cli_text("cli.panel.export"),
+    ),
+    export_mode: str = Option(
+        "dct_patch",
+        help=cli_text("cli.help.export_mode"),
+        rich_help_panel=cli_text("cli.panel.export"),
+    ),
+    export_force: bool = Option(
+        False,
+        "--export-force",
+        help=cli_text("cli.help.export_force"),
+        rich_help_panel=cli_text("cli.panel.export"),
+    ),
+    export_format: str = Option(
+        "",
+        help=cli_text("cli.help.export_format"),
+        rich_help_panel=cli_text("cli.panel.export"),
+    ),
+    export_png_compress_level: int = Option(
+        1,
+        help=cli_text("cli.help.export_png_compress_level"),
+        rich_help_panel=cli_text("cli.panel.export"),
+    ),
+    # `export_webp_lossless` 默认 True，`--no-…` 那半边才是唯一有用的开关；它留在配置
+    # 文件里（`--config` 的 key），命令行用单名的 `--export-webp-lossy` 表达同一个意思，
+    # 这样帮助表少一列 `--no-…`，后面的选项名就不会被挤到截断。
+    export_webp_lossless: bool = Option(
+        True, help=cli_text("cli.help.export_webp_lossless"), hidden=True
+    ),
+    export_webp_lossy: bool = Option(
+        False,
+        "--export-webp-lossy",
+        help=cli_text("cli.help.export_webp_lossy"),
+        rich_help_panel=cli_text("cli.panel.export"),
     ),
     hd_strategy_crop_margin: int = Option(
-        128, help=cli_text("cli.help.hd_strategy_crop_margin")
+        128,
+        help=cli_text("cli.help.hd_strategy_crop_margin"),
+        rich_help_panel=cli_text("cli.panel.hd"),
     ),
     hd_strategy_crop_merge: bool = Option(
-        False, help=cli_text("cli.help.hd_strategy_crop_merge")
+        False,
+        "--hd-strategy-crop-merge",
+        help=cli_text("cli.help.hd_strategy_crop_merge"),
+        rich_help_panel=cli_text("cli.panel.hd"),
     ),
     hd_strategy_crop_merge_max_pixels: int = Option(
         4 * 1024 * 1024,
         help=cli_text("cli.help.hd_strategy_crop_merge_max_pixels"),
+        rich_help_panel=cli_text("cli.panel.hd"),
     ),
     enable_interactive_seg: bool = Option(
-        False, help=cli_text("cli.help.enable_interactive_seg")
+        False,
+        "--enable-interactive-seg",
+        help=cli_text("cli.help.enable_interactive_seg"),
+        rich_help_panel=cli_text("cli.panel.plugins"),
     ),
     interactive_seg_model: InteractiveSegModel = Option(
-        InteractiveSegModel.sam2_1_tiny, help=cli_text("cli.help.interactive_seg_model")
+        InteractiveSegModel.sam2_1_tiny,
+        help=cli_text("cli.help.interactive_seg_model"),
+        rich_help_panel=cli_text("cli.panel.plugins"),
+        metavar="<model>",
     ),
     interactive_seg_device: Device = Option(
-        Device.cpu, help=cli_text("cli.help.interactive_seg_device")
+        Device.cpu,
+        help=cli_text("cli.help.interactive_seg_device"),
+        rich_help_panel=cli_text("cli.panel.plugins"),
     ),
-    enable_remove_bg: bool = Option(False, help=cli_text("cli.help.enable_remove_bg")),
+    enable_remove_bg: bool = Option(
+        False,
+        "--enable-remove-bg",
+        help=cli_text("cli.help.enable_remove_bg"),
+        rich_help_panel=cli_text("cli.panel.plugins"),
+    ),
     remove_bg_device: Device = Option(
-        Device.cpu, help=cli_text("cli.help.remove_bg_device")
+        Device.cpu,
+        help=cli_text("cli.help.remove_bg_device"),
+        rich_help_panel=cli_text("cli.panel.plugins"),
     ),
     remove_bg_model: RemoveBGModel = Option(
-        RemoveBGModel.briaai_rmbg_1_4, help=cli_text("cli.help.remove_bg_model")
+        RemoveBGModel.briaai_rmbg_1_4,
+        help=cli_text("cli.help.remove_bg_model"),
+        rich_help_panel=cli_text("cli.panel.plugins"),
+        metavar="<model>",
     ),
-    enable_anime_seg: bool = Option(False, help=cli_text("cli.help.enable_anime_seg")),
+    enable_anime_seg: bool = Option(
+        False,
+        "--enable-anime-seg",
+        help=cli_text("cli.help.enable_anime_seg"),
+        rich_help_panel=cli_text("cli.panel.plugins"),
+    ),
     enable_realesrgan: bool = Option(
-        False, help=cli_text("cli.help.enable_realesrgan")
+        False,
+        "--enable-realesrgan",
+        help=cli_text("cli.help.enable_realesrgan"),
+        rich_help_panel=cli_text("cli.panel.plugins"),
     ),
     realesrgan_device: Device = Option(
-        Device.cpu, help=cli_text("cli.help.realesrgan_device")
+        Device.cpu,
+        help=cli_text("cli.help.realesrgan_device"),
+        rich_help_panel=cli_text("cli.panel.plugins"),
     ),
     realesrgan_model: RealESRGANModel = Option(
         RealESRGANModel.realesr_general_x4v3,
         help=cli_text("cli.help.realesrgan_model"),
+        rich_help_panel=cli_text("cli.panel.plugins"),
+        metavar="<model>",
     ),
-    enable_gfpgan: bool = Option(False, help=cli_text("cli.help.enable_gfpgan")),
-    gfpgan_device: Device = Option(Device.cpu, help=cli_text("cli.help.gfpgan_device")),
+    enable_gfpgan: bool = Option(
+        False,
+        "--enable-gfpgan",
+        help=cli_text("cli.help.enable_gfpgan"),
+        rich_help_panel=cli_text("cli.panel.plugins"),
+    ),
+    gfpgan_device: Device = Option(
+        Device.cpu,
+        help=cli_text("cli.help.gfpgan_device"),
+        rich_help_panel=cli_text("cli.panel.plugins"),
+    ),
     enable_restoreformer: bool = Option(
-        False, help=cli_text("cli.help.enable_restoreformer")
+        False,
+        "--enable-restoreformer",
+        help=cli_text("cli.help.enable_restoreformer"),
+        rich_help_panel=cli_text("cli.panel.plugins"),
     ),
     restoreformer_device: Device = Option(
-        Device.cpu, help=cli_text("cli.help.restoreformer_device")
+        Device.cpu,
+        help=cli_text("cli.help.restoreformer_device"),
+        rich_help_panel=cli_text("cli.panel.plugins"),
     ),
 ):
     dump_environment_info()
@@ -380,7 +531,7 @@ def start(
         export_force=export_force,
         export_format=parsed_export_format,
         export_png_compress_level=export_png_compress_level,
-        export_webp_lossless=export_webp_lossless,
+        export_webp_lossless=export_webp_lossless and not export_webp_lossy,
         stateless_lossless=stateless_lossless,
         wire_format=cast(Literal["png", "webp"], wire_format),
         empty_cache_after_inpaint=empty_cache_after_inpaint,

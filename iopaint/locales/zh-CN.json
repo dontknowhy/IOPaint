@@ -66,7 +66,7 @@
       "start_web_config": "启动 IOPaint 网页配置页"
     },
     "help": {
-      "model": "擦除模型：\\[{erase_models}]\n扩散模型：\\[{diffusion_models}]，或 HuggingFace 上任意 SD/SDXL 模型 ID",
+      "model": "模型名：擦除模型，或 HuggingFace 上的 SD/SDXL 模型 ID（列表见文末）",
       "run_model": "模型名，列表见 `iopaint start --help`",
       "download_model": "HuggingFace 模型 ID，例如 runwayml/stable-diffusion-inpainting",
       "host": "监听地址",
@@ -101,13 +101,14 @@
       "quality": "重绘响应的 JPEG/WebP 质量，0-100",
       "export_quality": "导出 JPEG/WebP 的质量，1-100",
       "export_subsampling": "导出的 JPEG 色度抽样：444、420 或 keep（沿用源图）",
-      "export_mode": "JPEG 导出模式：dct_patch（掩膜外无损）或 full",
+      "export_mode": "JPEG 导出模式：dct_patch 或 full（前者掩膜外无损）",
       "export_force": "忽略请求里的导出参数，改用 export_* 设置",
       "export_format": "导出格式：jpeg、png、webp、bmp 或 tiff（留空则沿用源图格式）",
       "export_png_compress_level": "PNG 的 zlib 压缩级别，0-9",
       "export_webp_lossless": "WebP 导出使用无损编码",
+      "export_webp_lossy": "WebP 导出使用有损编码（质量由 --export-quality 决定）",
       "hd_strategy_crop_margin": "hd_strategy=Crop 时掩膜包围盒外的边距（像素）",
-      "hd_strategy_crop_merge": "把重叠的裁块合并为一次前向（会改变掩膜内的像素）",
+      "hd_strategy_crop_merge": "合并重叠裁块为一次前向（会改掩膜内像素）",
       "hd_strategy_crop_merge_max_pixels": "合并裁块的面积上限（像素）",
       "enable_interactive_seg": "启用交互式分割（Segment Anything）",
       "interactive_seg_model": "Segment Anything 模型，越大越准但越慢",
@@ -124,6 +125,17 @@
       "enable_restoreformer": "启用 RestoreFormer 人脸修复",
       "restoreformer_device": "RestoreFormer 使用的设备",
       "config_file": "要编辑的配置文件"
+    },
+    "panel": {
+      "model": "模型",
+      "diffusion": "扩散模型",
+      "inpaint": "重绘",
+      "export": "导出",
+      "hd": "高清策略",
+      "plugins": "插件"
+    },
+    "epilog": {
+      "start_models": "擦除模型：\\[{erase_models}]\n\n扩散模型：\\[{diffusion_models}]"
     },
     "error": {
       "export_format": "无效的 --export-format '{value}'，可选值：{choices}",

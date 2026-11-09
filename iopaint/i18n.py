@@ -176,9 +176,8 @@ def build_en_cli_catalog() -> Dict[str, Any]:
             "help": {
                 # Typer 用 Rich 渲染 help，`[...]` 会被当成 markup 吞掉；转义开括号
                 # 才能显示字面量方括号（同时转义闭括号会留下反斜杠）。
-                "model": "Erase models: \\[{erase_models}].\n"
-                "Diffusion models: \\[{diffusion_models}], or any SD/SDXL model id on "
-                "HuggingFace.",
+                "model": "Model name: an erase model or an SD/SDXL model id on "
+                "HuggingFace (list below)",
                 "run_model": "Model name, see `iopaint start --help` for the list",
                 "download_model": (
                     "HuggingFace model id, e.g. runwayml/stable-diffusion-inpainting"
@@ -231,6 +230,8 @@ def build_en_cli_catalog() -> Dict[str, Any]:
                 "keep source)",
                 "export_png_compress_level": "PNG zlib compression level, 0-9",
                 "export_webp_lossless": "Encode WebP exports losslessly",
+                "export_webp_lossy": "Encode WebP exports lossy (uses "
+                "--export-quality)",
                 "hd_strategy_crop_margin": "Crop margin in pixels around the mask box "
                 "when hd_strategy=Crop",
                 "hd_strategy_crop_merge": "Merge overlapping crops into one pass "
@@ -254,6 +255,21 @@ def build_en_cli_catalog() -> Dict[str, Any]:
                 "enable_restoreformer": "Enable RestoreFormer face restoration",
                 "restoreformer_device": "Device for RestoreFormer",
                 "config_file": "Config file to edit",
+            },
+            # 帮助面板标题：`iopaint start --help` 按功能分组，避免一屏几十个选项连成一片。
+            "panel": {
+                "model": "Model",
+                "diffusion": "Diffusion",
+                "inpaint": "Inpaint",
+                "export": "Export",
+                "hd": "HD strategy",
+                "plugins": "Plugins",
+            },
+            # `iopaint start --help` 末尾的模型清单：帮助表格的列宽放不下完整 model id
+            # （会被截断成 `runwayml/stable…`），epilog 按整幅宽度排版。
+            "epilog": {
+                "start_models": "Erase models: \\[{erase_models}]\n\n"
+                "Diffusion models: \\[{diffusion_models}]",
             },
             "error": {
                 "export_format": "Invalid --export-format '{value}'. "
