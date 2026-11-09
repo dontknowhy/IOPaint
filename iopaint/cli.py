@@ -84,7 +84,7 @@ def download(
     model: str = Option(..., help=cli_text("cli.help.download_model")),
     model_dir: Path = Option(
         DEFAULT_MODEL_DIR,
-        help=cli_text("cli.help.model_dir", model_dir=DEFAULT_MODEL_DIR),
+        help=cli_text("cli.help.model_dir"),
         file_okay=False,
         callback=setup_model_dir,
     ),
@@ -103,7 +103,7 @@ def download(
 def list_model(
     model_dir: Path = Option(
         DEFAULT_MODEL_DIR,
-        help=cli_text("cli.help.model_dir", model_dir=DEFAULT_MODEL_DIR),
+        help=cli_text("cli.help.model_dir"),
         file_okay=False,
         callback=setup_model_dir,
     ),
@@ -117,7 +117,7 @@ def list_model(
 
 @typer_app.command(help=cli_text("cli.command.run"))
 def run(
-    model: str = Option("lama"),
+    model: str = Option("lama", help=cli_text("cli.help.run_model")),
     device: str = Option(
         "cpu",
         help=cli_text("cli.help.device", values=cli_text("cli.help.device_values")),
@@ -130,7 +130,7 @@ def run(
     concat: bool = Option(False, help=cli_text("cli.help.concat")),
     model_dir: Path = Option(
         DEFAULT_MODEL_DIR,
-        help=cli_text("cli.help.model_dir", model_dir=DEFAULT_MODEL_DIR),
+        help=cli_text("cli.help.model_dir"),
         file_okay=False,
         callback=setup_model_dir,
     ),
@@ -160,10 +160,10 @@ def run(
 
 
 @typer_app.command(help=cli_text("cli.command.start"))
-@use_json_config()
+@use_json_config(param_help=cli_text("cli.help.start_config"))
 def start(
-    host: str = Option("127.0.0.1"),
-    port: int = Option(8080),
+    host: str = Option("127.0.0.1", help=cli_text("cli.help.host")),
+    port: int = Option(8080, help=cli_text("cli.help.port")),
     inbrowser: bool = Option(False, help=cli_text("cli.help.inbrowser")),
     model: str = Option(
         DEFAULT_MODEL,
@@ -175,7 +175,7 @@ def start(
     ),
     model_dir: Path = Option(
         DEFAULT_MODEL_DIR,
-        help=cli_text("cli.help.model_dir", model_dir=DEFAULT_MODEL_DIR),
+        help=cli_text("cli.help.model_dir"),
         dir_okay=True,
         file_okay=False,
         callback=setup_model_dir,
@@ -244,20 +244,35 @@ def start(
     interactive_seg_model: InteractiveSegModel = Option(
         InteractiveSegModel.sam2_1_tiny, help=cli_text("cli.help.interactive_seg_model")
     ),
-    interactive_seg_device: Device = Option(Device.cpu),
+    interactive_seg_device: Device = Option(
+        Device.cpu, help=cli_text("cli.help.interactive_seg_device")
+    ),
     enable_remove_bg: bool = Option(False, help=cli_text("cli.help.enable_remove_bg")),
     remove_bg_device: Device = Option(
         Device.cpu, help=cli_text("cli.help.remove_bg_device")
     ),
-    remove_bg_model: RemoveBGModel = Option(RemoveBGModel.briaai_rmbg_1_4),
+    remove_bg_model: RemoveBGModel = Option(
+        RemoveBGModel.briaai_rmbg_1_4, help=cli_text("cli.help.remove_bg_model")
+    ),
     enable_anime_seg: bool = Option(False, help=cli_text("cli.help.enable_anime_seg")),
-    enable_realesrgan: bool = Option(False),
-    realesrgan_device: Device = Option(Device.cpu),
-    realesrgan_model: RealESRGANModel = Option(RealESRGANModel.realesr_general_x4v3),
-    enable_gfpgan: bool = Option(False),
-    gfpgan_device: Device = Option(Device.cpu),
-    enable_restoreformer: bool = Option(False),
-    restoreformer_device: Device = Option(Device.cpu),
+    enable_realesrgan: bool = Option(
+        False, help=cli_text("cli.help.enable_realesrgan")
+    ),
+    realesrgan_device: Device = Option(
+        Device.cpu, help=cli_text("cli.help.realesrgan_device")
+    ),
+    realesrgan_model: RealESRGANModel = Option(
+        RealESRGANModel.realesr_general_x4v3,
+        help=cli_text("cli.help.realesrgan_model"),
+    ),
+    enable_gfpgan: bool = Option(False, help=cli_text("cli.help.enable_gfpgan")),
+    gfpgan_device: Device = Option(Device.cpu, help=cli_text("cli.help.gfpgan_device")),
+    enable_restoreformer: bool = Option(
+        False, help=cli_text("cli.help.enable_restoreformer")
+    ),
+    restoreformer_device: Device = Option(
+        Device.cpu, help=cli_text("cli.help.restoreformer_device")
+    ),
 ):
     dump_environment_info()
     try:
@@ -394,7 +409,7 @@ def start(
 
 @typer_app.command(help=cli_text("cli.command.start_web_config"))
 def start_web_config(
-    config_file: Path = Option("config.json"),
+    config_file: Path = Option("config.json", help=cli_text("cli.help.config_file")),
 ):
     dump_environment_info()
     dump_gpu_info()

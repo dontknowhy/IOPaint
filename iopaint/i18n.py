@@ -8,8 +8,8 @@
   `LC_MESSAGES` / `LANG` 选择（见 `resolve_cli_locale()`）。
 
 英文目录由 `const.py` 的 `*_HELP` 常量 + web_config / CLI 自有文案在 `build_en_catalog()`
-/ `build_en_cli_catalog()` 里组装——同一段帮助只有一种英文写法；`iopaint/locales/en.json`
-若存在会覆盖它。
+/ `build_en_cli_catalog()` 里组装：`web_config` 复用常量里的长解释，CLI 用自己的一行文案；
+`iopaint/locales/en.json` 若存在会覆盖它。
 
 本模块不导入 gradio（`build_i18n()` 里懒导入），所以校验脚本 / 单测可以在任意环境
 里导入它，`const.py` 也同样不依赖 gradio。
@@ -27,7 +27,6 @@ if TYPE_CHECKING:
 
 from iopaint.const import (
     ANIMESEG_HELP,
-    DEFAULT_MODEL_DIR,
     CPU_OFFLOAD_HELP,
     CPU_TEXTENCODER_HELP,
     DISABLE_NSFW_HELP,
@@ -41,7 +40,6 @@ from iopaint.const import (
     FORCE_FP16_HELP,
     GFPGAN_HELP,
     GPU_ID_HELP,
-    HD_STRATEGY_CROP_MARGIN_HELP,
     INBROWSER_HELP,
     INPUT_HELP,
     INTERACTIVE_SEG_HELP,
@@ -158,19 +156,20 @@ def build_en_catalog() -> Dict[str, Any]:
 def build_en_cli_catalog() -> Dict[str, Any]:
     """CLI（typer）的英文目录 = 规范源。
 
-    与 `web_config` 共用 `const.py` 的 `*_HELP` 常量，所以同一段帮助不会出现两种英文
-    写法；CLI 独有的文案（命令描述、掩膜说明、报错）直接写在这里。其他语言在
-    `iopaint/locales/<locale>.json` 的 `cli.*` 下补齐相同 key 即可。
+    CLI 自己的文案不复用 `web_config` 的长解释：Gradio 表单能放下几行说明，命令行不行。
+    每条 help 只写「这个开关做什么」、允许值（括号内）和会改变语义的约束，不写理由、
+    性能数字或已被 typer 打印的默认值。其他语言在 `iopaint/locales/<locale>.json` 的
+    `cli.*` 下补齐相同 key 即可。
 
     `{...}` 是 `translate()` 手工替换的占位符，调用方传同名参数。
     """
     return {
         "cli": {
             "command": {
-                "install_plugins_packages": "Install all plugins dependencies",
-                "download": "Download SD/SDXL normal/inpainting model from HuggingFace",
+                "install_plugins_packages": "Install plugin dependencies",
+                "download": "Download a model from HuggingFace",
                 "list": "List downloaded models",
-                "run": "Batch processing images",
+                "run": "Batch process images",
                 "start": "Start IOPaint server",
                 "start_web_config": "Start IOPaint web config page",
             },
@@ -178,78 +177,83 @@ def build_en_cli_catalog() -> Dict[str, Any]:
                 # Typer 用 Rich 渲染 help，`[...]` 会被当成 markup 吞掉；转义开括号
                 # 才能显示字面量方括号（同时转义闭括号会留下反斜杠）。
                 "model": "Erase models: \\[{erase_models}].\n"
-                "Diffusion models: \\[{diffusion_models}] or any SD/SDXL normal/inpainting "
-                "models on HuggingFace.",
+                "Diffusion models: \\[{diffusion_models}], or any SD/SDXL model id on "
+                "HuggingFace.",
+                "run_model": "Model name, see `iopaint start --help` for the list",
                 "download_model": (
-                    "Model id on HuggingFace e.g: runwayml/stable-diffusion-inpainting"
+                    "HuggingFace model id, e.g. runwayml/stable-diffusion-inpainting"
                 ),
-                "device": "Device. One of: {values}",
-                "device_values": "cpu | cuda | cuda:N (use GPU N) | mps",
-                "image": "Image folders or file path",
-                "mask": "Mask folders or file path. "
-                "If it is a directory, the mask images in the directory should have the "
-                "same name as the original image."
-                "If it is a file, all images will use this mask."
-                "Mask will automatically resize to the same size as the original image.",
-                "output": "Output directory or file path",
-                "config": (
-                    "Config file path. You can use dump command to create a base config."
-                ),
-                "concat": (
-                    "Concat original image, mask and output images into one image"
-                ),
-                "revision_cache_mb": "In-process canonical revision cache budget in MB. "
-                "0 disables the lossless revision path. Single-entry and disabled "
-                "thresholds derive from this value (half / full).",
-                "delta_compress": "Compress undo patches with zstd (optional dependency; "
-                "falls back to raw patches when zstandard is absent)",
-                "stateless_lossless": "Stateless lossless: use PNG as the /inpaint wire "
-                "format so every round is lossless even without the revision cache "
-                "(costs ~1.5s per 12MP round)",
-                "wire_format": "Wire format for stateless lossless: png (fast) or "
-                "webp (smaller, ~3x slower)",
+                "host": "Listen address",
+                "port": "Listen port",
+                "device": "Device: {values}",
+                "device_values": "cpu | cuda | cuda:N | mps",
+                "gpu_id": "GPU index when --device is cuda, same as --device cuda:N",
+                "image": "Image directory or file",
+                "mask": "Mask directory (files named like the images) or one mask file "
+                "for all images",
+                "output": "Output directory or file",
+                "config": "Inpaint options as a JSON file",
+                "start_config": "JSON file with these options",
+                "concat": "Write original, mask and result into one image",
+                "revision_cache_mb": "Revision cache size in MB, 0 disables it",
+                "delta_compress": "Compress undo patches with zstd (requires zstandard)",
+                "stateless_lossless": "Keep /inpaint rounds lossless without the "
+                "revision cache",
+                "wire_format": "Wire format for --stateless-lossless: png or webp",
                 "empty_cache_after_inpaint": "Call torch.cuda.empty_cache() after each "
-                "inpainting. Disabled by default for faster repeated inference, "
-                "enable it if you run into CUDA out of memory errors.",
-                # 与 web_config 共用 const.py 的常量；这里把常量里拼好的默认路径
-                # 参数化，翻译串才能复用同一个默认路径（见 cli.py 的 model_dir 传参）
-                "model_dir": MODEL_DIR_HELP.replace(DEFAULT_MODEL_DIR, "{model_dir}"),
-                "gpu_id": GPU_ID_HELP,
-                "inbrowser": INBROWSER_HELP,
-                "low_mem": LOW_MEM_HELP,
-                "no_half": NO_HALF_HELP,
-                "force_fp16": FORCE_FP16_HELP,
-                "cpu_offload": CPU_OFFLOAD_HELP,
-                "torch_compile": TORCH_COMPILE_HELP,
-                "disable_nsfw_checker": DISABLE_NSFW_HELP,
-                "cpu_textencoder": CPU_TEXTENCODER_HELP,
-                "local_files_only": LOCAL_FILES_ONLY_HELP,
-                "input": INPUT_HELP,
-                "mask_dir": MASK_DIR_HELP,
-                "output_dir": OUTPUT_DIR_HELP,
-                "quality": QUALITY_HELP,
-                "export_quality": EXPORT_QUALITY_HELP,
-                "export_subsampling": EXPORT_SUBSAMPLING_HELP,
-                "export_mode": EXPORT_MODE_HELP,
-                "export_force": EXPORT_FORCE_HELP,
-                "export_format": EXPORT_FORMAT_HELP,
-                "export_png_compress_level": EXPORT_PNG_COMPRESS_LEVEL_HELP,
-                "export_webp_lossless": EXPORT_WEBP_LOSSLESS_HELP,
-                "hd_strategy_crop_margin": HD_STRATEGY_CROP_MARGIN_HELP,
-            "hd_strategy_crop_merge": (
-                "\nMerge overlapping crops so a multi-stroke mask needs fewer forward "
-                "passes. The pixels inside the mask change (the region outside it stays "
-                "untouched), so it is off by default.\n"
-            ),
-            "hd_strategy_crop_merge_max_pixels": (
-                "\nArea cap (pixels) for a merged crop. Bounds peak VRAM: LaMa-class fp32 "
-                "models need about 1GB per megapixel.\n"
-            ),
-                "enable_interactive_seg": INTERACTIVE_SEG_HELP,
-                "interactive_seg_model": INTERACTIVE_SEG_MODEL_HELP,
-                "enable_remove_bg": REMOVE_BG_HELP,
-                "remove_bg_device": REMOVE_BG_DEVICE_HELP,
-                "enable_anime_seg": ANIMESEG_HELP,
+                "inpaint",
+                "model_dir": "Model directory (sets XDG_CACHE_HOME)",
+                "inbrowser": "Open the web UI in the default browser",
+                "low_mem": "Enable attention slicing and VAE tiling",
+                "no_half": "Load diffusion models in fp32 (use if results are black or "
+                "green)",
+                "force_fp16": "Load diffusion models in fp16 even where fp16 is slower, "
+                "--no-half wins",
+                "cpu_offload": "Offload diffusion model weights to CPU RAM",
+                "torch_compile": "Compile the diffusion UNet with torch.compile (CUDA "
+                "compute capability 7.0+, plain SD/SDXL only, ignored with --cpu-offload)",
+                "disable_nsfw_checker": "Disable the diffusion model NSFW checker",
+                "cpu_textencoder": "Run the diffusion text encoder on CPU",
+                "local_files_only": "Use local model files only, never contact "
+                "HuggingFace",
+                "input": "Image file or directory to open in the web UI",
+                "mask_dir": "Mask directory shown in the file manager",
+                "output_dir": "Directory to save results in",
+                "quality": "JPEG/WebP quality for /inpaint responses, 0-100",
+                "export_quality": "JPEG/WebP export quality, 1-100",
+                "export_subsampling": "JPEG export chroma subsampling: 444, 420 or keep "
+                "(source)",
+                "export_mode": "JPEG export mode: dct_patch (lossless outside the mask) "
+                "or full",
+                "export_force": "Ignore the request's export options, use the export_* "
+                "settings",
+                "export_format": "Export format: jpeg, png, webp, bmp or tiff (empty: "
+                "keep source)",
+                "export_png_compress_level": "PNG zlib compression level, 0-9",
+                "export_webp_lossless": "Encode WebP exports losslessly",
+                "hd_strategy_crop_margin": "Crop margin in pixels around the mask box "
+                "when hd_strategy=Crop",
+                "hd_strategy_crop_merge": "Merge overlapping crops into one pass "
+                "(changes pixels inside the mask)",
+                "hd_strategy_crop_merge_max_pixels": "Pixel area cap for a merged crop",
+                "enable_interactive_seg": "Enable interactive segmentation (Segment "
+                "Anything)",
+                "interactive_seg_model": "Segment Anything model, larger is more "
+                "accurate but slower",
+                "interactive_seg_device": "Device for interactive segmentation",
+                "enable_remove_bg": "Enable background removal",
+                "remove_bg_device": "Device for background removal, cuda supports "
+                "briaai models only",
+                "remove_bg_model": "Background removal model",
+                "enable_anime_seg": "Enable anime segmentation (CPU only)",
+                "enable_realesrgan": "Enable Real-ESRGAN super resolution",
+                "realesrgan_device": "Device for Real-ESRGAN",
+                "realesrgan_model": "Real-ESRGAN model",
+                "enable_gfpgan": "Enable GFPGAN face restoration",
+                "gfpgan_device": "Device for GFPGAN",
+                "enable_restoreformer": "Enable RestoreFormer face restoration",
+                "restoreformer_device": "Device for RestoreFormer",
+                "config_file": "Config file to edit",
             },
             "error": {
                 "export_format": "Invalid --export-format '{value}'. "
