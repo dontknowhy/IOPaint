@@ -1128,3 +1128,170 @@ class TestTouchEndLastPoint:
         )
 
         ctx.close()
+
+
+class TestTouchToolbar:
+    """触屏点按工具栏按钮必须生效。
+
+    编辑区容器的原生 touchstart/touchmove 用 preventDefault 压掉浏览器补发的
+    兼容 mouse 事件，工具栏是它的子节点：按钮的 click 因此不再触发，而滑块走
+    pointerdown，所以只有滑块还能用。
+    """
+
+    def test_tap_undo_button_after_a_stroke(
+        self, browser_instance: Any, iopaint_server: Any, tmp_path: Path
+    ) -> None:
+        ctx = _new_context(
+            browser_instance,
+            viewport={"width": 1280, "height": 720},
+            has_touch=True,
+        )
+        pg = ctx.new_page()
+        pg.goto(iopaint_server, wait_until="load", timeout=30000)
+        pg.wait_for_timeout(2000)
+        _upload_image(pg, tmp_path)
+        _wait_image_loaded(pg)
+
+        undo = _history_button(pg, "undo")
+        redo = _history_button(pg, "redo")
+        expect(undo).to_be_disabled(timeout=3000)
+
+        # 先有一笔真实 render，Undo 才会从 disabled 变成 enabled
+        with pg.expect_response("**/inpaint", timeout=20000):
+            _draw_stroke(pg)
+        expect(undo).to_be_enabled(timeout=10000)
+        expect(redo).to_be_disabled(timeout=3000)
+
+        bb = undo.bounding_box()
+        assert bb is not None
+        pg.touchscreen.tap(bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2)
+
+        # 修复前容器吞掉了 touchstart 的 click，undo 一直停 enabled
+        expect(redo).to_be_enabled(timeout=3000)
+        expect(undo).to_be_disabled(timeout=3000)
+        ctx.close()
+
+
+class TestTouchDrawStartDelay:
+    """单指起笔前先等一个很短的时间：捏合的第二根手指在这期间落下，画布上不留笔迹。"""
+
+    def test_first_finger_does_not_paint_before_the_second_finger_lands(
+        self, browser_instance: Any, iopaint_server: Any, tmp_path: Path
+    ) -> None:
+        ctx = _new_context(
+            browser_instance,
+            viewport={"width": 1280, "height": 720},
+            has_touch=True,
+        )
+        pg = ctx.new_page()
+        pg.goto(iopaint_server, wait_until="load", timeout=30000)
+        pg.wait_for_timeout(2000)
+        _upload_image(pg, tmp_path)
+        _wait_image_loaded(pg)
+
+        requests = []
+
+        def capture(route: Any) -> None:
+            requests.append(route.request.post_data_buffer)
+            route.abort()
+
+        pg.route("**/inpaint", capture)
+
+        bb = pg.locator("canvas").first.bounding_box()
+        assert bb is not None
+        cx, cy = bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2
+
+        first = [1, cx, cy]
+        _dispatch_touch(pg, "touchstart", [first], [first])
+        # 真实捏合的第一根手指总要先动一点才会被浏览器识别
+        drift = [1, cx + 6, cy + 6]
+        _dispatch_touch(pg, "touchmove", [drift], [drift])
+        _next_frames(pg, 1)
+        assert _canvas_pixel_count(pg) == 0, "起笔延迟内画布上先出现了一段笔迹"
+
+        # 第二根手指落下 → 这次触摸是捏合，一笔都不该留下
+        both = [[1, cx, cy], [2, cx + 80, cy]]
+        _dispatch_touch(pg, "touchstart", both, [both[1]])
+        pinch = [[1, cx, cy], [2, cx + 120, cy]]
+        _dispatch_touch(pg, "touchmove", pinch, pinch)
+        _dispatch_touch(pg, "touchend", [], pinch)
+
+        _next_frames(pg)
+        assert requests == [], "捏合过程中触发了 /inpaint"
+        assert _canvas_pixel_count(pg) == 0, "捏合在掩膜上留下了笔迹"
+
+        pg.unroute("**/inpaint")
+        ctx.close()
+
+
+class TestTouchToolbarLongPress:
+    """按住工具栏按钮不能弹出移动端的长按菜单。
+
+    眼睛按钮靠按住预览原图，长按在 Chrome/Android 上会弹上下文菜单（保存图片/
+    复制），iOS 上会弹 callout。工具栏用 contextmenu + -webkit-touch-callout +
+    select-none 一起压掉，按住预览本身要照常工作。
+    """
+
+    def test_long_press_menu_is_suppressed_on_the_toolbar(
+        self, browser_instance: Any, iopaint_server: Any, tmp_path: Path
+    ) -> None:
+        ctx = _new_context(
+            browser_instance,
+            viewport={"width": 1280, "height": 720},
+            has_touch=True,
+        )
+        pg = ctx.new_page()
+        pg.goto(iopaint_server, wait_until="load", timeout=30000)
+        pg.wait_for_timeout(2000)
+        _upload_image(pg, tmp_path)
+        _wait_image_loaded(pg)
+
+        # dispatchEvent 在第一个 preventDefault 处停下并返回 false
+        prevented = pg.evaluate(
+            """() => {
+                const button = document.querySelector("button:has(svg.lucide-eye)");
+                if (!button) return null;
+                return !button.dispatchEvent(
+                    new MouseEvent("contextmenu", { bubbles: true, cancelable: true })
+                );
+            }"""
+        )
+        assert prevented is True, "工具栏没有拦下 contextmenu，移动端长按会弹菜单"
+        ctx.close()
+
+    def test_pressing_the_eye_button_shows_the_original_until_release(
+        self, browser_instance: Any, iopaint_server: Any, tmp_path: Path
+    ) -> None:
+        ctx = _new_context(
+            browser_instance,
+            viewport={"width": 1280, "height": 720},
+            has_touch=True,
+        )
+        pg = ctx.new_page()
+        pg.goto(iopaint_server, wait_until="load", timeout=30000)
+        pg.wait_for_timeout(2000)
+        _upload_image(pg, tmp_path)
+        _wait_image_loaded(pg)
+
+        # 没有 render 时眼睛按钮是 disabled，先画一笔
+        with pg.expect_response("**/inpaint", timeout=20000):
+            _draw_stroke(pg)
+        expect(_history_button(pg, "undo")).to_be_enabled(timeout=10000)
+
+        eye = pg.locator("button:has(svg.lucide-eye)")
+        bb = eye.bounding_box()
+        assert bb is not None
+        cx, cy = bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2
+
+        original = pg.locator('canvas[aria-label="original"]')
+        client = ctx.new_cdp_session(pg)
+        client.send(
+            "Input.dispatchTouchEvent",
+            {"type": "touchStart", "touchPoints": [{"x": cx, "y": cy}]},
+        )
+        expect(original).to_have_count(1, timeout=3000)
+
+        client.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        expect(original).to_have_count(0, timeout=3000)
+        client.detach()
+        ctx.close()

@@ -73,6 +73,10 @@ const TOUCH_ANCHOR_THRESHOLD = 6
 // 判定「一指定住、另一指拖动」需要连续保持的时长（ms）：捏合的第一帧
 // 常常只有一根手指先动，立刻起笔会在扩散模型上误触发一次昂贵的 inpaint
 const TOUCH_DRAW_DWELL_MS = 120
+// 单指落笔前的等待（ms）：触屏上「画一笔」和「捏合缩放」都从一根手指开始，
+// 先等这么久再起笔——第二根手指在这期间落下就当作缩放，一笔都不留。
+// 只影响 touch 事件（手指），鼠标/触控笔的 pointer 路径不受影响。
+const TOUCH_DRAW_START_DELAY_MS = 80
 interface EditorProps {
   file: File
 }
@@ -187,6 +191,7 @@ export default function Editor(props: EditorProps) {
   const [isPanning, setIsPanning] = useState<boolean>(false)
 
   const containerRef = useRef<HTMLDivElement>(null)
+  const toolbarRef = useRef<HTMLDivElement>(null)
   const originalCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const strokeRef = useRef<Line | null>(null)
   // 当前笔画已经画到第几个点（后面这些点等下一帧再画）
@@ -227,6 +232,13 @@ export default function Editor(props: EditorProps) {
     id: number
     x: number
     y: number
+  } | null>(null)
+  // 单指起笔延迟：等待期间先缓存起点与后续点，第二根手指落下就整笔丢弃
+  const pendingSingleTouchRef = useRef<{
+    id: number
+    start: Point
+    points: Point[]
+    timer: ReturnType<typeof setTimeout> | null
   } | null>(null)
   // 供原生 touch 监听器读取的最新状态与函数
   const latestRef = useRef<TouchLatestState | null>(null)
@@ -1616,6 +1628,43 @@ export default function Editor(props: EditorProps) {
       return
     }
 
+    const clearPendingSingleTouch = () => {
+      const pending = pendingSingleTouchRef.current
+      if (pending?.timer) {
+        clearTimeout(pending.timer)
+      }
+      pendingSingleTouchRef.current = null
+    }
+
+    // 单指落笔前先等 TOUCH_DRAW_START_DELAY_MS：期间落下的第二根手指把这次
+    // 触摸变成捏合，计时器随之作废，画布上不会留下任何笔迹。
+    const startPendingSingleTouch = (t: Touch) => {
+      clearPendingSingleTouch()
+      const pending = {
+        id: t.identifier,
+        start: touchPointXY(t, canvas),
+        points: [] as Point[],
+        timer: null as ReturnType<typeof setTimeout> | null,
+      }
+      pendingSingleTouchRef.current = pending
+      pending.timer = setTimeout(() => {
+        if (pendingSingleTouchRef.current !== pending) {
+          return
+        }
+        pendingSingleTouchRef.current = null
+        const cur = latestRef.current
+        if (!cur || cur.isProcessing || touchModeRef.current !== "single") {
+          return
+        }
+        drawingTouchIdRef.current = pending.id
+        cur.setIsDraging(true)
+        cur.startStroke(pending.start)
+        for (const pt of pending.points) {
+          cur.pushStrokePoint(pt)
+        }
+      }, TOUCH_DRAW_START_DELAY_MS)
+    }
+
     const onTouchStart = (event: TouchEvent) => {
       event.preventDefault()
       const latest = latestRef.current
@@ -1627,6 +1676,7 @@ export default function Editor(props: EditorProps) {
         // 多指落下：先取消可能已开始的单指笔画（避免误画一个点），
         // 记录所有手指位置，等第一次 touchmove 判断意图（锚定绘制会在此后重新起笔）
         latest.cancelCurrentStroke()
+        clearPendingSingleTouch()
         touchModeRef.current = "pending"
         touchPendingSinceRef.current = null
         touchAnchorStartRef.current = null
@@ -1662,8 +1712,7 @@ export default function Editor(props: EditorProps) {
       if (!latest.context?.canvas) {
         return
       }
-      latest.setIsDraging(true)
-      latest.startStroke(touchPointXY(t, canvas))
+      startPendingSingleTouch(t)
     }
 
     const onTouchMove = (event: TouchEvent) => {
@@ -1683,7 +1732,13 @@ export default function Editor(props: EditorProps) {
         if (latest.isPanning || latest.isInteractiveSeg) {
           return
         }
-        if (!latest.isDraging) {
+        const pending = pendingSingleTouchRef.current
+        if (pending) {
+          // 还没到起笔延迟：先攒点，抬手时（或计时器到点后）一次性画出
+          pending.points.push(touchPointXY(t, canvas))
+          return
+        }
+        if (!latest.isDraging && !strokeRef.current) {
           return
         }
         latest.pushStrokePoint(touchPointXY(t, canvas))
@@ -1838,6 +1893,29 @@ export default function Editor(props: EditorProps) {
           if (latest.isPanning || latest.isInpainting) {
             return
           }
+          // 起笔延迟还没到就抬手：当成一次点按，把缓存下来的点一次性落到掩膜上
+          const pending = pendingSingleTouchRef.current
+          if (pending && pending.id === drawingId) {
+            clearPendingSingleTouch()
+            if (!latest.originalSrc || !latest.context?.canvas) {
+              return
+            }
+            latest.setIsDraging(true)
+            latest.startStroke(pending.start)
+            for (const pt of pending.points) {
+              latest.pushStrokePoint(pt)
+            }
+            const lastTouch = lastTouchPoint(changedTouches, drawingId)
+            if (lastTouch) {
+              latest.pushStrokePoint(touchPointXY(lastTouch, canvas))
+            }
+            latest.setIsDraging(false)
+            latest.commitCurrentStroke()
+            if (!latest.runMannually) {
+              latest.runInpainting()
+            }
+            return
+          }
           if (!latest.isDraging || !strokeRef.current) {
             return
           }
@@ -1859,6 +1937,10 @@ export default function Editor(props: EditorProps) {
         }
         // 还有手指按着，继续按单指处理
         const remaining = Array.from(touches)[0]
+        if (pendingSingleTouchRef.current?.id === changed.identifier) {
+          // 起笔的那根手指只按了一下就被另一根手指接替：这次触摸放弃绘制
+          clearPendingSingleTouch()
+        }
         drawingTouchIdRef.current = remaining.identifier
         touchPositionsRef.current.set(remaining.identifier, {
           x: remaining.clientX,
@@ -1935,6 +2017,7 @@ export default function Editor(props: EditorProps) {
     }
 
     const onTouchCancel = () => {
+      clearPendingSingleTouch()
       touchPositionsRef.current.clear()
       touchModeRef.current = null
       drawingTouchIdRef.current = null
@@ -1948,6 +2031,7 @@ export default function Editor(props: EditorProps) {
     canvas.addEventListener("touchend", onTouchEnd)
     canvas.addEventListener("touchcancel", onTouchCancel)
     return () => {
+      clearPendingSingleTouch()
       canvas.removeEventListener("touchstart", onTouchStart)
       canvas.removeEventListener("touchmove", onTouchMove)
       canvas.removeEventListener("touchend", onTouchEnd)
@@ -2009,8 +2093,22 @@ export default function Editor(props: EditorProps) {
     // React 在 root 上绑定的 touchstart/touchmove 是 passive 的，无法 preventDefault。
     // 这里用原生非 passive 监听器阻止浏览器默认行为与兼容 mouse 事件，
     // 避免触屏操作同时触发 onMouseDown/onMouseDrag 造成双重绘制。
-    const onNativeTouchStart = (event: TouchEvent) => event.preventDefault()
-    const onNativeTouchMove = (event: TouchEvent) => event.preventDefault()
+    // 工具栏是容器的子节点，必须放行：否则 Chrome 不再补发 click，
+    // 触屏上按钮全部失效（滑块走 pointerdown，所以不受影响）。
+    const isToolbarTouch = (target: EventTarget | null) =>
+      target instanceof Node && !!toolbarRef.current?.contains(target)
+    const onNativeTouchStart = (event: TouchEvent) => {
+      if (isToolbarTouch(event.target)) {
+        return
+      }
+      event.preventDefault()
+    }
+    const onNativeTouchMove = (event: TouchEvent) => {
+      if (isToolbarTouch(event.target)) {
+        return
+      }
+      event.preventDefault()
+    }
 
     container.addEventListener("wheel", onWheel, { passive: false })
     container.addEventListener("touchstart", onNativeTouchStart, {
@@ -2057,7 +2155,15 @@ export default function Editor(props: EditorProps) {
       />
       {showRefBrush && renderBrush(getBrushStyle(windowCenterX, windowCenterY))}
 
-      <div className="fixed flex bottom-5 border px-4 py-2 rounded-[3rem] gap-8 items-center justify-center backdrop-filter backdrop-blur-md bg-background/70">
+      <div
+        ref={toolbarRef}
+        // 眼睛按钮靠按住预览原图，长按在移动端会同时触发浏览器的长按菜单
+        // （保存图片/复制），这里连同工具栏其它按钮一起关掉：contextmenu
+        // 拦 Chrome/Android 的长按菜单，-webkit-touch-callout 拦 iOS 的 callout，
+        // select-none 拦长按选中文本
+        onContextMenu={(event) => event.preventDefault()}
+        className="fixed flex flex-wrap max-w-[calc(100vw-1rem)] bottom-5 border px-4 py-2 rounded-[3rem] gap-x-8 gap-y-2 items-center justify-center backdrop-filter backdrop-blur-md bg-background/70 select-none [-webkit-touch-callout:none]"
+      >
         <Slider
           className="w-48"
           defaultValue={[50]}
