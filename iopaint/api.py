@@ -420,6 +420,7 @@ def api_middleware(app: FastAPI):
             "X-Image-Width",
             "X-Image-Height",
             "X-Image-Preview",
+            "X-Total-Count",
         ],
     }
     app.add_middleware(CORSMiddleware, **cors_options)

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 from PIL import Image
 
 from iopaint.file_manager import FileManager
@@ -66,6 +67,21 @@ class TestMediaNamesCache:
         # 未变化：返回同一批对象（缓存命中，不再 open 图片）
         assert second[0] is first[0]
         assert second[1] is first[1]
+
+    def test_non_image_entries_are_skipped_not_fatal(self, tmp_path: Path) -> None:
+        """软链断裂 / 名为 x.png 的目录 / 非图片字节：跳过该项，列表仍 200。
+
+        旧实现直接在 os.stat/Image.open 上抛 OSError，整个 /medias 变 500。
+        """
+        fm, input_dir, _ = _build(tmp_path)
+        _save(input_dir, "ok.png")
+        os.symlink(tmp_path / "ghost.png", input_dir / "broken.png")
+        (input_dir / "dir.png").mkdir()
+        (input_dir / "junk.png").write_bytes(b"not an image")
+
+        for _ in range(2):  # 第二次走缓存，结果一致
+            res = fm._media_names(input_dir)
+            assert [m.name for m in res] == ["ok.png"]
 
     def test_mtime_change_rereads(self, tmp_path):
         fm, input_dir, _ = _build(tmp_path)
@@ -130,6 +146,23 @@ class TestThumbnailBranches:
         assert path2 == path1
         assert size2 == size1
 
+    def test_replaced_source_regenerates_thumbnail(self, tmp_path: Path) -> None:
+        """同名替换源图后必须重新生成缩略图（缓存键包含源 mtime_ns）。"""
+        fm, input_dir, _ = _build(tmp_path)
+        path = _save(input_dir, "a.png", size=(40, 20))
+        old_thumb, old_size = fm.get_thumbnail(input_dir, "a.png", 16, 0)
+        assert old_size == (16, 8)
+
+        _save(input_dir, "a.png", size=(32, 32), color=(200, 0, 0))
+        new_time_ns = int(os.stat(path).st_mtime_ns) + 10**9
+        os.utime(path, ns=(new_time_ns, new_time_ns))
+
+        new_thumb, new_size = fm.get_thumbnail(input_dir, "a.png", 16, 0)
+        assert new_thumb != old_thumb
+        assert new_size == (16, 16)
+        with Image.open(new_thumb) as img:
+            assert (img.width, img.height) == (16, 16)
+
     def test_truncated_image_returns_path_without_file(self, tmp_path):
         """图片损坏（load 抛 OSError）→ warning 后返回路径，不写缩略图、不抛。"""
         fm, input_dir, _ = _build(tmp_path)
@@ -162,6 +195,31 @@ class TestThumbnailBranches:
         path, _size = fm.get_thumbnail(input_dir, "a.png", 16, 8, background=0xFF)
         with Image.open(path) as img:
             assert img.size[0] == img.size[1]  # 居中后是正方形
+
+
+class TestEndpoints:
+    """端点层不因坏输入变 500：目录路径 / 损坏源图的缩略图。"""
+
+    def test_media_file_rejects_directory(self, tmp_path: Path) -> None:
+        fm, input_dir, _ = _build(tmp_path)
+        (input_dir / "sub").mkdir(parents=True)
+        client = TestClient(fm.app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/media_file", params={"tab": "input", "filename": "sub"}
+        )
+        assert resp.status_code == 422
+
+    def test_corrupt_source_thumbnail_is_422(self, tmp_path: Path) -> None:
+        fm, input_dir, _ = _build(tmp_path)
+        path = _save(input_dir, "bad.png", size=(64, 64))
+        data = path.read_bytes()
+        path.write_bytes(data[: int(len(data) * 0.6)])
+        client = TestClient(fm.app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/media_thumbnail_file",
+            params={"tab": "input", "filename": "bad.png", "width": 16, "height": 16},
+        )
+        assert resp.status_code == 422
 
 
 class TestColormode:
@@ -283,3 +341,91 @@ class TestUtilsGaps:
         (tmp_path / "sub" / "deep" / "bottom.png").write_bytes(b"x")
         names = sorted(p.name for p in glob_img(tmp_path, recursive=True))
         assert names == ["bottom.png", "mid.png", "top.png"]
+
+
+class TestMediaPagination:
+    """/medias 的 limit/offset/sort/order：翻页结果拼起来必须是整个目录。"""
+
+    def _client_with(
+        self, tmp_path: Path, count: int = 5
+    ) -> tuple[TestClient, Path]:
+        fm, input_dir, _ = _build(tmp_path)
+        base = 1_700_000_000
+        for i in range(count):
+            path = _save(input_dir, f"img{i}.png", size=(16 + i, 12 + i))
+            os.utime(path, ns=((base + i) * 10**9,) * 2)
+        return TestClient(fm.app), input_dir
+
+    def test_pages_cover_the_whole_sorted_list(self, tmp_path: Path) -> None:
+        client, _ = self._client_with(tmp_path)
+        resp = client.get("/api/v1/medias", params={"tab": "input", "limit": 2})
+        assert resp.status_code == 200
+        assert resp.headers["X-Total-Count"] == "5"
+
+        names: list[str] = []
+        for offset in (0, 2, 4):
+            page = client.get(
+                "/api/v1/medias",
+                params={"tab": "input", "limit": 2, "offset": offset},
+            )
+            assert page.status_code == 200
+            names.extend(item["name"] for item in page.json())
+        assert names == [f"img{i}.png" for i in range(5)]
+
+    def test_sort_by_mtime_desc(self, tmp_path: Path) -> None:
+        client, _ = self._client_with(tmp_path)
+        page = client.get(
+            "/api/v1/medias",
+            params={"tab": "input", "sort": "mtime", "order": "desc", "limit": 3},
+        )
+        assert [item["name"] for item in page.json()] == [
+            "img4.png",
+            "img3.png",
+            "img2.png",
+        ]
+
+    def test_limit_zero_returns_everything(self, tmp_path: Path) -> None:
+        client, _ = self._client_with(tmp_path)
+        page = client.get("/api/v1/medias", params={"tab": "input", "limit": 0})
+        assert len(page.json()) == 5
+        assert page.headers["X-Total-Count"] == "5"
+
+    def test_offset_past_the_end_is_empty_not_error(self, tmp_path: Path) -> None:
+        client, _ = self._client_with(tmp_path)
+        page = client.get(
+            "/api/v1/medias", params={"tab": "input", "limit": 2, "offset": 99}
+        )
+        assert page.status_code == 200
+        assert page.json() == []
+        assert page.headers["X-Total-Count"] == "5"
+
+    def test_invalid_sort_is_422(self, tmp_path: Path) -> None:
+        client, _ = self._client_with(tmp_path)
+        resp = client.get("/api/v1/medias", params={"tab": "input", "sort": "size"})
+        assert resp.status_code == 422
+
+    def test_paging_keeps_cached_dimensions_for_later_pages(self, tmp_path: Path) -> None:
+        """翻页只 open 当前页；两页都访问过后再翻页不再打开图片。"""
+        fm, input_dir, _ = _build(tmp_path)
+        for i in range(4):
+            _save(input_dir, f"img{i}.png")
+        fm._media_page(input_dir, 2, 0, "name", "asc")
+        fm._media_page(input_dir, 2, 2, "name", "asc")
+
+        opened = []
+        real_open = Image.open
+
+        def counting_open(*args, **kwargs):  # type: ignore[no-untyped-def]
+            opened.append(args[0] if args else kwargs.get("fp"))
+            return real_open(*args, **kwargs)
+
+        Image.open = counting_open
+        try:
+            items, total = fm._media_page(input_dir, 2, 0, "name", "asc")
+            second, _ = fm._media_page(input_dir, 2, 2, "name", "asc")
+        finally:
+            Image.open = real_open
+        assert [item.name for item in items] == ["img0.png", "img1.png"]
+        assert [item.name for item in second] == ["img2.png", "img3.png"]
+        assert total == 4
+        assert opened == []

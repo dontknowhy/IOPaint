@@ -276,10 +276,20 @@ export async function getMediaBlob(tab: string, filename: string) {
 // FE-3/D-19：signal 供调用方取消（tab 快速切换时丢弃过期响应）
 export async function getMedias(
   tab: string,
+  options: {
+    limit?: number
+    offset?: number
+    sort?: string
+    order?: string
+  } = {},
   signal?: AbortSignal
-): Promise<Filename[]> {
-  const res = await api.get(`medias`, { params: { tab }, signal })
-  return res.data
+): Promise<{ items: Filename[]; total: number }> {
+  const res = await api.get(`medias`, { params: { tab, ...options }, signal })
+  const total = Number(res.headers["x-total-count"])
+  return {
+    items: res.data,
+    total: Number.isFinite(total) ? total : res.data.length,
+  }
 }
 
 // 唯一导出出口。revision 失效（切图/逐出/重启）时回传图片字节重试。

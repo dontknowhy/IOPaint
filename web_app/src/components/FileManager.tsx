@@ -1,5 +1,4 @@
 import {
-  SyntheticEvent,
   useEffect,
   useState,
   useCallback,
@@ -8,7 +7,7 @@ import {
 } from "react"
 import orderBy from "lodash/orderBy"
 import { useTranslation } from "react-i18next"
-import PhotoAlbum from "react-photo-album"
+import PhotoAlbum, { RenderImageProps } from "react-photo-album"
 import "react-photo-album/styles.css"
 import { BarsArrowDownIcon, BarsArrowUpIcon } from "@heroicons/react/24/outline"
 import {
@@ -48,8 +47,60 @@ interface Photo {
   name: string
 }
 
+// <img> 没有 src 时浏览器会画破图图标，占位用 1x1 透明 GIF（内联，不发请求）
+const PLACEHOLDER_IMAGE =
+  "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+
+// 网格里一次性存在全部已加载的 <img>，但只有接近视口的才真正发起缩略图请求：
+// 3948 张壁纸一张缩略图约 277ms（24MP 全图解码），全量打开要十几分钟。
+// 原生 loading="lazy" 在嵌套滚动容器里会提前加载上百张，这里用观察器精确控制。
+function LazyPhotoImage({
+  src,
+  renderedWidth,
+  renderedHeight,
+  ...props
+}: RenderImageProps & {
+  renderedWidth: number
+  renderedHeight: number
+}) {
+  const ref = useRef<HTMLImageElement>(null)
+  const [visible, setVisible] = useState(false)
+
+  useEffect(() => {
+    const element = ref.current
+    if (!element || visible) {
+      return
+    }
+    // 上下各预加载两行（左右各两列同理）：用户往回滚是常态，只往前预取
+    // 会在反向滚动时露出空白。按这张图实际渲染尺寸算，不用固定像素——
+    // 窗口大小和 rows/masonry 布局不同，固定值不是预取太多就是不够。
+    // root 必须给真正的滚动容器：root 是浏览器视口时，祖先的 overflow
+    // 会先把元素裁掉，rootMargin 扩出来的区域等于不存在。
+    const root = element.closest<HTMLElement>(
+      "[data-radix-scroll-area-viewport]"
+    )
+    const marginY = Math.ceil(renderedHeight * 2)
+    const marginX = Math.ceil(renderedWidth * 2)
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setVisible(true)
+          observer.disconnect()
+        }
+      },
+      { root, rootMargin: `${marginY}px ${marginX}px` }
+    )
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [visible, renderedWidth, renderedHeight])
+
+  return <img ref={ref} src={visible ? src : PLACEHOLDER_IMAGE} {...props} />
+}
+
 const IMAGE_TAB = "input"
 const OUTPUT_TAB = "output"
+// 一页 100 张：滚动到接近底部再拉下一页，避免一次为整个目录生成缩略图
+const PAGE_SIZE = 100
 
 // Select 的 value 保持稳定的枚举值，显示名走语言包。
 const SORT_BY_LABEL_KEYS = {
@@ -85,7 +136,17 @@ export default function FileManager(props: Props) {
   const [tab, setTab] = useState(IMAGE_TAB)
   // 文件名和它所属的 tab 绑在一起存：tab 切换后 Effect 里拿到的 filenames
   // 还是上一个 tab 的，直接用会渲染出 404 缩略图、还能点到新目录里不存在的文件
-  const [fileList, setFileList] = useState<{ tab: string; items: Filename[] }>({
+  const [fileList, setFileList] = useState<{
+    tab: string
+    items: Filename[]
+    total: number
+  }>({
+    tab: IMAGE_TAB,
+    items: [],
+    total: 0,
+  })
+  // 搜索沿用全量 Fuse：输入搜索词时才把整份名单拉回来（不含缩略图）
+  const [allItems, setAllItems] = useState<{ tab: string; items: Filename[] }>({
     tab: IMAGE_TAB,
     items: [],
   })
@@ -93,6 +154,11 @@ export default function FileManager(props: Props) {
   const [photoIndex, setPhotoIndex] = useState(0)
   // FE-3/D-19：列表拉取的请求序号，只认最新一次
   const listReqSeqRef = useRef(0)
+  const loadingMoreRef = useRef(false)
+  const loadMoreRef = useRef<() => Promise<void>>(async () => {})
+  const scrollRootRef = useRef<HTMLDivElement | null>(null)
+  // 打开时要把上次的位置滚回来，但名单是分页异步到的，得等照片渲染出来再滚
+  const pendingRestoreRef = useRef(0)
 
   useHotKey("f", () => {
     toggleOpen()
@@ -124,6 +190,10 @@ export default function FileManager(props: Props) {
       const current = Math.min(photoIndex, photos.length - 1)
       const newIndex =
         current < photos.length - 1 ? current + 1 : photos.length - 1
+      if (current >= photos.length - 3) {
+        // 已加载的这一页到头了，先拉下一页，继续按右键才不会卡在边界
+        void loadMoreRef.current()
+      }
       setPhotoIndex(newIndex)
       onPhotoClick(tab, photos[newIndex].name)
     },
@@ -137,14 +207,11 @@ export default function FileManager(props: Props) {
   }, [open, scrollTop])
 
   const onRefChange = useCallback(
-    (node: HTMLDivElement) => {
-      if (node !== null) {
-        if (open) {
-          setTimeout(() => {
-            // TODO: without timeout, scrollTo not work, why?
-            node.scrollTo({ top: closeScrollTop, left: 0 })
-          }, 100)
-        }
+    (node: HTMLDivElement | null) => {
+      // Radix 的 ScrollArea 把 ref 转发到根节点，真正滚动的是内部的 viewport
+      scrollRootRef.current = node
+      if (node && open) {
+        pendingRestoreRef.current = closeScrollTop
       }
     },
     [open, closeScrollTop]
@@ -157,11 +224,19 @@ export default function FileManager(props: Props) {
     const seq = ++listReqSeqRef.current
     const fetchData = async () => {
       try {
-        const items = await getMedias(tab, controller.signal)
+        const { items, total } = await getMedias(
+          tab,
+          {
+            limit: PAGE_SIZE,
+            sort: fileManagerState.sortBy,
+            order: fileManagerState.sortOrder,
+          },
+          controller.signal
+        )
         if (seq !== listReqSeqRef.current) {
           return // 过期响应，丢弃
         }
-        setFileList({ tab, items })
+        setFileList({ tab, items, total })
       } catch (e) {
         // 主动 abort 不是错误，别弹 toast（拦截器会把它包成普通 Error）
         if (controller.signal.aborted) {
@@ -176,7 +251,73 @@ export default function FileManager(props: Props) {
     }
     fetchData()
     return () => controller.abort()
-  }, [tab, toast, t])
+  }, [tab, fileManagerState.sortBy, fileManagerState.sortOrder, toast, t])
+
+  const loadMore = useCallback(async () => {
+    if (!open || loadingMoreRef.current) {
+      return
+    }
+    if (fileList.tab !== tab || fileList.items.length >= fileList.total) {
+      return
+    }
+    loadingMoreRef.current = true
+    const seq = listReqSeqRef.current
+    try {
+      const { items, total } = await getMedias(tab, {
+        limit: PAGE_SIZE,
+        offset: fileList.items.length,
+        sort: fileManagerState.sortBy,
+        order: fileManagerState.sortOrder,
+      })
+      if (seq !== listReqSeqRef.current) {
+        return // 列表已经按新的 tab/排序重建
+      }
+      setFileList((prev) => {
+        if (prev.tab !== tab) {
+          return prev
+        }
+        // 两页请求可能并发返回同一批文件，按名字去重
+        const known = new Set(prev.items.map((item) => item.name))
+        return {
+          tab,
+          items: [...prev.items, ...items.filter((item) => !known.has(item.name))],
+          total,
+        }
+      })
+    } catch {
+      // 下一页失败就停在这里，继续滚动会再试
+    } finally {
+      loadingMoreRef.current = false
+    }
+  }, [
+    open,
+    tab,
+    fileList,
+    fileManagerState.sortBy,
+    fileManagerState.sortOrder,
+  ])
+
+  loadMoreRef.current = loadMore
+
+  useEffect(() => {
+    // 搜索要覆盖整份名单，不能在已加载的 100 条里找；输入搜索词时补拉一次全量
+    if (!open || !debouncedSearchText || allItems.tab === tab) {
+      return
+    }
+    const controller = new AbortController()
+    getMedias(tab, { limit: 0 }, controller.signal)
+      .then(({ items }) => setAllItems({ tab, items }))
+      .catch((e) => {
+        if (!controller.signal.aborted) {
+          toast({
+            variant: "destructive",
+            title: t("common.somethingWentWrong"),
+            description: getErrorMessage(e),
+          })
+        }
+      })
+    return () => controller.abort()
+  }, [open, debouncedSearchText, tab, allItems, toast, t])
 
   useEffect(() => {
     if (!open) {
@@ -186,8 +327,13 @@ export default function FileManager(props: Props) {
       try {
         // 上一个 tab 的名单还没到（或已作废）时按空列表处理，不拿旧 tab 的
         // 文件名去拼新 tab 的缩略图 URL
-        let filteredFilenames =
-          fileList.tab === tab ? fileList.items : []
+        let filteredFilenames = debouncedSearchText
+          ? allItems.tab === tab
+            ? allItems.items
+            : []
+          : fileList.tab === tab
+            ? fileList.items
+            : []
         if (debouncedSearchText) {
           const fuse = new Fuse(filteredFilenames, {
             keys: ["name"],
@@ -222,11 +368,46 @@ export default function FileManager(props: Props) {
       }
     }
     fetchData()
-  }, [fileList, debouncedSearchText, fileManagerState, photoWidth, open, tab, toast, t])
+  }, [fileList, allItems, debouncedSearchText, fileManagerState, photoWidth, open, tab, toast, t])
 
-  const onScroll = (event: SyntheticEvent) => {
-    setScrollTop(event.currentTarget.scrollTop)
-  }
+  // scroll 事件不冒泡，ScrollArea 根节点上的 onScroll 收不到内部 viewport 的滚动，
+  // 所以直接监听 viewport：记录位置（关闭时恢复）并在接近底部时拉下一页
+  useEffect(() => {
+    const root = scrollRootRef.current
+    if (!open || !root) {
+      return
+    }
+    const viewport = root.querySelector<HTMLElement>(
+      "[data-radix-scroll-area-viewport]"
+    )
+    if (!viewport) {
+      return
+    }
+    const onScroll = () => {
+      setScrollTop(viewport.scrollTop)
+      if (
+        viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <
+        800
+      ) {
+        void loadMoreRef.current()
+      }
+    }
+    viewport.addEventListener("scroll", onScroll, { passive: true })
+    let frame = 0
+    if (pendingRestoreRef.current > 0) {
+      const target = pendingRestoreRef.current
+      frame = requestAnimationFrame(() => {
+        viewport.scrollTo({ top: target })
+        if (Math.abs(viewport.scrollTop - target) < 2) {
+          pendingRestoreRef.current = 0
+        }
+      })
+    }
+    return () => {
+      cancelAnimationFrame(frame)
+      viewport.removeEventListener("scroll", onScroll)
+    }
+  }, [open, photos])
 
   // 搜索框 focus 会把 disableShortCuts 置 true，但关闭对话框时输入框直接卸载，
   // 收不到 blur，全局快捷键会一直停在禁用状态。关闭时统一兜底复位。
@@ -244,9 +425,14 @@ export default function FileManager(props: Props) {
   }
 
   const renderTitle = () => {
+    const count = debouncedSearchText
+      ? photos.length
+      : fileList.tab === tab
+        ? fileList.total
+        : 0
     return (
       <div className="flex justify-start items-center gap-[12px]">
-        <div>{t("fileManager.imagesCount", { count: photos.length })}</div>
+        <div>{t("fileManager.imagesCount", { count })}</div>
         <div className="flex">
           <IconButton
             tooltip={t("fileManager.rowsLayout")}
@@ -361,13 +547,18 @@ export default function FileManager(props: Props) {
           </div>
         </div>
 
-        <ScrollArea
-          className="w-full h-full rounded-md"
-          onScroll={onScroll}
-          ref={onRefChange}
-        >
+        <ScrollArea className="w-full h-full rounded-md" ref={onRefChange}>
           <PhotoAlbum
             layout={fileManagerState.layout}
+            render={{
+              image: (props, { width, height }) => (
+                <LazyPhotoImage
+                  {...props}
+                  renderedWidth={width}
+                  renderedHeight={height}
+                />
+              ),
+            }}
             photos={photos}
             spacing={12}
             padding={0}
