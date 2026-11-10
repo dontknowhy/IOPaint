@@ -104,6 +104,14 @@ rm -rf iopaint/web_app && cp -r web_app/dist iopaint/web_app
   builds the frontend first, so it actually runs there — and it fails for real if the frontend regresses (verified).
   It is a **fast** test (not under `-m slow`), and `scripts/check.sh` runs it too.
 
+### Benchmarks (local — not in CI)
+
+`benchmarks/` sits outside `pytest.ini`'s `testpaths`, so neither CI nor `scripts/check.sh` collects it. Run it with
+`python benchmarks/run.py` (`-k` filters, `IOPAINT_BENCH_GPU=<torch cuda index>` picks the card); cases record through
+`benchmarks/harness.py`, and `--bench-save <json>` / `--bench-compare <json>` check a run against a same-machine
+baseline (`--bench-max-regression`, default 1.5×, exits non-zero on a regression). Call-count guards assert; timing
+numbers are recorded. See benchmarks/README.md and docs/agents/perf-guards.md.
+
 ### Slow tests (run locally — CI only spot-checks)
 
 Slow tests: see docs/agents/slow-tests.md (trigger: running or extending the weight-heavy `pytest -m slow` suite, or
@@ -187,7 +195,10 @@ confirms idle/free VRAM and `CUDA_VISIBLE_DEVICES=<idx>` selects the card.
   `iopaint/tests/test_webui_perf.py` (`test_inpaint_decodes_uploaded_bytes_once`, `test_png_response_skips_pil_roundtrip`,
   `test_revision_hit_skips_source_hash`, `test_display_preview_skips_composite_for_opaque_alpha`),
   `iopaint/tests/test_encoding_and_bounds.py` (`test_compress_strategy_follows_shape`) and
-  `iopaint/tests/test_revision_cache_diff.py`; numbers in `benchmarks/test_inpaint_cpu_path.py`. When a canonical
+  `iopaint/tests/test_revision_cache_diff.py`; numbers in `benchmarks/test_inpaint_cpu_path.py`. Local benchmarks
+  all go through `benchmarks/harness.py` (warmup + N rounds, median/p90/cv, machine fingerprint, JSON baselines);
+  regression gating is a same-machine `--bench-compare` ratio (default 1.5×), never a hard-coded millisecond
+  constant, and `benchmarks/` stays outside CI. When a canonical
   revision exists and the result exceeds 16Mi pixels, `/inpaint` answers with a ≤16Mi JPEG
   display preview plus `X-Image-Preview: 1` and the logical size in `X-Image-Width`/`X-Image-Height` (all CORS-exposed);
   `/export`, later edits and plugin/interactive-seg inputs still read canonical pixels, never the preview bytes. A render
@@ -277,9 +288,9 @@ read it:
   `iopaint/**/*.py` changed vs `origin/main` and fails only on errors anchored to newly added lines (trigger: before
   committing backend Python changes; it also gates CI — the `backend` job runs it as "Type check (new code only)",
   see the doc).
-- `docs/agents/perf-guards.md` — benchmark designs for the four perf regressions listed under Architecture (trigger:
-  before implementing a perf benchmark or touching `scan_models` / schedulers / ControlNet preprocessors /
-  `--empty-cache-after-inpaint`).
+- `docs/agents/perf-guards.md` — benchmark designs for the four perf regressions listed under Architecture, plus how
+  `benchmarks/run.py` / `harness.py` record, save and compare them (trigger: before implementing a perf benchmark or
+  touching `scan_models` / schedulers / ControlNet preprocessors / `--empty-cache-after-inpaint`).
 - `docs/agents/review-prompts.md` — adversarial-review, test-quality-review, and mutation-testing prompt templates
   (trigger: preparing a code review session or judging test suite quality).
 
@@ -293,5 +304,5 @@ be committed to the repo and must **never** be mentioned in commit messages. Min
 # <task> — plan
 - Status / goal: <one line each>
 - Done / Todo: <bullets>
-- Open questions / pitfalls: <bullets> (每项改动的自验证命令与结果附在其下)
+- Open questions / pitfalls: <bullets> (attach each change's self-verification command and result below)
 ```

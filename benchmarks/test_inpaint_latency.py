@@ -1,28 +1,27 @@
-"""推理延迟基准：LaMa 单次 + SD1.5 UNet 单步。
+"""推理延迟跑分：LaMa 单次 + SD1.5 UNet 单步。
 
 本地跑，**不进 CI、不进 fast suite**：
 
-    python -m pytest benchmarks -m bench -s
-    IOPAINT_BENCH_GPU=1 python -m pytest benchmarks -m bench -s
+    python benchmarks/run.py -k lama
+    IOPAINT_BENCH_GPU=1 python benchmarks/run.py -k "lama or sd15"
 
 `pytest.ini` 的 `testpaths = iopaint/tests`，所以 `pytest -m "not slow"` 与
 `scripts/check.sh` 不会收集本文件。权重不存在时自动 skip；没有 CUDA 时自动 skip。
-这里只记录数字，不设阈值——阈值属于具体机器的回归测试，不属于通用基准。
 
 **必须写明跑分用的显卡**：多卡机器上 `cuda:0` 不一定是最快或最空闲的那块。
-输出行带显卡名/显存/算力，换机器后可以直接对比；显存不够跑 fp32 UNet 的卡会 skip
-而不是 OOM。
+每条结果都带显卡名/显存/算力（`extra.gpu`），换机器后可以直接对比；显存不够跑
+fp32 UNet 的卡会 skip 而不是 OOM。计时前后调用 `torch.cuda.synchronize`，
+否则拿到的是 kernel 入队时间。
 """
 from __future__ import annotations
 
 import os
-import statistics
-import time
 
 import numpy as np
 import pytest
 import torch
 
+from harness import add_extra, measure
 from iopaint.model.lama import LaMa
 from iopaint.model_manager import ModelManager
 from iopaint.schema import HDStrategy, InpaintRequest
@@ -58,28 +57,6 @@ def _device_label(device: torch.device) -> str:
     )
 
 
-def _summarize(samples_ms: list[float]) -> dict[str, float]:
-    return {
-        "median_ms": round(statistics.median(samples_ms), 1),
-        "p90_ms": round(sorted(samples_ms)[max(0, int(len(samples_ms) * 0.9) - 1)], 1),
-        "min_ms": round(min(samples_ms), 1),
-        "max_ms": round(max(samples_ms), 1),
-    }
-
-
-def _bench(fn, warmup: int = WARMUP, runs: int = RUNS) -> list[float]:
-    for _ in range(warmup):
-        fn()
-    torch.cuda.synchronize()
-    samples = []
-    for _ in range(runs):
-        start = time.perf_counter()
-        fn()
-        torch.cuda.synchronize()
-        samples.append((time.perf_counter() - start) * 1000)
-    return samples
-
-
 @pytest.fixture(scope="module")
 def bench_device() -> torch.device:
     return _bench_device()
@@ -103,13 +80,19 @@ def test_lama_latency(lama_model, bench_device: torch.device, size: int) -> None
         lama_model(image, mask, config)
 
     torch.cuda.reset_peak_memory_stats(bench_device)
-    samples = _bench(run)
-    peak_mb = torch.cuda.max_memory_allocated(bench_device) / 2**20
-    print(
-        f"\n[lama] {size}x{size} {_summarize(samples)} "
-        f"peak_alloc_mb={peak_mb:.0f} on {_device_label(bench_device)}"
+    measure(
+        f"lama.{size}",
+        run,
+        warmup=WARMUP,
+        rounds=RUNS,
+        sync=lambda: torch.cuda.synchronize(bench_device),
+        extra={"gpu": _device_label(bench_device)},
     )
-    assert len(samples) == RUNS
+    add_extra(
+        f"lama.{size}",
+        peak_alloc_mb=round(torch.cuda.max_memory_allocated(bench_device) / 2**20),
+        peak_reserved_mb=round(torch.cuda.max_memory_reserved(bench_device) / 2**20),
+    )
 
 
 @pytest.fixture(scope="module")
@@ -156,10 +139,19 @@ def test_sd15_unet_step(sd15_unet, bench_device: torch.device) -> None:
             sd15_unet(sample, timestep, encoder)
 
     torch.cuda.reset_peak_memory_stats(bench_device)
-    samples = _bench(run, warmup=2, runs=5)
-    peak_mb = torch.cuda.max_memory_allocated(bench_device) / 2**20
-    print(
-        f"\n[sd15-unet] 512x512, batch=2, latent=64x64, dtype={sd15_unet.dtype} "
-        f"{_summarize(samples)} peak_alloc_mb={peak_mb:.0f} on {_device_label(bench_device)}"
+    measure(
+        "sd15.unet.step",
+        run,
+        warmup=2,
+        rounds=5,
+        sync=lambda: torch.cuda.synchronize(bench_device),
+        extra={
+            "gpu": _device_label(bench_device),
+            "dtype": str(sd15_unet.dtype).replace("torch.", ""),
+        },
     )
-    assert len(samples) == 5
+    add_extra(
+        "sd15.unet.step",
+        peak_alloc_mb=round(torch.cuda.max_memory_allocated(bench_device) / 2**20),
+        peak_reserved_mb=round(torch.cuda.max_memory_reserved(bench_device) / 2**20),
+    )

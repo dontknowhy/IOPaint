@@ -1,4 +1,4 @@
-# Perf guard benchmark designs (guard #1 implemented — local `pytest -m bench`, not CI)
+# Perf guard benchmark designs (guard #1 implemented — local `python benchmarks/run.py`, not CI)
 
 The four perf regressions listed under **Architecture** in AGENTS.md each get a minimal benchmark design here.
 **#1 is implemented**, in `benchmarks/test_server_config_scan_cache.py`; 2–4 remain design only, waiting for a human
@@ -7,11 +7,14 @@ fast suite or the slow/local set. A new agent should be able to implement one fr
 
 General rules for all four:
 
-- Time with `time.perf_counter`, report the median of N runs (min 5), never a single sample.
+- All timing goes through `measure` in `benchmarks/harness.py` (warmup + N rounds, median/p90/stddev/cv); do not
+  write your own `perf_counter` loop in a case. Use `record` / `add_extra` for non-time scalars (bytes, peak VRAM,
+  A/B ratios).
 - No new dependencies: no pytest-benchmark; plain pytest + stdlib timing is enough.
-- Thresholds are set from a measured baseline on the target machine, then encoded as `baseline * 1.5` (50% headroom);
-  record the measured baseline numbers in the test file's comment with the re-runnable command (house rule: every
-  claim is measured).
+- Regression gating belongs to a same-machine baseline: `python benchmarks/run.py --bench-save <json>` stores one;
+  after a change, `--bench-compare <json>` compares ratios, default `--bench-max-regression 1.5` (50% slower).
+  Never hard-code a machine's millisecond constant in a case; keep measured numbers in the JSON or a comment as
+  reference.
 - The call/count assertion is the guard; the timing number is documentation with a loose backstop — wall time is
   machine-dependent noise, a call count is not.
 
@@ -21,16 +24,16 @@ General rules for all four:
   (`iopaint/model_manager.py`), not by re-scanning the model dir (a scan costs ~2s).
 - **How**: in-process `TestClient` (same pattern as `iopaint/tests/test_api.py`, no port bound). Monkeypatch
   `iopaint.model_manager.ModelManager.scan_models` with a counting wrapper, then hit `/api/v1/server-config` 3 times;
-  assert the counter does not increase (cache is filled by `ModelManager.__init__`, before any request). Timing
-  variant: median of N rounds × 3 calls against `baseline * 1.5` (general rule below) — never a fixed generous
-  constant; the counter assertion is the primary one.
-- **Threshold**: call count == 0 after startup; wall-time guard as a loose backstop.
+  assert the counter does not increase (cache is filled by `ModelManager.__init__`, before any request). A second
+  test records the median of 5 rounds × 3 calls through `measure`; compare it against a stored baseline, never
+  against a fixed millisecond constant. The counter assertion is the primary one.
+- **Threshold**: call count == 0 after startup; the latency number is recorded, not asserted.
 - **Suite**: fast (`--model cv2`, no weights) — but it lives **outside** CI, see below.
 
 **Landed** as `benchmarks/test_server_config_scan_cache.py`; run it with
 
 ```bash
-python -m pytest benchmarks -m bench -s      # 2 tests, ~5s
+python benchmarks/run.py -k server_config      # 2 tests, ~5s
 ```
 
 - Location is deliberate: `pytest.ini` has `testpaths = iopaint/tests`, so plain `pytest`,
@@ -38,12 +41,12 @@ python -m pytest benchmarks -m bench -s      # 2 tests, ~5s
   until someone decides to promote it. `bench` is registered as a marker in `pytest.ini` so `-m bench` is warning-free.
 - Two tests: `test_server_config_is_served_from_cache` (primary — counting wrapper installed *after* `Api(...)`
   construction, 0 `scan_models` calls across 3 requests, plus a non-empty `modelInfos` sanity check) and
-  `test_server_config_latency_backstop` (median of 5 rounds × 3 calls, `statistics.median`, printed with `-s`).
-- **Measured baseline** (2026-10, one 8-core machine, `--model cv2` on cpu): 10 consecutive runs of the 5×3 round
-  gave medians **5.1–5.6 ms**; the file pins `BASELINE_MEDIAN_S = 5.6e-3` (the max) → threshold **8.4 ms**.
+  `test_server_config_latency_recorded` (median of 5 rounds × 3 calls through `measure`, no hardcoded threshold).
+- **Measured reference** (2026-11-09, Xeon E3-1231 v3, `--model cv2` on cpu): `server_config.3x` median
+  **5.5–5.7 ms** across two processes. This is a recorded number, not a gate.
 - **Proven to bite**: pointing `api_server_config` at `self.model_manager.scan_models()` instead of
-  `get_available_models()` fails both tests — the call-count assertion trips, and the backstop independently reports
-  `12.1 ms > 8.4 ms`. Reverting restores 2 passed.
+  `get_available_models()` trips the call-count assertion immediately (previously measured at 12.1 ms per 3 calls,
+  so a stored baseline + `--bench-compare` flags the latency as well). Reverting restores 2 passed.
 
 ## 2. Diffusion schedulers must not be rebuilt per call (fast if stubbed)
 
@@ -79,24 +82,25 @@ python -m pytest benchmarks -m bench -s      # 2 tests, ~5s
 - **Threshold**: boolean / call-count.
 - **Suite**: fast.
 
-## 5. 推理延迟基准 — `benchmarks/test_inpaint_latency.py` **implemented**
+## 5. Inference latency benchmark — `benchmarks/test_inpaint_latency.py` **implemented**
 
-- **What**: LaMa 单次推理（256/512/1024）与 SD1.5 inpainting UNet 单步（512 输出、batch=2、
-  latent 64×64）的 median/p90/min/max 和峰值显存。用于判断 `torch.compile`/AOTInductor
-  是否值得做，以及改动前后的回归对比。
-- **How**: `ModelManager(name="lama", device=cuda:0)` 走真实加载路径；UNet 从本地 HF cache
-  读取（`local_files_only=True`）。权重/显卡缺失时 `pytest.skip`，不下载任何东西。
-- **Which GPU**: 默认 `cuda:0`，用 `IOPAINT_BENCH_GPU=N` 换卡；每行输出都带
-  `name cuda:N <MiB> sm_XY`，因为 `cuda:0` 不一定是快卡。UNet 用例要求 ≥5120 MiB，
-  显存更小的卡会带原因 skip 而不是 OOM。
-- **Run**: `python -m pytest benchmarks -m bench -s`（不在 `testpaths`，CI 不收集）
-- **Suite**: local/slow；只记录数字，不设通用阈值。具体机器要做回归时，用本文件打印的
-  median 建立 `baseline * 1.5` 阈值，并按 `docs/agents/perf-guards.md` 的通用规则跑多轮。
-- **Measured baseline**（单卡 CUDA，torch 2.14.1+cu126，fp32；卡型见运行时输出）：
-  - LaMa 端到端（含 host↔GPU 拷贝与 numpy 转换）256×256 **62.2 ms**、512×512 **179.6 ms**、
-    1024×1024 **687.5 ms**（峰值显存 230/331/732 MB）；纯 GPU 前向分别约 36/120 ms（不含拷贝）
-  - SD1.5 UNet 单步 **411.0 ms**（fp32，batch=2，latent 64×64，峰值显存 3875 MB）
-  - `cudnn.benchmark=True` 对两者无收益；`channels_last` 让 UNet 慢到 449.4 ms
+- **What**: median/p90/min/max and peak VRAM for one LaMa forward (256/512/1024) and one SD1.5 inpainting UNet step
+  (512 output, batch=2, latent 64×64). Used to judge whether `torch.compile`/AOTInductor is worth it, and for
+  before/after regression comparisons.
+- **How**: `ModelManager(name="lama", device=cuda:0)` goes through the real load path; the UNet is read from the
+  local HF cache (`local_files_only=True`). Missing weights or no CUDA → `pytest.skip`; nothing is downloaded.
+- **Which GPU**: defaults to `cuda:0`; `IOPAINT_BENCH_GPU=N` picks another card. Every row reports
+  `name cuda:N <MiB> sm_XY`, because `cuda:0` is not necessarily the fast card (and the number is torch's
+  enumeration, not `nvidia-smi`'s). The UNet case needs ≥5120 MiB; smaller cards skip with a reason instead of OOM.
+- **Run**: `IOPAINT_BENCH_GPU=N python benchmarks/run.py -k "lama or sd15"` (outside `testpaths`; CI never collects it).
+- **Suite**: local/slow; numbers only, no universal threshold. For a regression on a specific machine, use
+  `--bench-save` for the baseline and `--bench-compare` for the ratio (`--bench-max-regression 1.5`).
+- **Measured reference** (2026-11-09, `cuda:0` = NVIDIA P104-100 8109MiB sm_61, torch 2.14.1+cu126, fp32):
+  - LaMa end to end (host↔GPU copies and numpy conversion included): 256×256 **52.7 ms**, 512×512 **143.0 ms**,
+    1024×1024 **537.3 ms** (peak VRAM allocated/reserved 230/262, 330/456, 729/1486 MiB).
+  - SD1.5 UNet step **411.6 ms** (fp32, batch=2, latent 64×64, peak VRAM 3875/4278 MiB).
+  - Historical A/B (different card): `cudnn.benchmark=True` helped neither; `channels_last` slowed the UNet to
+    449.4 ms.
 
 ## Pick order (suggestion for the human)
 
@@ -104,48 +108,51 @@ python -m pytest benchmarks -m bench -s      # 2 tests, ~5s
 stubbing stays clean; 3 is the most valuable regression-wise but needs the GPU box, so it goes last — it is also the
 only one of the four with no known cost attached today.
 
-## 6. 请求 CPU 路径：解码/编码/commit 不许重复劳动 — **implemented**
+## 6. Request CPU path: no duplicated decode/encode/commit work — **implemented**
 
-四个点一起守住，`iopaint/tests/test_webui_perf.py`（fast suite）放结构守卫，
-`benchmarks/test_inpaint_cpu_path.py`（`-m bench`，不进 CI）放数字。
+Four points are guarded together: structural guards live in `iopaint/tests/test_webui_perf.py` (fast suite),
+numbers in `benchmarks/test_inpaint_cpu_path.py` (`python benchmarks/run.py`, not CI).
 
-- **上传字节不再 base64，也不解两遍**：`/inpaint`、`/export` 是 multipart，
-  `image`/`mask` 是文件部件，handler 读成原始字节后只解码一次
-  （`_decode_uploaded_image`）。12MP PNG 的一次 base64 解码是 39ms、JSON 解析
-  16ms、体积多 33%。守卫：`test_inpaint_decodes_uploaded_bytes_once` 数
-  `_decode_uploaded_image` 调用，一次冷 inpaint 必须恰好 1 次、revision 轮 0 次。
-  文件部件超过 `MAX_UPLOAD_BYTES`(48MB) → 413，非图片字节 → 400。
-- **编码不从 ndarray 绕回 PIL**：`pil_to_bytes` 现在接受 uint8 RGB/RGBA ndarray，
-  PNG 分支直接进 `png_bytes_from_numpy`，省掉 `Image.fromarray`(11ms) +
-  `np.asarray`(21ms) 的整图往返；输出字节与传 PIL 图逐字节相同（bench 里断言）。
-  守卫：`test_png_response_skips_pil_roundtrip` 把 `Image.fromarray` 打成炸弹，
-  PNG 响应仍须 200。
-- **revision 命中时别算源哈希**：`sha256_bytes(12MP PNG)=27ms` 只在要走
-  `begin_by_hash` 兜底时才需要。守卫：`test_revision_hit_skips_source_hash`，
-  首轮 2 次（seed + 响应别名）、带 revision 的重传轮只剩别名 1 次。
-- **commit 只比较可能变化的矩形**：`revision_cache._diff_hinted` 拿调用方的
-  `region`（掩膜包围盒 + `hd_strategy_crop_margin`，用 cropper 时并入裁剪框）
-  只做盒内逐像素比较，盒外先 `tobytes()` 逐字节校验，不等就退回全帧
-  （12MP 158ms → 约 25ms）。**正确性不依赖提示准不准**：盒外校验不过就回退。
-  守卫：`iopaint/tests/test_revision_cache_diff.py`（随机/越界/提示框过小
-  三条路径与全帧结果逐像素相等；端到端「带提示 vs 强制 None」导出字节相等）。
-- **预览的 alpha 合成**：`_display_preview_jpeg` 在 `(alpha==255).all()` 时跳过
-  全分辨率 float32 合成（25MP 532ms → 123ms，结果位级不变）。守卫：
-  `test_display_preview_skips_composite_for_opaque_alpha`（`np.clip` 炸弹 +
-  与无 alpha 结果比字节）、`test_display_preview_composites_translucent_alpha`。
-- **PNG 压缩策略按形状选**：`png_bytes_from_numpy` 在 RGB + 默认级别(≤1) 时用
-  `zlib.Z_RLE`（只发距离 1 的匹配，正好吃 Up 滤波后的连续重复字节）；RGBA 与
-  level 6/9 仍用默认策略——RGBA 的 alpha 平面经 Up 滤波成片为 0，与 RGB 交错后
-  只有距离 4 的匹配吃得掉（实测体积 +52%、慢 14%），而 Z_RLE 忽略级别
-  （level 6 与 level 1 同体积），放进小体积档只会让文件更大。守卫：
-  `test_compress_strategy_follows_shape` 数 `zlib.compressobj` 的 strategy 参数
-  （RGB→`Z_RLE`、RGBA→默认、level 6→默认）。
-- **实测（2026-11-01，Xeon E3-1231 v3 / 8 线程，12MP PNG，cv2 模型，假模型固定开销）**：
-  同一份 bench 在改动前后交替各跑 3 轮、
-  `python -m pytest benchmarks/test_inpaint_cpu_path.py -m bench -s -k "cold or warm or export"`：
-  cold **988.2 → 834.1 → 793.0 → 696.4 ms**（−29.5%）、warm **827.7 → 675.3 → 620.8 → 617.8 ms**（−25.4%）、
-  export **566.5 → 536.2 → 472.2 → 473.2 ms**（−16.5%）；单项 A/B：base64 325.0 vs 284.8 ms（−40ms）、
-  PNG 编码 542.5 vs 519.7 ms（−23ms）、预览合成 532.7 vs 123.4 ms（−409ms）、
-  PNG 策略 539.3 vs 462.7 ms（−77ms，同一编码器只换 zlib 策略，体积 13.80 → 15.49 MB）。
-  multipart 一步只动冷请求（warm 请求本来就不传图）：793.0 → 696.4 ms（−96ms，base64 46ms + JSON 21ms +
-  传输拷贝），上传字节同时少 33%（17.3MB → 13.0MB）。
+- **Uploaded bytes are not base64 and are decoded once**: `/inpaint` and `/export` are multipart; `image`/`mask` are
+  file parts, and the handler decodes the raw bytes once (`_decode_uploaded_image`). One base64 decode of a 12MP PNG
+  costs 39 ms, JSON parsing 16 ms, and 33% more bytes. Guard: `test_inpaint_decodes_uploaded_bytes_once` counts
+  `_decode_uploaded_image` calls — exactly 1 for a cold inpaint, 0 for a revision round. A file part over
+  `MAX_UPLOAD_BYTES` (48MB) → 413; non-image bytes → 400.
+- **Encoding does not round-trip through PIL**: `pil_to_bytes` now accepts a uint8 RGB/RGBA ndarray; the PNG path
+  goes straight to `png_bytes_from_numpy`, dropping the `Image.fromarray` (11 ms) + `np.asarray` (21 ms) full-image
+  round trip. Output bytes are byte-identical to passing a PIL image (asserted in the benchmark). Guard:
+  `test_png_response_skips_pil_roundtrip` turns `Image.fromarray` into a bomb and still requires a 200 PNG response.
+- **Do not hash the source on a revision hit**: `sha256_bytes(12MP PNG) = 27 ms` is only needed for the
+  `begin_by_hash` fallback. Guard: `test_revision_hit_skips_source_hash` — 2 calls on the first round
+  (seed + response alias), only the alias call on a resend with `revision`.
+- **Commit compares only the rectangle that can change**: `revision_cache._diff_hinted` takes the caller's `region`
+  (mask bbox + `hd_strategy_crop_margin`, plus the crop rect when a cropper is used), compares pixels inside that
+  box, and byte-checks the rest with `tobytes()`; if the outside check fails it falls back to the full frame
+  (12MP 158 ms → ~25 ms). **Correctness does not depend on the hint being accurate**: a mismatch outside the box
+  falls back. Guard: `iopaint/tests/test_revision_cache_diff.py` (random / out-of-bounds / too-small hint paths match
+  the full-frame result pixel for pixel; end-to-end "hint vs forced None" export bytes are equal).
+- **Preview alpha compositing**: `_display_preview_jpeg` skips the full-resolution float32 composite when
+  `(alpha == 255).all()` (25MP 532 ms → 123 ms, bit-identical result). Guards:
+  `test_display_preview_skips_composite_for_opaque_alpha` (`np.clip` bomb + byte comparison with the no-alpha
+  result) and `test_display_preview_composites_translucent_alpha`.
+- **PNG compression strategy follows the shape**: `png_bytes_from_numpy` uses `zlib.Z_RLE` for RGB at the default
+  level (≤1) — it only emits distance-1 matches, exactly what the Up-filtered runs of repeated bytes need; RGBA and
+  level 6/9 keep the default strategy. RGBA's alpha plane becomes a run of zeros after Up filtering, so once
+  interleaved with RGB only distance-4 matches help (measured: +52% size, 14% slower), and Z_RLE ignores the level
+  (level 6 and level 1 produce the same size), so putting it in the small-file tier would only make files bigger.
+  Guard: `test_compress_strategy_follows_shape` inspects the `strategy` argument to `zlib.compressobj`
+  (RGB→`Z_RLE`, RGBA→default, level 6→default).
+- **Measured (2026-11-01, Xeon E3-1231 v3 / 8 threads, 12MP PNG, cv2 model, fixed-cost fake model)**: the same
+  benchmark alternated before/after three rounds each,
+  `python -m pytest benchmarks/test_inpaint_cpu_path.py -m bench -s -k "cold or warm or export"`:
+  cold **988.2 → 834.1 → 793.0 → 696.4 ms** (−29.5%), warm **827.7 → 675.3 → 620.8 → 617.8 ms** (−25.4%),
+  export **566.5 → 536.2 → 472.2 → 473.2 ms** (−16.5%); single-point A/B: base64 325.0 vs 284.8 ms (−40 ms),
+  PNG encoding 542.5 vs 519.7 ms (−23 ms), preview compositing 532.7 vs 123.4 ms (−409 ms), PNG strategy
+  539.3 vs 462.7 ms (−77 ms, same encoder, only the zlib strategy changed; size 13.80 → 15.49 MB). The multipart
+  step only affects the cold request (a warm request never uploads an image): 793.0 → 696.4 ms (−96 ms: base64
+  46 ms + JSON 21 ms + transfer copies), and uploaded bytes drop 33% (17.3MB → 13.0MB).
+
+  **Current reference values (2026-11-09, same machine, `python benchmarks/run.py -k "not lama and not sd15"`)**:
+  cold 256–285 ms, warm 183–212 ms, export 466–469 ms. The warm round now takes the full-resolution JPEG preview
+  path for opaque PNGs in the 4–16Mi range, which is not the PNG-response path behind the 617.8 ms above — do not
+  compare them directly.
