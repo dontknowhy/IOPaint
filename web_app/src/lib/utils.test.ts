@@ -16,6 +16,7 @@ import {
   lineGroupToMaskStrokes,
   mouseXY,
   parseImageSize,
+  releaseDisplayImage,
   strokeBounds,
   touchPointXY,
 } from "./utils"
@@ -522,5 +523,55 @@ describe("parseImageSize", () => {
   it("returns null for unknown/short input", () => {
     expect(parseImageSize(new Uint8Array([1, 2, 3]))).toBeNull()
     expect(parseImageSize(new Uint8Array([0xff, 0xd8]))).toBeNull()
+  })
+})
+
+describe("releaseDisplayImage", () => {
+  // jsdom 没有 ImageBitmap，用桩模拟它的 close() 语义。
+  class FakeImageBitmap {
+    width = 64
+    height = 64
+    close = vi.fn(() => {
+      this.width = 0
+      this.height = 0
+    })
+  }
+
+  const asDisplay = (bitmap: unknown) =>
+    ({
+      src: "blob:x",
+      bitmap,
+      width: 64,
+      height: 64,
+      logicalWidth: 64,
+      logicalHeight: 64,
+    }) as unknown as Parameters<typeof releaseDisplayImage>[0]
+
+  it("closes an ImageBitmap so its pixel store is freed at once", () => {
+    vi.stubGlobal("ImageBitmap", FakeImageBitmap)
+    try {
+      const bitmap = new FakeImageBitmap()
+      releaseDisplayImage(asDisplay(bitmap))
+      expect(bitmap.close).toHaveBeenCalledTimes(1)
+      expect(bitmap.width).toBe(0)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it("zeroes the fallback canvas size", () => {
+    const canvas = document.createElement("canvas")
+    canvas.width = 64
+    canvas.height = 64
+    releaseDisplayImage(asDisplay(canvas))
+    expect(canvas.width).toBe(0)
+    expect(canvas.height).toBe(0)
+  })
+
+  it("ignores null and unknown bitmap types", () => {
+    expect(() => releaseDisplayImage(null)).not.toThrow()
+    expect(() =>
+      releaseDisplayImage(asDisplay(document.createElement("img")))
+    ).not.toThrow()
   })
 })

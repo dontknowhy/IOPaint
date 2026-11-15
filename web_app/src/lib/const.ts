@@ -24,6 +24,11 @@ export const MASK_CANVAS_MAX_PIXELS = 4 * 1024 * 1024
 // 掉帧归零。坐标仍用原图单位（scaleX/scaleY 经 ctx.setTransform 映射），配合
 // CSS width/height 撑回原图大小，布局盒子与缩放行为都不变，掩膜那套同理。
 export const IMAGE_CANVAS_MAX_PIXELS = 16 * 1024 * 1024
+// 撤销历史（editorState.renders）的位图预算：一张 16Mi 显示位图约 64MB
+// （RGBA 4 字节/像素），128Mi 像素 ≈512MB。这些像素不在 JS 堆里，DevTools
+// 的 performance.memory 看不到，不封顶时同一张图连续 inpaint 会把 renderer
+// 进程撑到 GB 级（30 次 ≈2GB）。
+export const RENDER_HISTORY_MAX_PIXELS = 128 * 1024 * 1024
 
 export const LDM = "ldm"
 export const CV2 = "cv2"

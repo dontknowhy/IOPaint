@@ -409,3 +409,113 @@ describe("persist options", () => {
     expect("legacy" in migrated.fileManagerState).toBe(false)
   })
 })
+
+describe("display image disposal", () => {
+  // createDisplayImage 在测试里回落成一张 canvas：位图被归还后宽高应为 0。
+  const makeRender = () => {
+    const canvas = document.createElement("canvas")
+    canvas.width = 64
+    canvas.height = 64
+    return {
+      canvas,
+      render: {
+        src: `blob:${Math.random()}`,
+        bitmap: canvas,
+        width: 64,
+        height: 64,
+        logicalWidth: 64,
+        logicalHeight: 64,
+      } as DisplayImage,
+    }
+  }
+
+  it("setFile releases the previous image's undo and redo bitmaps", async () => {
+    const originalSettings = useStore.getState().settings
+    const undoRender = makeRender()
+    const redoRender = makeRender()
+    try {
+      useStore.getState().updateSettings({ enableAutoExtractPrompt: false })
+      resetStore({ renders: [undoRender.render] })
+      useStore.getState().updateEditorState({
+        redoRenders: [redoRender.render],
+      })
+
+      await useStore.getState().setFile(
+        new File(["next"], "next.png", { type: "image/png" })
+      )
+
+      expect(undoRender.canvas.width).toBe(0)
+      expect(redoRender.canvas.width).toBe(0)
+    } finally {
+      useStore.setState({ settings: originalSettings })
+    }
+  })
+
+  it("resetRedoState releases dropped redo bitmaps", () => {
+    const dropped = makeRender()
+    useStore.getState().updateEditorState({ redoRenders: [dropped.render] })
+
+    useStore.getState().resetRedoState()
+
+    expect(dropped.canvas.width).toBe(0)
+  })
+
+  it("undo keeps its bitmap because redo still needs it", () => {
+    const kept = makeRender()
+    resetStore({ renders: [kept.render] })
+    useStore.getState().updateEditorState({
+      lineGroups: [[{ size: 10, pts: [{ x: 1, y: 1 }] }]],
+    })
+
+    useStore.getState().undo()
+
+    expect(useStore.getState().editorState.redoRenders).toHaveLength(1)
+    expect(kept.canvas.width).toBe(64)
+  })
+})
+
+describe("render history budget", () => {
+  // 12000x10000 = 120M px ≈480MB 一张：两张就超过 128Mi 像素预算。
+  const bigRender = (src: string) => {
+    const canvas = document.createElement("canvas")
+    canvas.width = 64
+    canvas.height = 64
+    return {
+      src,
+      bitmap: canvas,
+      width: 12000,
+      height: 10000,
+      logicalWidth: 12000,
+      logicalHeight: 10000,
+    } as DisplayImage
+  }
+
+  it("drops the oldest render's bitmap and URL when the pixel budget is exceeded", async () => {
+    const oldest = bigRender("blob:oldest")
+    const older = bigRender("blob:older")
+    resetStore({ extraMasks: [new Image()], renders: [oldest, older] })
+    useStore.getState().updateEditorState({
+      lineGroups: [
+        [{ size: 10, pts: [{ x: 1, y: 1 }] }],
+        [{ size: 10, pts: [{ x: 2, y: 2 }] }],
+      ],
+    })
+    inpaintMock.mockResolvedValue({
+      blob: new Blob(["result"], { type: "image/png" }),
+      revision: "rev-1",
+      width: 64,
+      height: 64,
+    })
+
+    await useStore.getState().runInpainting()
+
+    const { renders, lineGroups } = useStore.getState().editorState
+    // 最新结果 + 次新一步留在历史里，最老的一步被丢弃
+    expect(renders).toHaveLength(2)
+    expect(renders[0]).toBe(older)
+    expect(lineGroups).toHaveLength(2)
+    expect((oldest.bitmap as HTMLCanvasElement).width).toBe(0)
+    expect((older.bitmap as HTMLCanvasElement).width).toBe(64)
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:oldest")
+  })
+})

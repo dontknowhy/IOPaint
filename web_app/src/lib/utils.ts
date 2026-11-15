@@ -422,6 +422,30 @@ export async function createDisplayImage(
   }
 }
 
+/**
+ * 归还一张 DisplayImage 的像素内存。
+ *
+ * ImageBitmap 的像素不在 V8 堆里：只要 JS 包装对象还被闭包引用，GC 就不会
+ * 回收它，`performance.memory` 也统计不到；`close()` 立即释放底层的
+ * 位图存储（16Mi 位图约 64MB）。回退路径用的是 canvas，把宽高置 0 同样会
+ * 释放 backing store。
+ *
+ * 只在该图不会再被画到任何画布上之后调用；仍在显示的图关掉会让绘制抛
+ * InvalidStateError 或画出一片空白。
+ */
+export function releaseDisplayImage(image: DisplayImage | null | undefined) {
+  const bitmap = image?.bitmap
+  if (!bitmap) {
+    return
+  }
+  if (typeof ImageBitmap !== "undefined" && bitmap instanceof ImageBitmap) {
+    bitmap.close()
+  } else if (bitmap instanceof HTMLCanvasElement) {
+    bitmap.width = 0
+    bitmap.height = 0
+  }
+}
+
 export function getErrorMessage(e: unknown): string {
   if (e instanceof Error) {
     return e.message

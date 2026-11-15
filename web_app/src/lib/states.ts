@@ -29,6 +29,7 @@ import {
   MIN_BRUSH_SIZE,
   MODEL_TYPE_INPAINT,
   PAINT_BY_EXAMPLE,
+  RENDER_HISTORY_MAX_PIXELS,
 } from "./const"
 import {
   blobToImage,
@@ -40,6 +41,7 @@ import {
   getErrorMessage,
   lineGroupToMaskStrokes,
   loadImage,
+  releaseDisplayImage,
   srcToFile,
 } from "./utils"
 import inpaint, {
@@ -74,6 +76,50 @@ export function editSessionExpiredError() {
 function forgetRenderRevision(src: string | undefined | null) {
   if (src) {
     _renderRevisions.delete(src)
+  }
+}
+
+/**
+ * 把撤销历史裁到像素预算内：renders 里每一项都是一张 ≤16Mi 的显示位图
+ * （RGBA 4 字节/像素，即约 64MB），而这些像素不计入 JS 堆，DevTools 的
+ * `performance.memory` 完全看不到。不封顶时同一张图连续 inpaint 30 次会留下
+ * 约 2GB 的位图；超预算就从最老的开始丢，并同步丢掉对应的 lineGroups。
+ *
+ * 最新一张无论多大都保留（它是当前显示的那张）。丢掉的那些在这里一并归还
+ * 位图和 blob URL，调用方拿到返回的数组直接写回 store 即可。
+ */
+function capRenderHistory(
+  renders: DisplayImage[],
+  lineGroups: LineGroup[]
+): { renders: DisplayImage[]; lineGroups: LineGroup[] } {
+  let pixels = 0
+  let keepFrom = renders.length
+  for (let i = renders.length - 1; i >= 0; i--) {
+    const renderPixels = renders[i].width * renders[i].height
+    if (
+      i !== renders.length - 1 &&
+      pixels + renderPixels > RENDER_HISTORY_MAX_PIXELS
+    ) {
+      break
+    }
+    pixels += renderPixels
+    keepFrom = i
+  }
+  if (keepFrom === 0) {
+    return { renders, lineGroups }
+  }
+  const dropped = renders.slice(0, keepFrom)
+  for (const render of dropped) {
+    releaseDisplayImage(render)
+    if (render.src && render.src.startsWith("blob:")) {
+      URL.revokeObjectURL(render.src)
+      _activeBlobUrls.delete(render.src)
+      forgetRenderRevision(render.src)
+    }
+  }
+  return {
+    renders: renders.slice(keepFrom),
+    lineGroups: lineGroups.slice(dropped.length),
   }
 }
 
@@ -762,14 +808,18 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
               forgetRenderRevision(blobUrl)
               return
             }
-            const newRenders = [...renders, newRender]
+            // 位图预算封顶：超了就从最老的 render 开始丢（连同位图/URL）。
+            const capped = capRenderHistory(
+              [...renders, newRender],
+              newLineGroups
+            )
             get().setImageSize(
               newRender.logicalWidth,
               newRender.logicalHeight
             )
             get().updateEditorState({
-              renders: newRenders,
-              lineGroups: newLineGroups,
+              renders: capped.renders,
+              lineGroups: capped.lineGroups,
               lastLineGroup: maskLineGroup,
               curLineGroup: [],
               extraMasks: [],
@@ -837,11 +887,13 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
               newRender.logicalWidth,
               newRender.logicalHeight
             )
-            const newRenders = [...renders, newRender]
-            const newLineGroups = [...lineGroups, []]
+            const capped = capRenderHistory(
+              [...renders, newRender],
+              [...lineGroups, []]
+            )
             get().updateEditorState({
-              renders: newRenders,
-              lineGroups: newLineGroups,
+              renders: capped.renders,
+              lineGroups: capped.lineGroups,
             })
           } else {
             const blobUrl = URL.createObjectURL(blob)
@@ -1023,11 +1075,16 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         const staleUrls = get().editorState.redoRenders
           .map((render) => render.src)
           .filter((url): url is string => !!url && url.startsWith("blob:"))
+        // redo 栈丢弃后这些结果不会再显示（新 render 会把它顶掉），位图可归还。
+        const droppedRenders = get().editorState.redoRenders
         set((state) => {
           state.editorState.redoCurLines = []
           state.editorState.redoLineGroups = []
           state.editorState.redoRenders = []
         })
+        for (const render of droppedRenders) {
+          releaseDisplayImage(render)
+        }
         for (const url of staleUrls) {
           if (_activeBlobUrls.has(url)) {
             URL.revokeObjectURL(url)
@@ -1209,6 +1266,10 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         // 3) 最后才把 prompt 抽取丢到后台。gen-info 要把整张图上传一次
         //    （实测 230~290ms），绝不能挡在「打开图片」前面；晚到的结果只在
         //    图片没被切走时才写回。
+        const staleRenders = [
+          ...get().editorState.renders,
+          ...get().editorState.redoRenders,
+        ]
         set((state) => {
           state.file = file
           // 普通上传/拖拽没有 mediaRef，必须清掉上一张图的 FileManager 引用，
@@ -1227,6 +1288,11 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           state.cropperState = defaultValues.cropperState
           state.extenderState = defaultValues.extenderState
         })
+        // editorState 已被重置，旧结果不会再被绘制；归还它们的位图存储
+        // （每张最多 16Mi 像素 ≈64MB，不还的话切图一次就泄漏一张）。
+        for (const render of staleRenders) {
+          releaseDisplayImage(render)
+        }
         for (const url of _activeBlobUrls) {
           URL.revokeObjectURL(url)
         }
