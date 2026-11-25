@@ -318,6 +318,49 @@ class TestFilesystemStorageBackend:
         with pytest.raises(IOError):
             fs.save(str(blocker / "x.png"), b"data")
 
+    def test_exists_is_false_for_directory(self, tmp_path: Path) -> None:
+        """目录不该冒充缩略图：os.path.exists 对目录为 True，命中路径会把目录
+        当合法缩略图交给 FileResponse。is_file() 让读取方向与 save() 的 isdir
+        检查对称。"""
+        fs = FilesystemStorageBackend()
+        subdir = tmp_path / "thumb_dir"
+        subdir.mkdir()
+        assert fs.exists(str(subdir)) is False
+        real = tmp_path / "thumb.png"
+        real.write_bytes(b"x")
+        assert fs.exists(str(real)) is True
+
+    def test_save_is_atomic_on_replace_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """落位失败时旧的缩略图必须原样保留，且不留下临时文件。
+
+        save() 先写同目录临时文件再 os.replace 原子落位；若直接写最终路径，
+        写入中途失败会留下半截缩略图，而读侧命中只 exists 校验、源文件不变
+        时也不会换名自愈，坏图就会一直被返回。
+        """
+        fs = FilesystemStorageBackend()
+        target = tmp_path / "thumb.png"
+        target.write_bytes(b"OLD")
+
+        def failing_replace(src: str, dst: str) -> None:
+            raise OSError(errno.EIO, "replace failed")
+
+        monkeypatch.setattr(os, "replace", failing_replace)
+        with pytest.raises(OSError):
+            fs.save(str(target), b"NEW")
+
+        assert target.read_bytes() == b"OLD"  # 旧图原样保留
+        leftovers = [p.name for p in tmp_path.iterdir() if p.name != "thumb.png"]
+        assert leftovers == []  # 临时文件已清理
+
+    def test_save_leaves_no_temp_on_success(self, tmp_path: Path) -> None:
+        fs = FilesystemStorageBackend()
+        target = tmp_path / "thumb.png"
+        fs.save(str(target), b"data")
+        assert target.read_bytes() == b"data"
+        assert [p.name for p in tmp_path.iterdir()] == ["thumb.png"]
+
 
 class TestUtilsGaps:
     def test_sniff_unreadable_falls_back_to_extension(self, tmp_path):
