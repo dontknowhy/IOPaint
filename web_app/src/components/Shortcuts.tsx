@@ -73,8 +73,14 @@ export function Shortcuts() {
               content={t("shortcuts.panHorizontally")}
               keys={["Shift + Scroll"]}
             />
-            <ShortCut content={t("shortcuts.decreaseBrushSize")} keys={["["]} />
-            <ShortCut content={t("shortcuts.increaseBrushSize")} keys={["]"]} />
+            <ShortCut
+              content={t("shortcuts.decreaseBrushSize")}
+              keys={["[ / ← / ↑"]}
+            />
+            <ShortCut
+              content={t("shortcuts.increaseBrushSize")}
+              keys={["] / → / ↓"]}
+            />
             <ShortCut
               content={t("shortcuts.viewOriginalImage")}
               keys={["Hold Tab"]}

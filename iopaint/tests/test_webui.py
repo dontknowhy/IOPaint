@@ -655,6 +655,54 @@ class TestBrushSizeHotkeys:
         after_dec = int(slider.get_attribute("aria-valuenow"))
         assert after_dec < after_inc, f"'[' 没有减小笔刷: {after_inc} -> {after_dec}"
 
+    def test_arrow_keys_adjust_brush_slider(
+        self, page: Page, tmp_path: Path
+    ) -> None:
+        _upload_image(page, tmp_path)
+        slider = page.locator('[role="slider"][aria-valuemax="200"]')
+        expect(slider).to_be_visible(timeout=3000)
+
+        def slider_value() -> int:
+            raw = slider.get_attribute("aria-valuenow")
+            assert raw is not None, "slider 没有 aria-valuenow"
+            return int(raw)
+
+        def press_and_read(key: str) -> tuple[int, int]:
+            before = slider_value()
+            page.keyboard.press(key)
+            expect(slider).not_to_have_attribute(
+                "aria-valuenow", str(before), timeout=3000
+            )
+            return before, slider_value()
+
+        for key in ("ArrowRight", "ArrowDown"):
+            before, after = press_and_read(key)
+            assert after > before, f"{key} 没有增大笔刷: {before} -> {after}"
+        for key in ("ArrowLeft", "ArrowUp"):
+            before, after = press_and_read(key)
+            assert after < before, f"{key} 没有减小笔刷: {before} -> {after}"
+
+    def test_keyboard_resize_shows_brush_preview(
+        self,
+        browser_instance: Browser,
+        iopaint_server: str,
+        tmp_path: Path,
+    ) -> None:
+        """导入图片后指针还停在文件对话框上，画笔游标 opacity=0 不可见；
+        键盘改尺寸没有可见反馈的话就像没生效，要等落笔才看到粗细变了。
+        所以键盘路径也要在窗口中心闪一个参考圆（和拖底部滑块同一套提示）。"""
+        ctx, pg = _fresh_page(browser_instance, iopaint_server)
+        try:
+            _upload_image(pg, tmp_path)
+            circles = pg.locator('div[class*="border-[#ffcc00]"]')
+            # 只有跟随指针的游标（此时隐藏），没有参考圆
+            expect(circles).to_have_count(1, timeout=3000)
+            pg.keyboard.press("]")
+            # 多出窗口中心的参考圆：不用把指针移回画布就能看到新尺寸
+            expect(circles).to_have_count(2, timeout=3000)
+        finally:
+            ctx.close()
+
 
 class TestGlobalHotkeyLatches:
     """输入框 onFocus 把 disableShortCuts 置 true，只有 blur 才复位。

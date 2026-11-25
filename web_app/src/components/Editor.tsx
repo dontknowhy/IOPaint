@@ -1289,20 +1289,35 @@ export default function Editor(props: EditorProps) {
     return undefined
   }, [showBrush, isPanning, isProcessing, interactiveSegState.isInteractiveSeg])
 
+  // 键盘/滑块改完笔刷后在窗口中心闪一个参考圆：画笔游标只在指针压着画布时
+  // 可见，导入图片后指针通常还在文件对话框/工具栏上，没有这个提示的话
+  // [ / ] 看起来像没生效，要等落笔画完第一笔才看到尺寸变了。
+  const showBrushSizePreview = useCallback(() => {
+    if (showRefBrush) {
+      return
+    }
+    setShowRefBrush(true)
+    trackedTimeout(() => {
+      setShowRefBrush(false)
+    }, 10000)
+  }, [showRefBrush, trackedTimeout])
+
   useHotKey(
-    "BracketLeft",
+    "BracketLeft,ArrowLeft,ArrowUp",
     () => {
       decreaseBaseBrushSize()
+      showBrushSizePreview()
     },
-    [decreaseBaseBrushSize]
+    [decreaseBaseBrushSize, showBrushSizePreview]
   )
 
   useHotKey(
-    "BracketRight",
+    "BracketRight,ArrowRight,ArrowDown",
     () => {
       increaseBaseBrushSize()
+      showBrushSizePreview()
     },
-    [increaseBaseBrushSize]
+    [increaseBaseBrushSize, showBrushSizePreview]
   )
 
   // Manual Inpainting Hotkey
@@ -1431,13 +1446,7 @@ export default function Editor(props: EditorProps) {
 
   const handleSliderChange = (value: number) => {
     setBaseBrushSize(value)
-
-    if (!showRefBrush) {
-      setShowRefBrush(true)
-      trackedTimeout(() => {
-        setShowRefBrush(false)
-      }, 10000)
-    }
+    showBrushSizePreview()
   }
 
   const renderCanvas = () => {
