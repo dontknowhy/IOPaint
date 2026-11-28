@@ -145,11 +145,12 @@ confirms idle/free VRAM and `CUDA_VISIBLE_DEVICES=<idx>` selects the card.
   merges only *overlapping* crops (union no larger than the sum of the parts) into one forward pass,
   because merging strokes that are merely close computes extra pixels — measured 11% slower on 12MP;
   merged area is capped by `hd_strategy_crop_merge_max_pixels` (LaMa peaks around 1GB per megapixel).
-  `HDStrategy.DYNAMIC` (`InpaintModel._dynamic_context_call` + `helper/dynamic_context.py`) keeps per-contour crops but
-  derives each margin from the mask area ratio and the ring around the hole (entropy, structure-tensor coherence, gradient,
-  self-match distance), then re-runs once at 1.5× padding when the paste seam scores above `seam_ratio` and the band
-  gradient clears `seam_min_grad`; only mask ± `paste_feather` is copied back. `--dynamic-context path.json` overrides the
-  `DynamicContextConfig` defaults; the A/B recipe is docs/agents/dynamic-context.md.
+  `HDStrategy.DYNAMIC` (`InpaintModel._dynamic_context_call` + `helper/dynamic_context.py`) keeps per-contour crops and
+  derives each margin from the mask area ratio; the ring metrics (entropy, structure-tensor coherence, gradient,
+  self-match distance) are logged and only move the pad when `alpha`/`high_pad` are configured, because a 156-box
+  ground-truth calibration found no measurable gain from 192/256 over 128. It re-runs once at 1.5× padding when the paste
+  seam scores above `seam_ratio` and the band gradient clears `seam_min_grad`; only mask ± `paste_feather` is copied back.
+  `--dynamic-context path.json` overrides `DynamicContextConfig`; the A/B recipe is docs/agents/dynamic-context.md.
 - `LaMa`/`AnimeLaMa` replace the traced module with `helper/lama_graph.py:build_lama_replay`, which calls the same 36
   generator children in the same order as a plain `nn.Module` — the only way to change a traced step: the final 7x7 conv
   runs as `conv2d(padding=3)` cropped back (16.6 → 10.2 ms at 512², interior pixels bit-identical) and the three
@@ -307,9 +308,10 @@ read it:
   touching `scan_models` / schedulers / ControlNet preprocessors / `--empty-cache-after-inpaint`).
 - `docs/agents/review-prompts.md` — adversarial-review, test-quality-review, and mutation-testing prompt templates
   (trigger: preparing a code review session or judging test suite quality).
-- `docs/agents/dynamic-context.md` — `HDStrategy.DYNAMIC`: per-contour pad from mask geometry + ring complexity, the
-  seam fallback, `DynamicContextConfig` / `--dynamic-context`, log fields and the `benchmarks/dynamic_context_ab.py`
-  A/B recipe (trigger: touching `helper/dynamic_context.py`, `_dynamic_context_call`, or measuring dynamic padding).
+- `docs/agents/dynamic-context.md` — `HDStrategy.DYNAMIC`: per-contour pad from mask geometry, ring complexity as a
+  logged/tunable score (defaults keep it out of the pad), the seam fallback, `DynamicContextConfig` /
+  `--dynamic-context`, log fields, the `benchmarks/dynamic_context_ab.py` A/B recipe and the ground-truth padding
+  calibration (trigger: touching `helper/dynamic_context.py`, `_dynamic_context_call`, or measuring dynamic padding).
 
 ## Multi-batch agent tasks
 

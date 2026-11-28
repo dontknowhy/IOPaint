@@ -4,9 +4,11 @@
 `Original` / `Resize` / `Crop`. Crop uses one fixed margin — the web UI and
 `web_app/src/lib/const.ts` hard-code `Crop` with `hd_strategy_crop_margin=128`.
 Dynamic keeps the per-contour crop, but decides each contour's margin from the
-mask geometry plus what the pixels around the hole look like, so a small mask
-on a flat wall does not pay for a large window and a textured region gets more
-context than 128px.
+mask geometry. The pixels around the hole are still scored (entropy, structure,
+self-similarity) and the score is logged, but the defaults no longer let it grow
+the window: a 156-box ground-truth calibration found no measurable gain from
+more context at 192 or 256px, only extra time. `alpha` / `high_pad` remain
+tunable for content classes where that changes.
 
 Trigger: touching `iopaint/model/helper/dynamic_context.py`,
 `InpaintModel._dynamic_context_call` in `iopaint/model/base.py`, the
@@ -35,7 +37,9 @@ models keep their own path). For every box from `boxes_from_mask(mask)`:
    - `complexity = w_entropy*Hn + w_match*match + w_interaction*interaction`,
      each term clipped to 0..1 by `entropy_ref` / `match_dist_ref` / `grad_ref`.
      Below `complexity_low` keep `base_pad`, above `complexity_high` take
-     `max(base_pad, high_pad)`, in between `base_pad * (1 + alpha*c)`.
+     `max(base_pad, high_pad)`, in between `base_pad * (1 + alpha*c)`. Defaults
+     are `alpha=0.0` and `high_pad=base_pad`, so the score does not move the pad;
+     the calibration below is why.
    - `pad = max(geometry, dynamic)`, clamped to `[min_pad, max_pad]`; the rect is
      `crop_rect(bbox, pad, mask.shape)` (centered where possible, shifted at the
      border, asymmetric allowed). Flags record `forced_pad`,
@@ -61,7 +65,7 @@ models keep their own path). For every box from `boxes_from_mask(mask)`:
 Each contour logs one INFO line:
 
 ```
-dynamic_context {"bbox": [...], "rect": [...], "pad": 142, "complexity": 0.216,
+dynamic_context {"bbox": [...], "rect": [...], "pad": 128, "complexity": 0.216,
  "area_ratio": ..., "entropy": ..., "match_dist": ..., "interaction": ...,
  "flags": [...], "seam_score": 1.28, "seam_band_grad": ..., "seam_ring_grad": ...,
  "seam_rerun": false, "seam_failed": false}
@@ -92,14 +96,35 @@ fields can travel in a `/api/v1/inpaint` request (`InpaintRequest.dynamic_contex
 or in a batch `--config` JSON. `Api._inpaint_blocking` copies the server config
 onto each request, so `--dynamic-context` wins over request-level defaults.
 
-The defaults come from the smoke set under `~/下载/sample`: flat backgrounds
-score 0.04–0.05, regular texture 0.10–0.21, complex irregular texture 0.33–0.46,
-which is why `complexity_low=0.2`, `complexity_high=0.45` and
-`match_dist_ref=0.002` (the comment next to each field records the band). Those
-samples carry complete masks and acceptable existing output, so they are a smoke
-and regression baseline — they are not hard negatives and do not prove that
-128px is enough anywhere; see "Sample register" below before treating the
-thresholds as validated.
+The defaults come from the 39-pair set in `~/下载`: flat backgrounds score
+0.04–0.05, regular texture 0.10–0.21, complex irregular texture 0.33–0.46, which
+is why `complexity_low=0.2`, `complexity_high=0.45` and `match_dist_ref=0.002`
+(the comment next to each field records the band). Those samples carry complete
+masks and acceptable existing output, so they are a smoke and regression
+baseline — they are not hard negatives and do not prove that 128px is enough
+anywhere; see "Sample register" below before treating the thresholds as
+validated. What they do pin down is that raising the pad does not help: see
+"Ground-truth padding calibration".
+
+## Ground-truth padding calibration
+
+`*_cleanup.png` cannot judge padding because the reference itself is the old
+`margin=128` Crop output. The calibration masks 64/96/128/160px boxes on clean
+image regions away from the user's mask and scores the result against the
+original pixels, which are a real ground truth. On the 39 pairs in `~/下载`
+(156 boxes, pads 128/192/256):
+
+| pad | mean PSNR | mean Δ vs 128 | median time |
+| --- | --- | --- | --- |
+| 128 | 18.33 dB | — | 0.232 s |
+| 192 | 18.35 dB | +0.02 dB | 0.283 s |
+| 256 | 18.33 dB | 0.00 dB | 0.330 s (1.42×) |
+
+Wins and losses were balanced (28 up / 25 down for 192, 32 up / 33 down for
+256 at a 0.05dB threshold) and complexity bins showed no trend: 128–256px of
+extra context does not measurably change LaMa's reconstruction of real content.
+Runtime is the only consistent difference, which is why the default keeps the
+geometry pad and stops there.
 
 ## A/B verification
 
@@ -109,7 +134,7 @@ contour decision, runs Dynamic plus fixed `--pads`, and writes JSON/markdown:
 
 ```bash
 conda run -n iopaint python benchmarks/dynamic_context_ab.py \
-  --sample-dir ~/下载/sample --device cuda \
+  --sample-dir ~/下载 --device cuda \
   --json /tmp/opencode/ab.json --markdown /tmp/opencode/ab.md
 ```
 
@@ -122,8 +147,9 @@ ground truth.
 Measured on the 10 sample pairs (P104-100, LaMa, 3 rounds, outside-mask MAE 0.0
 for every row):
 
-- Dynamic picks 128/142/154/256 for complexity 0.04–0.46 and matches `pad128`
-  bit-for-bit wherever the decision is 128.
+- At the current default every contour uses the geometry pad (128 for all ten)
+  and matches `pad128` bit-for-bit. With the pre-calibration `alpha=0.5` the
+  same set picked 128/142/154/256 for complexity 0.04–0.46.
 - `pad64` is consistently worse inside the mask (MAE 0.66 vs 0.51, 1.62 vs 0.85,
   1.17 vs 1.0) — that is the case the geometry rule is meant to avoid.
 - Seam reruns drop to zero at the default floor; only one `pad64` contour of the
@@ -136,26 +162,27 @@ for every row):
 
 ## Sample register
 
-The ten pairs in `~/下载/sample` are tagged below with the decision they produce
-at the default config (`complexity`/`tier` from `decide_context`). Purpose:
-**smoke + regression** — rerun this set after changing the window logic and
-confirm the same tier/pad and a non-regressing mask MAE. They are not used to
-prove a padding tier is correct; hard negatives (complex irregular texture,
-soft-edged watermarks, text/face/hair, oversized masks) still need to be
-collected and labelled by hand.
+The original ten pairs now live in `~/下载` together with 29 later samples; the
+old `~/下载/sample` directory is gone. They are tagged below with the decision
+they produce at the default config (`complexity`/`tier` from
+`decide_context`). Purpose: **smoke + regression** — rerun this set after
+changing the window logic and confirm the same tier/pad and a non-regressing
+mask MAE. They are not used to prove a padding tier is correct; hard negatives
+(complex irregular texture, soft-edged watermarks, text/face/hair, oversized
+masks) still need to be collected and labelled by hand.
 
 | sample | complexity | tier | dynamic pad |
 | --- | --- | --- | --- |
 | 1795844961117 | 0.044 | low | 128 |
 | 1795844968287 | 0.155 | low | 128 |
-| IMG_1795323707458 | 0.216 | mid | 142 |
-| IMG_1795323709948 | 0.401 | mid | 154 |
-| IMG_1795323726814 | 0.462 | high | 256 |
+| IMG_1795323707458 | 0.216 | mid | 128 |
+| IMG_1795323709948 | 0.401 | mid | 128 |
+| IMG_1795323726814 | 0.462 | high | 128 |
 | IMG_1795581643857 | 0.199 | low | 128 |
 | IMG_1795581645791 | 0.097 | low | 128 |
 | IMG_1795581648670 | 0.051 | low | 128 |
-| IMG_1795668069831 | 0.211 | mid | 142 |
-| IMG_1795705772731 | 0.329–0.411 (5 contours) | mid | 149–154 |
+| IMG_1795668069831 | 0.211 | mid | 128 |
+| IMG_1795705772731 | 0.329–0.411 (5 contours) | mid | 128 |
 
 ## Pitfalls
 

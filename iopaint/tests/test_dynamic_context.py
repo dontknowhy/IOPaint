@@ -171,12 +171,21 @@ class TestComplexity:
         assert complexity_score(noise, cfg) > complexity_score(stripes, cfg)
         assert complexity_score(noise, cfg) > 0.5
 
-    def test_complexity_raises_pad(self) -> None:
+    def test_complexity_raises_pad_when_configured(self) -> None:
         image, mask = noise_patch()
-        decision = decide_context(image, mask, (80, 80, 120, 120), dynamic_cfg())
-        assert decision.dynamic_pad > dynamic_cfg().base_pad
+        cfg = dynamic_cfg(alpha=0.5, high_pad=256)
+        decision = decide_context(image, mask, (80, 80, 120, 120), cfg)
+        assert decision.dynamic_pad > cfg.base_pad
         assert decision.pad == decision.dynamic_pad
         assert "forced_pad" not in decision.flags
+
+    def test_default_alpha_keeps_pad_at_geometry(self) -> None:
+        image, mask = noise_patch()
+        cfg = dynamic_cfg()
+        decision = decide_context(image, mask, (80, 80, 120, 120), cfg)
+        assert decision.complexity > 0.5
+        assert decision.dynamic_pad == cfg.base_pad
+        assert decision.pad == decision.geometry_pad
 
     def test_pad_never_exceeds_max(self) -> None:
         image, mask = noise_patch()

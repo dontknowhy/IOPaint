@@ -297,14 +297,17 @@ class DynamicContextConfig(BaseModel):
     w_entropy: float = Field(0.3, ge=0, le=1)
     w_match: float = Field(0.4, ge=0, le=1)
     w_interaction: float = Field(0.3, ge=0, le=1)
-    # pad_dynamic = base_pad * (1 + alpha * complexity)
-    alpha: float = Field(0.5, ge=0, le=8.0)
-    # 低于 low 保持 base_pad；高于 high 至少取 high_pad。
-    # 默认值按样本目录的实测分布标定：平坦背景 0.04~0.05，规则纹理
-    # 0.10~0.21，复杂非规则纹理 0.33~0.46
+    # pad_dynamic = base_pad * (1 + alpha * complexity)。默认 0：156 个
+    # 64~160px 干净块的 GT 标定里，pad 192/256 相对 128 的 PSNR 差在 ±0.03dB
+    # 内、胜负各半，抬高 pad 只增加耗时（256 是 128 的 1.42 倍）。换内容类别
+    # 想要更大窗口时再调大。
+    alpha: float = Field(0.0, ge=0, le=8.0)
+    # 低于 low 保持 base_pad；高于 high 至少取 high_pad。复杂度仍会算并写进
+    # 日志，默认配置下不再改变 pad。样本实测分布：平坦 0.04~0.05，规则纹理
+    # 0.10~0.21，复杂非规则 0.33~0.46。
     complexity_low: float = Field(0.2, ge=0, le=1)
     complexity_high: float = Field(0.45, ge=0, le=1)
-    high_pad: int = Field(256, ge=0, le=65536)
+    high_pad: int = Field(128, ge=0, le=65536)
     # 几何 pad 达到该值时跳过复杂度计算（已经足够大）
     skip_complexity_at_pad: int = Field(384, ge=0, le=65536)
     enable_complexity: bool = True
