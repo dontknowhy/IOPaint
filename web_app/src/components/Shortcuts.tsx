@@ -112,7 +112,7 @@ export function Shortcuts() {
             <ShortCut
               content={t("shortcuts.viewOriginalImage")}
               keys={["Tab"]}
-              prefix="Hold"
+              prefix={t("shortcuts.hold")}
             />
 
             <ShortCut content={t("shortcuts.undo")} keys={[CmdOrCtrl(), "Z"]} />

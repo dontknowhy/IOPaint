@@ -87,6 +87,7 @@
     "panHorizontally": "水平平移",
     "decreaseBrushSize": "减小画笔尺寸",
     "increaseBrushSize": "增大画笔尺寸",
+    "hold": "按住",
     "viewOriginalImage": "查看原图",
     "undo": "撤销",
     "redo": "重做",
