@@ -78,10 +78,14 @@ fields can travel in a `/api/v1/inpaint` request (`InpaintRequest.dynamic_contex
 or in a batch `--config` JSON. `Api._inpaint_blocking` copies the server config
 onto each request, so `--dynamic-context` wins over request-level defaults.
 
-Defaults are calibrated on `~/下载/sample`: flat backgrounds score 0.04–0.05,
-regular texture 0.10–0.21, complex irregular texture 0.33–0.46. That is why
-`complexity_low=0.2`, `complexity_high=0.45` and `match_dist_ref=0.002`; the
-comment next to each field records the measured band.
+The defaults come from the smoke set under `~/下载/sample`: flat backgrounds
+score 0.04–0.05, regular texture 0.10–0.21, complex irregular texture 0.33–0.46,
+which is why `complexity_low=0.2`, `complexity_high=0.45` and
+`match_dist_ref=0.002` (the comment next to each field records the band). Those
+samples carry complete masks and acceptable existing output, so they are a smoke
+and regression baseline — they are not hard negatives and do not prove that
+128px is enough anywhere; see "Sample register" below before treating the
+thresholds as validated.
 
 ## A/B verification
 
@@ -116,6 +120,29 @@ for every row):
   TorchScript's profiling executor is slow for the first two forwards of a graph
   (up to 1.8 s here), so the script discards them (`time_first` keeps the number).
 
+## Sample register
+
+The ten pairs in `~/下载/sample` are tagged below with the decision they produce
+at the default config (`complexity`/`tier` from `decide_context`). Purpose:
+**smoke + regression** — rerun this set after changing the window logic and
+confirm the same tier/pad and a non-regressing mask MAE. They are not used to
+prove a padding tier is correct; hard negatives (complex irregular texture,
+soft-edged watermarks, text/face/hair, oversized masks) still need to be
+collected and labelled by hand.
+
+| sample | complexity | tier | dynamic pad |
+| --- | --- | --- | --- |
+| 1795844961117 | 0.044 | low | 128 |
+| 1795844968287 | 0.155 | low | 128 |
+| IMG_1795323707458 | 0.216 | mid | 142 |
+| IMG_1795323709948 | 0.401 | mid | 154 |
+| IMG_1795323726814 | 0.462 | high | 256 |
+| IMG_1795581643857 | 0.199 | low | 128 |
+| IMG_1795581645791 | 0.097 | low | 128 |
+| IMG_1795581648670 | 0.051 | low | 128 |
+| IMG_1795668069831 | 0.211 | mid | 142 |
+| IMG_1795705772731 | 0.329–0.411 (5 contours) | mid | 149–154 |
+
 ## Pitfalls
 
 - Model contract is RGB in / BGR out (`InpaintModel.__call__`); a harness that
@@ -126,3 +153,10 @@ for every row):
   set of samples shows real seams in flat areas.
 - `max_input_side` trades detail for speed; the resize-back uses `INTER_CUBIC`,
   so a maxed-out window is not bit-identical to the un-downscaled run.
+- `@torch.inference_mode()` was tried in place of `@torch.no_grad()` on
+  `InpaintModel.__call__` / `DiffusionInpaintModel.__call__`: on all ten samples
+  the output bytes were identical, but the median time only moved inside noise
+  (the 5790×3860 sample went 0.672 → 0.584 s, the rest ±5%), so the decorators
+  stay `no_grad` — inference mode would change every model's forward path,
+  including diffusion pipelines that are not covered by the fast suite, for no
+  consistent gain.
