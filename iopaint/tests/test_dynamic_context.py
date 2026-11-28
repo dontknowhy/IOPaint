@@ -351,3 +351,10 @@ def test_load_dynamic_context_rejects_bad_json(tmp_path: Path) -> None:
     path.write_text("{not json")
     with pytest.raises(SystemExit):
         _load_dynamic_context(path)
+
+
+def test_unknown_config_key_is_rejected() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        DynamicContextConfig(base_pad=96, bse_pad=96)

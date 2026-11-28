@@ -17,7 +17,7 @@ from iopaint.const import (
     SD_BRUSHNET_CHOICES,
     SDXL_BRUSHNET_CHOICES
 )
-from pydantic import BaseModel, Field, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 
 class ModelType(str, Enum):
@@ -321,6 +321,9 @@ class DynamicContextConfig(BaseModel):
     paste_feather: int = Field(3, ge=0, le=64)
     # 调试/分档验证用：非空时跳过决策，所有裁块强制用该 padding
     force_pad: Optional[int] = Field(None, ge=0, le=65536)
+
+    # 这份配置常从手写 JSON 读入：拼错的键要报错，而不是静默沿用默认值
+    model_config = ConfigDict(extra="forbid")
 
     @model_validator(mode="after")
     def _check_order(self) -> "DynamicContextConfig":
