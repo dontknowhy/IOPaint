@@ -1,7 +1,9 @@
+import { Fragment, type ReactNode } from "react"
 import { Keyboard } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { IconButton } from "@/components/ui/button"
 import { useToggle } from "@uidotdev/usehooks"
+import { cn } from "@/lib/utils"
 import {
   Dialog,
   DialogContent,
@@ -14,20 +16,44 @@ import useHotKey from "@/hooks/useHotkey"
 interface ShortcutProps {
   content: string
   keys: string[]
+  /** 键位之间的连接符；组合键用 +，可替代键位用 / */
+  separator?: string
+  /** 键位前的说明文字，例如 Hold */
+  prefix?: string
+}
+
+/** 键帽：mono 字体 + 上下边框阴影，让按键和普通文字一眼可分 */
+function KeyCap({ children }: { children: ReactNode }) {
+  return (
+    <kbd
+      className={cn(
+        "inline-flex h-6 min-w-6 items-center justify-center rounded-md",
+        "border border-foreground/15 bg-foreground/10 px-1.5 font-mono text-xs font-medium text-foreground",
+        "shadow-[0_2px_0_0_hsl(var(--foreground)/0.15)]"
+      )}
+    >
+      {children}
+    </kbd>
+  )
 }
 
 function ShortCut(props: ShortcutProps) {
-  const { content, keys } = props
+  const { content, keys, separator = "+", prefix } = props
 
   return (
-    <div className="flex justify-between">
-      <div>{content}</div>
-      <div className="flex gap-[8px]">
-        {keys.map((k) => (
-          // TODO: 优化快捷键显示
-          <div className="border px-2 py-1 rounded-lg" key={k}>
-            {k}
-          </div>
+    <div className="flex items-center justify-between gap-4">
+      <div className="text-sm">{content}</div>
+      <div className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
+        {prefix && (
+          <span className="text-xs text-muted-foreground">{prefix}</span>
+        )}
+        {keys.map((k, i) => (
+          <Fragment key={k}>
+            {i > 0 && (
+              <span className="text-xs text-muted-foreground">{separator}</span>
+            )}
+            <KeyCap>{k}</KeyCap>
+          </Fragment>
         ))}
       </div>
     </div>
@@ -61,29 +87,32 @@ export function Shortcuts() {
         <DialogHeader className="min-h-0">
           <DialogTitle>{t("shortcuts.title")}</DialogTitle>
           <div className="flex gap-2 flex-col pt-4 overflow-y-auto min-h-0 pr-1">
-            <ShortCut content={t("shortcuts.pan")} keys={["Space + Drag"]} />
+            <ShortCut content={t("shortcuts.pan")} keys={["Space", "Drag"]} />
             <ShortCut content={t("shortcuts.resetZoomPan")} keys={["Esc"]} />
             <ShortCut content={t("shortcuts.zoomIn")} keys={["PageUp"]} />
             <ShortCut content={t("shortcuts.zoomOut")} keys={["PageDown"]} />
             <ShortCut
               content={t("shortcuts.zoomInOut")}
-              keys={["Space + Scroll"]}
+              keys={["Space", "Scroll"]}
             />
             <ShortCut
               content={t("shortcuts.panHorizontally")}
-              keys={["Shift + Scroll"]}
+              keys={["Shift", "Scroll"]}
             />
             <ShortCut
               content={t("shortcuts.decreaseBrushSize")}
-              keys={["[ / ← / ↑"]}
+              keys={["[", "←", "↑"]}
+              separator="/"
             />
             <ShortCut
               content={t("shortcuts.increaseBrushSize")}
-              keys={["] / → / ↓"]}
+              keys={["]", "→", "↓"]}
+              separator="/"
             />
             <ShortCut
               content={t("shortcuts.viewOriginalImage")}
-              keys={["Hold Tab"]}
+              keys={["Tab"]}
+              prefix="Hold"
             />
 
             <ShortCut content={t("shortcuts.undo")} keys={[CmdOrCtrl(), "Z"]} />
