@@ -1,3 +1,4 @@
+import json
 import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -28,7 +29,20 @@ from iopaint.schema import (
     RemoveBGModel,
     ExportFormat,
     EXPORT_FORMATS,
+    DynamicContextConfig,
 )
+
+
+def _load_dynamic_context(path: Optional[Path]) -> DynamicContextConfig:
+    """读取 `--dynamic-context` 的 JSON，字段名即 DynamicContextConfig 字段。"""
+    if path is None:
+        return DynamicContextConfig()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return DynamicContextConfig(**data)
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        logger.error(cli_text("cli.error.dynamic_context", path=path, error=e))
+        raise SystemExit(1)
 
 
 def _resolve_cli_device(device: str, gpu_id: Optional[int]):
@@ -350,6 +364,11 @@ def start(
         help=cli_text("cli.help.hd_strategy_crop_merge_max_pixels"),
         rich_help_panel=cli_text("cli.panel.hd"),
     ),
+    dynamic_context: Optional[Path] = Option(
+        None,
+        help=cli_text("cli.help.dynamic_context"),
+        rich_help_panel=cli_text("cli.panel.hd"),
+    ),
     enable_interactive_seg: bool = Option(
         False,
         "--enable-interactive-seg",
@@ -538,6 +557,7 @@ def start(
         hd_strategy_crop_margin=hd_strategy_crop_margin,
         hd_strategy_crop_merge=hd_strategy_crop_merge,
         hd_strategy_crop_merge_max_pixels=hd_strategy_crop_merge_max_pixels,
+        dynamic_context=_load_dynamic_context(dynamic_context),
         enable_interactive_seg=enable_interactive_seg,
         interactive_seg_model=interactive_seg_model,
         interactive_seg_device=interactive_seg_device,

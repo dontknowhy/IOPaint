@@ -110,6 +110,7 @@
       "hd_strategy_crop_margin": "hd_strategy=Crop 时掩膜包围盒外的边距（像素）",
       "hd_strategy_crop_merge": "合并重叠裁块为一次前向（会改掩膜内像素）",
       "hd_strategy_crop_merge_max_pixels": "合并裁块的面积上限（像素）",
+      "dynamic_context": "DynamicContextConfig 字段的 JSON 文件，hd_strategy=Dynamic 时生效",
       "enable_interactive_seg": "启用交互式分割（Segment Anything）",
       "interactive_seg_model": "Segment Anything 模型，越大越准但越慢",
       "interactive_seg_device": "交互式分割使用的设备",
@@ -140,6 +141,7 @@
     "error": {
       "export_format": "无效的 --export-format '{value}'，可选值：{choices}",
       "model_download": "下载模型 {model} 失败：{error}",
+      "dynamic_context": "无效的 --dynamic-context '{path}'：{error}",
       "input_missing": "无效的 --input：{input} 不存在",
       "mask_dir_missing": "无效的 --mask-dir：{mask_dir} 不存在",
       "output_dir_required": "无效的 --output-dir：--input 是目录时必须设置 --output-dir",

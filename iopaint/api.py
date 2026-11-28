@@ -99,6 +99,7 @@ from iopaint.schema import (
     InteractiveSegModel,
     RealESRGANModel,
     Choices,
+    HDStrategy,
 )
 
 CURRENT_DIR = Path(__file__).parent.absolute().resolve()
@@ -791,6 +792,8 @@ class Api:
         req.hd_strategy_crop_merge_max_pixels = (
             self.config.hd_strategy_crop_merge_max_pixels
         )
+        # 动态上下文参数同样以服务端配置为准（HTTP 表单不支持嵌套模型）
+        req.dynamic_context = self.config.dynamic_context
         mask: Optional[np.ndarray] = None
         if mask_bytes is not None:
             mask, _, _, _ = _decode_uploaded_image(

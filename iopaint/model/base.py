@@ -1,5 +1,6 @@
 import abc
-from typing import List, Optional, Tuple
+import json
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import torch
@@ -14,7 +15,13 @@ from iopaint.helper import (
     pad_img_to_modulo,
     switch_mps_device,
 )
-from iopaint.schema import InpaintRequest, HDStrategy, SDSampler
+from iopaint.schema import DynamicContextConfig, InpaintRequest, HDStrategy, SDSampler
+from .helper.dynamic_context import (
+    ContextDecision,
+    decide_context,
+    seam_rerun_pad,
+    seam_score,
+)
 from .helper.g_diffuser_bot import expand_image
 from .utils import get_scheduler
 
@@ -108,6 +115,8 @@ class InpaintModel:
 
         inpaint_result = None
         # logger.info(f"hd_strategy: {config.hd_strategy}")
+        if config.hd_strategy == HDStrategy.DYNAMIC:
+            return self._dynamic_context_call(image, mask, config)
         if config.hd_strategy == HDStrategy.CROP:
             if max(image.shape) > config.hd_strategy_crop_trigger_size:
                 logger.info("Run crop strategy")
@@ -157,6 +166,138 @@ class InpaintModel:
             inpaint_result = self._forward_region(image, mask, config)
 
         return inpaint_result
+
+    def _dynamic_context_call(
+        self, image: np.ndarray, mask: np.ndarray, config: InpaintRequest
+    ) -> np.ndarray:
+        """`hd_strategy=Dynamic`：每个掩膜轮廓按动态 padding 单独裁剪推理。
+
+        与 CROP 的区别：边距来自 `dynamic_context` 的几何规则 + ring 复杂度（不再
+        固定 128），窗口超过 `max_input_side` 时先缩小推理再放大回贴，回贴只覆盖
+        mask 及羽化边（区域外逐像素等于原图），可选接缝兜底重跑一次。
+        """
+        cfg = config.dynamic_context
+        inpaint_result = image[:, :, ::-1].copy()
+        for box in boxes_from_mask(mask):
+            decision = decide_context(image, mask, box, cfg)
+            result, rect, seam_info = self._forward_dynamic_crop(
+                image, mask, decision, cfg, config
+            )
+            self._paste_mask_region(inpaint_result, result, mask, rect, cfg)
+            record = decision.to_dict()
+            record.update(seam_info)
+            logger.info(
+                "dynamic_context " + json.dumps(record, ensure_ascii=False)
+            )
+        return inpaint_result
+
+    def _forward_dynamic_crop(
+        self,
+        image: np.ndarray,
+        mask: np.ndarray,
+        decision: ContextDecision,
+        cfg: DynamicContextConfig,
+        config: InpaintRequest,
+    ) -> Tuple[np.ndarray, Tuple[int, int, int, int], Dict[str, object]]:
+        """跑一个动态裁块；接缝超阈值时按 1.5 倍 padding 重跑一次。"""
+        crop_image, crop_mask = self._crop_region(image, mask, decision.rect)
+        result = self._dynamic_region_forward(crop_image, crop_mask, cfg, config)
+        rect = decision.rect
+        seam_info: Dict[str, object] = {}
+        if not cfg.enable_seam_fallback:
+            return result, rect, seam_info
+
+        score, band_grad, ring_grad = seam_score(result, crop_mask, cfg)
+        seam_info.update(
+            {
+                "seam_score": round(score, 4),
+                "seam_band_grad": round(band_grad, 2),
+                "seam_ring_grad": round(ring_grad, 2),
+                "seam_rerun": False,
+                "seam_failed": False,
+            }
+        )
+        if score <= cfg.seam_ratio or band_grad < cfg.seam_min_grad:
+            # 平坦区域里比值会被极小的 ring 梯度放大，窄带梯度本身很低时不算接缝
+            return result, rect, seam_info
+
+        new_pad = seam_rerun_pad(decision.pad, cfg)
+        if new_pad <= decision.pad:
+            # 已经顶到 max_pad，重跑也换不来更多上下文
+            seam_info["seam_failed"] = True
+            return result, rect, seam_info
+
+        rect = crop_rect(np.asarray(decision.bbox), new_pad, mask.shape)
+        crop_image, crop_mask = self._crop_region(image, mask, rect)
+        result = self._dynamic_region_forward(crop_image, crop_mask, cfg, config)
+        score2, band_grad2, ring_grad2 = seam_score(result, crop_mask, cfg)
+        seam_info.update(
+            {
+                "seam_rerun": True,
+                "pad_after_rerun": new_pad,
+                "seam_score_after_rerun": round(score2, 4),
+                "seam_band_grad_after_rerun": round(band_grad2, 2),
+                "seam_ring_grad_after_rerun": round(ring_grad2, 2),
+                "seam_failed": score2 > cfg.seam_ratio
+                and band_grad2 >= cfg.seam_min_grad,
+            }
+        )
+        return result, rect, seam_info
+
+    def _dynamic_region_forward(
+        self,
+        crop_image: np.ndarray,
+        crop_mask: np.ndarray,
+        cfg: DynamicContextConfig,
+        config: InpaintRequest,
+    ) -> np.ndarray:
+        """窗口超过 max_input_side 时缩到上限推理，再把结果放大回窗口尺寸。"""
+        if max(crop_image.shape[:2]) <= cfg.max_input_side:
+            return self._forward_region(crop_image, crop_mask, config)
+        origin_size = crop_image.shape[:2]
+        resize_image = resize_max_size(crop_image, size_limit=cfg.max_input_side)
+        resize_mask = resize_max_size(crop_mask, size_limit=cfg.max_input_side)
+        result = self._forward_region(resize_image, resize_mask, config)
+        return cv2.resize(
+            result,
+            (origin_size[1], origin_size[0]),
+            interpolation=cv2.INTER_CUBIC,
+        )
+
+    @staticmethod
+    def _paste_mask_region(
+        inpaint_result: np.ndarray,
+        result: np.ndarray,
+        mask: np.ndarray,
+        rect: Tuple[int, int, int, int],
+        cfg: DynamicContextConfig,
+    ) -> None:
+        """只把 mask（含 feather 羽化边）贴回去，窗口其余像素保持原图。
+
+        result 是裁块坐标下的 BGR；羽化只改 mask 外 paste_feather 像素内的一圈，
+        再远一点逐像素沿用原图。
+        """
+        l, t, r, b = rect
+        target = inpaint_result[t:b, l:r]
+        source = inpaint_result[t:b, l:r].copy()
+        crop_mask = mask[t:b, l:r]
+        binary = (crop_mask >= 127).astype(np.float32)
+
+        feather = int(cfg.paste_feather)
+        if feather > 0:
+            k = 2 * feather + 1
+            alpha = cv2.GaussianBlur(binary, (k, k), 0)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+            region = cv2.dilate(binary.astype(np.uint8), kernel) > 0
+        else:
+            alpha = binary
+            region = binary > 0
+
+        blended = (
+            result.astype(np.float32) * alpha[:, :, np.newaxis]
+            + source.astype(np.float32) * (1.0 - alpha[:, :, np.newaxis])
+        )
+        target[region] = blended[region].astype(np.uint8)
 
     def _fixed_size_call(
         self, image: np.ndarray, mask: np.ndarray, config: InpaintRequest

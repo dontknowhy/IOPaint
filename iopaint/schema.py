@@ -218,6 +218,9 @@ class HDStrategy(str, Enum):
     RESIZE = "Resize"
     # Crop masking area(with a margin controlled by hd_strategy_crop_margin) from the original image to do inpainting
     CROP = "Crop"
+    # 每个掩膜轮廓单独裁一块送进网络，边距由几何规则与 ring 复杂度决定
+    # （见 model/helper/dynamic_context.py），输入窗口不再固定 128。
+    DYNAMIC = "Dynamic"
 
 
 class LDMSampler(str, Enum):
@@ -254,6 +257,88 @@ class PowerPaintTask(Choices):
     shape_guided = "shape-guided"
     object_remove = "object-remove"
     outpainting = "outpainting"
+
+
+class DynamicContextConfig(BaseModel):
+    """`hd_strategy=Dynamic` 的全部可调参数。
+
+    决策流程：几何规则先给一个 pad，再在 ring 上算复杂度得到第二个 pad，取较大者
+    并钳制。所有参考值与阈值都在这里，运行时不再有魔法数；同一输入、同一配置得到
+    同一裁剪、同一 padding、同一推理路径。
+    """
+
+    # 基础上下文边距（像素）；复杂度低时保持该值不扩大
+    base_pad: int = Field(128, ge=0, le=65536)
+    min_pad: int = Field(64, ge=0, le=65536)
+    max_pad: int = Field(512, ge=0, le=65536)
+    # ring 宽度：膨胀 mask 得到 ring，复杂度指标只在 ring 上算
+    ring_width: int = Field(48, ge=1, le=4096)
+    # 指标计算前的缩略图最长边（局部 patch 超过该值才缩放）
+    thumb_size: int = Field(384, ge=32, le=8192)
+    # 几何规则：面积占比超过 mid 时 pad×scale；超过 high 时 pad 至少 high_pad
+    area_ratio_mid: float = Field(0.05, gt=0, le=1)
+    area_ratio_high: float = Field(0.15, gt=0, le=1)
+    area_pad_scale: float = Field(1.5, ge=1.0, le=8.0)
+    area_high_pad: int = Field(256, ge=0, le=65536)
+    # 熵：16×16 块内 ring 像素的灰度直方图熵
+    block_size: int = Field(16, ge=4, le=256)
+    min_block_pixels: int = Field(32, ge=1)
+    entropy_ref: float = Field(6.0, gt=0)  # 归一化参考（bit）
+    # 结构张量：高斯窗边长，coherence=(λ1-λ2)/(λ1+λ2)
+    structure_window: int = Field(7, ge=3, le=31)
+    # 梯度幅值归一化参考（Sobel 口径，0..1020）
+    grad_ref: float = Field(64.0, gt=0)
+    # 块匹配：归一化 SSD（除以 255²）的参考值。实测非规则纹理约 1e-3，
+    # 0.01 会让这一项几乎恒为 0，取 0.002 让中高纹理能被区分出来
+    match_dist_ref: float = Field(0.002, gt=0)
+    # 每块最多取多少个边界查询块（等距抽样，确定性）
+    max_queries: int = Field(24, ge=1, le=256)
+    # complexity = w1*H + w2*match + w3*interaction
+    w_entropy: float = Field(0.3, ge=0, le=1)
+    w_match: float = Field(0.4, ge=0, le=1)
+    w_interaction: float = Field(0.3, ge=0, le=1)
+    # pad_dynamic = base_pad * (1 + alpha * complexity)
+    alpha: float = Field(0.5, ge=0, le=8.0)
+    # 低于 low 保持 base_pad；高于 high 至少取 high_pad。
+    # 默认值按样本目录的实测分布标定：平坦背景 0.04~0.05，规则纹理
+    # 0.10~0.21，复杂非规则纹理 0.33~0.46
+    complexity_low: float = Field(0.2, ge=0, le=1)
+    complexity_high: float = Field(0.45, ge=0, le=1)
+    high_pad: int = Field(256, ge=0, le=65536)
+    # 几何 pad 达到该值时跳过复杂度计算（已经足够大）
+    skip_complexity_at_pad: int = Field(384, ge=0, le=65536)
+    enable_complexity: bool = True
+    # 接缝兜底：seam_score=边界内侧窄带平均梯度/ring 平均梯度，超阈值重跑一次
+    enable_seam_fallback: bool = True
+    seam_ratio: float = Field(1.5, gt=0)
+    # 比值单独用会在平坦背景上误报（ring 梯度本身接近 0）；窄带梯度
+    # 低于该绝对值（Sobel 均值，0..1020）时视为无可视接缝
+    seam_min_grad: float = Field(10.0, ge=0)
+    seam_band: int = Field(2, ge=1, le=64)
+    # 单次前向的输入最长边上限；超过则先缩小推理、结果放大回贴
+    max_input_side: int = Field(2048, ge=64, le=65536)
+    # 回贴羽化半径（像素，0=硬边）；只影响 mask 边界 ±feather 的范围
+    paste_feather: int = Field(3, ge=0, le=64)
+    # 调试/分档验证用：非空时跳过决策，所有裁块强制用该 padding
+    force_pad: Optional[int] = Field(None, ge=0, le=65536)
+
+    @model_validator(mode="after")
+    def _check_order(self) -> "DynamicContextConfig":
+        if self.min_pad > self.max_pad:
+            raise ValueError(
+                f"min_pad ({self.min_pad}) must not exceed max_pad ({self.max_pad})"
+            )
+        if self.complexity_low > self.complexity_high:
+            raise ValueError(
+                "complexity_low must not exceed complexity_high "
+                f"({self.complexity_low} > {self.complexity_high})"
+            )
+        if self.area_ratio_mid >= self.area_ratio_high:
+            raise ValueError(
+                "area_ratio_mid must be smaller than area_ratio_high "
+                f"({self.area_ratio_mid} >= {self.area_ratio_high})"
+            )
+        return self
 
 
 class ApiConfig(BaseModel):
@@ -317,6 +402,12 @@ class ApiConfig(BaseModel):
     hd_strategy_crop_merge: bool = False
     # 合并后单个裁块的面积上限，防止相邻笔迹一路并成整张图把显存吃穿
     hd_strategy_crop_merge_max_pixels: int = 4 * 1024 * 1024
+    # hd_strategy=Dynamic 的全部参数（见 DynamicContextConfig）。启动时用
+    # --dynamic-context <json> 覆盖；exclude=True 让启动时打印的 config.json
+    # 保持扁平（外部 typer-config wrapper 只认标量字段）。
+    dynamic_context: DynamicContextConfig = Field(
+        default_factory=lambda: DynamicContextConfig(), exclude=True
+    )
     enable_interactive_seg: bool
     interactive_seg_model: InteractiveSegModel
     interactive_seg_device: Device
@@ -551,6 +642,11 @@ class InpaintRequest(InpaintParams):
 
     mask_strokes: Optional[List[MaskStroke]] = Field(
         None, max_length=10_000, description="vector mask strokes in image coords"
+    )
+    # hd_strategy=Dynamic 的参数。HTTP 请求由服务端用 ApiConfig 覆盖（多部件
+    # 表单不支持嵌套模型），批量模式可直接在 --config JSON 里给这一段。
+    dynamic_context: DynamicContextConfig = Field(
+        default_factory=lambda: DynamicContextConfig()
     )
 
     @model_validator(mode="after")

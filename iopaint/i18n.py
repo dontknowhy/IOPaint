@@ -237,6 +237,8 @@ def build_en_cli_catalog() -> Dict[str, Any]:
                 "hd_strategy_crop_merge": "Merge overlapping crops into one pass "
                 "(changes pixels inside the mask)",
                 "hd_strategy_crop_merge_max_pixels": "Pixel area cap for a merged crop",
+                "dynamic_context": "JSON file of DynamicContextConfig fields, used "
+                "when hd_strategy=Dynamic",
                 "enable_interactive_seg": "Enable interactive segmentation (Segment "
                 "Anything)",
                 "interactive_seg_model": "Segment Anything model, larger is more "
@@ -275,6 +277,7 @@ def build_en_cli_catalog() -> Dict[str, Any]:
                 "export_format": "Invalid --export-format '{value}'. "
                 "Choose one of: {choices}",
                 "model_download": "Failed to download model {model}: {error}",
+                "dynamic_context": "Invalid --dynamic-context '{path}': {error}",
                 "input_missing": "invalid --input: {input} not exists",
                 "mask_dir_missing": "invalid --mask-dir: {mask_dir} not exists",
                 "output_dir_required": "invalid --output-dir: --output-dir must be set "
