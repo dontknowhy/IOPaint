@@ -17,6 +17,16 @@ Every other step stays the original traced module, so it is unchanged bit for
 bit. The replacement is only used when it reproduces the traced model on a
 random input at init time; otherwise `build_lama_replay` returns None and the
 caller keeps the plain module.
+
+`torch.jit.optimize_for_inference` on the whole module is not used: it fuses the
+generator into a single 2209-node graph, 5% faster than the raw module at 512²
+and 1024² (119.4 -> 113.6 ms, 450.1 -> 428.3 ms), but the fused children no
+longer match this replay's expected layout, so `build_lama_replay` returns None
+and the call loses the two replacements above. End to end that is slower than
+the replay on the sample set (1.99 s vs 1.95 s for ten images, 9/10 slower) and
+drifts 1 LSB on 85 pixels. Optimizing each child in place keeps the replay but
+changes nothing (1.00x) because the remaining children are already single conv /
+batch-norm / ReLU calls.
 """
 
 import numpy as np
