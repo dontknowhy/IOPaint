@@ -584,6 +584,21 @@ def pad_img_to_modulo(
     )
 
 
+def dilate_mask(mask: np.ndarray, pixels: int) -> np.ndarray:
+    """把二值 mask 外扩 pixels 像素（椭圆核，0 原样返回）。
+
+    用户手画的 mask 和分割结果通常只盖住水印/文字的不透明主体，抗锯齿边和 JPEG
+    振铃留在外面，推理后这些像素原样保留，看起来像孤立的小点。外扩几个像素再
+    推理能把这一圈一起重建掉。
+    """
+    pixels = int(pixels)
+    if pixels <= 0:
+        return mask
+    size = 2 * pixels + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+    return cv2.dilate(mask, kernel)
+
+
 def boxes_from_mask(mask: np.ndarray) -> List[np.ndarray]:
     """
     Args:

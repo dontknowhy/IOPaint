@@ -53,7 +53,10 @@ models keep their own path). For every box from `boxes_from_mask(mask)`:
    forward pass.
 4. `_paste_mask_region` copies back only the mask plus `paste_feather` (3px,
    Gaussian) — outside that region every pixel equals the input, so a dynamic
-   run never re-encodes untouched image content.
+   run never re-encodes untouched image content. The feather fades **outward
+   only** (`alpha = max(blur(mask), mask)`): a plain blurred alpha is ~0.5 on
+   the mask boundary and blends half of the original watermark back in, which
+   reads as a translucent ghost.
 
 Each contour logs one INFO line:
 
@@ -66,6 +69,17 @@ dynamic_context {"bbox": [...], "rect": [...], "pad": 142, "complexity": 0.216,
 
 `ContextDecision.to_dict()` is the full field list; the line is JSON so a
 benchmark or a log reader can parse it without importing the module.
+
+## Mask coverage
+
+`InpaintRequest.mask_dilate` (default 2, 0 disables) grows the binary mask with
+an elliptical kernel in `Api._inpaint_blocking` and `batch_processing`, before
+any strategy runs. Hand-drawn masks and segmentation output usually stop at the
+opaque body of a watermark/logo; the anti-aliased rim and JPEG ringing just
+outside stay unmasked and survive inference as isolated dots. Two pixels also
+restores thin structures the mask cut through — on a tight mask over a yellow
+curb edge, the edge was notched at `dilate=0` and continuous at `dilate>=1`.
+This is independent of `hd_strategy`, so Crop users get it too.
 
 ## Configuration
 

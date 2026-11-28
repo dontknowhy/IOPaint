@@ -69,6 +69,7 @@ from iopaint.helper import (
     is_private_host,
     jpeg_sampling_from_bytes,
     rasterize_mask_strokes,
+    dilate_mask,
     EXTERNAL_MAX_IMAGE_PIXELS,
     PRIVATE_MAX_IMAGE_PIXELS,
 )
@@ -884,6 +885,8 @@ class Api:
                 # 栅格化抛出的异常也必须走 finally 释放 lease。
                 assert req.mask_strokes is not None
                 mask = rasterize_mask_strokes(image.shape, req.mask_strokes)
+            # 笔迹/上传的 mask 常漏掉水印抗锯齿边，外扩几像素再推理
+            mask = dilate_mask(mask, req.mask_dilate)
             self._validate_rect(
                 image.shape,
                 enabled=req.use_croper,

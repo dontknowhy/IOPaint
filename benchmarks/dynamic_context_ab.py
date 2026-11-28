@@ -41,10 +41,8 @@ def find_pairs(sample_dir: Path) -> List[Dict[str, Optional[Path]]]:
     pairs = []
     for mask_path in sorted(sample_dir.glob("*_mask.png")):
         stem = mask_path.name[: -len("_mask.png")]
-        image = next(
-            (sample_dir / (stem + ext) for ext in IMAGE_EXTS if (sample_dir / (stem + ext)).exists()),
-            None,
-        )
+        candidates = [sample_dir / stem] + [sample_dir / (stem + ext) for ext in IMAGE_EXTS]
+        image = next((c for c in candidates if c.exists()), None)
         if image is None:
             continue
         pairs.append(

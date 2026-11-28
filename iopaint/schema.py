@@ -651,6 +651,9 @@ class InpaintRequest(InpaintParams):
     dynamic_context: DynamicContextConfig = Field(
         default_factory=lambda: DynamicContextConfig()
     )
+    # mask 外扩像素数：覆盖水印/文字的抗锯齿边和 JPEG 振铃。这些像素不属于
+    # mask，推理后原样保留，会像孤立的小点。0 = 关闭。
+    mask_dilate: int = Field(2, ge=0, le=64)
 
     @model_validator(mode="after")
     def validate_mask_strokes_total(self) -> "InpaintRequest":

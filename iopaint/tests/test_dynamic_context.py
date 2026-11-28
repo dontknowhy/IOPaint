@@ -4,14 +4,17 @@
 `dynamic_context` 的几何决策与 `InpaintModel._dynamic_context_call` 的贴回范围上。
 """
 
+import io
 from pathlib import Path
 from typing import Any, Tuple
 
 import numpy as np
 import pytest
 from fastapi import FastAPI
+from PIL import Image
 
 from iopaint.api import Api
+from iopaint.helper import boxes_from_mask, dilate_mask
 from iopaint.model.base import InpaintModel
 from iopaint.model.helper.dynamic_context import (
     ContextDecision,
@@ -208,9 +211,9 @@ class TestDynamicCall:
         model = RecordingErase()
         image, mask = flat_case()
         out = model(image.copy(), mask.copy(), self.request())
-        # 羽化边允许过渡，mask 中心的像素必须完全是推理结果
-        assert out[198:202, 198:202].max() == 200
-        assert np.mean(out[mask >= 127] == 200) > 0.6
+        # 羽化只向 mask 外淡出：mask 内每个像素都必须是推理结果，否则边界一圈
+        # 会把待删除的水印按 50% 混回来
+        assert np.all(out[mask >= 127] == 200)
         # 离 mask 足够远的地方逐像素保持原图
         assert np.all(out[:140, :, :] == 0)
 
@@ -357,4 +360,42 @@ def test_unknown_config_key_is_rejected() -> None:
     from pydantic import ValidationError
 
     with pytest.raises(ValidationError):
-        DynamicContextConfig(base_pad=96, bse_pad=96)
+        # 故意拼错：绕过类型检查是为了验证运行时确实拒绝未知字段
+        DynamicContextConfig(**{"base_pad": 96, "bse_pad": 96})
+
+
+def test_dilate_mask_grows_by_pixels() -> None:
+    mask = np.zeros((64, 64), np.uint8)
+    mask[30:34, 30:34] = 255
+    assert np.array_equal(dilate_mask(mask, 0), mask)
+    grown = dilate_mask(mask, 2)
+    assert grown[28, 30] == 255
+    assert grown[27, 30] == 0
+    assert boxes_from_mask(grown)[0].tolist() == [28, 28, 36, 36]
+    assert InpaintRequest().mask_dilate == 2
+
+
+def test_api_dilates_mask_before_inference(tmp_path: Path) -> None:
+    """mask 外 1px 的残留点：外扩后必须被重建，关掉外扩则原样保留。"""
+    cfg = _minimal_config(tmp_path)
+    api = Api(FastAPI(), cfg)
+
+    image = np.full((64, 64, 3), 128, np.uint8)
+    image[:, :, 2] = np.arange(64, dtype=np.uint8)[None, :]
+    image[15, 15] = (255, 0, 0)  # mask 从 (16, 16) 开始，这个点在对角外侧 1px
+    buf = io.BytesIO()
+    Image.fromarray(image).save(buf, format="PNG")
+    image_bytes = buf.getvalue()
+
+    def run(pixels: int) -> np.ndarray:
+        out, *_ = api._inpaint_blocking(
+            InpaintRequest(mask_dilate=pixels),
+            image_bytes=image_bytes,
+            mask_bytes=_png_mask(),
+        )
+        return np.array(Image.open(io.BytesIO(out)))
+
+    before = run(0)
+    after = run(2)
+    assert tuple(before[15, 15]) == (255, 0, 0)
+    assert tuple(after[15, 15]) != (255, 0, 0)

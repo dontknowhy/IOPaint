@@ -17,7 +17,7 @@ from rich.progress import (
     TaskProgressColumn,
 )
 
-from iopaint.helper import pil_to_bytes
+from iopaint.helper import dilate_mask, pil_to_bytes
 from iopaint.i18n import cli_text
 from iopaint.model_manager import ModelManager
 from iopaint.schema import InpaintRequest
@@ -132,6 +132,7 @@ def batch_inpaint(
                 )
             mask_img[mask_img >= 127] = 255
             mask_img[mask_img < 127] = 0
+            mask_img = dilate_mask(mask_img, inpaint_request.mask_dilate)
 
             # bgr
             inpaint_result = model_manager(img, mask_img, inpaint_request)

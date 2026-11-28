@@ -11,10 +11,12 @@ from fastapi.testclient import TestClient
 from PIL import Image, JpegImagePlugin
 
 from iopaint.api import Api
+from iopaint.helper import dilate_mask
 from iopaint.tests.utils import multipart
 from iopaint.schema import (
     ApiConfig,
     Device,
+    InpaintRequest,
     InteractiveSegModel,
     RealESRGANModel,
 )
@@ -147,9 +149,11 @@ def test_jpeg_ten_rounds_keep_unmasked_pixels_exact(tmp_path: Path) -> None:
     assert out.status_code == 200
     canonical = _decode(out.content)
 
-    outside = np.ones(arr.shape[:2], dtype=bool)
+    painted = np.zeros(arr.shape[:2], dtype=np.uint8)
     for x1, y1, x2, y2 in boxes:
-        outside[y1:y2, x1:x2] = False
+        painted[y1:y2, x1:x2] = 255
+    # 默认 mask_dilate=2：重建区域比用户画的 mask 大 2px，outside 以膨胀后为准
+    outside = dilate_mask(painted, InpaintRequest().mask_dilate) == 0
     assert np.abs(canonical.astype(int) - first_decoded.astype(int))[outside].max() == 0
     assert api.revision_cache.stats["hits_revision"] >= 9
 
@@ -344,9 +348,19 @@ def test_dct_patch_export_keeps_outside_pixels(tmp_path: Path) -> None:
     assert out.headers["X-Export-Mode"] == "dct_patch"
 
     decoded = _decode(out.content)
-    mask = np.zeros(arr.shape[:2], dtype=bool)
-    mask[box[1] : box[3], box[0] : box[2]] = True
-    assert np.abs(decoded.astype(int) - first_decoded.astype(int))[~mask].max() == 0
+    mask = np.zeros(arr.shape[:2], dtype=np.uint8)
+    mask[box[1] : box[3], box[0] : box[2]] = 255
+    mask = dilate_mask(mask, InpaintRequest().mask_dilate) > 0
+    # DCT 补丁按 8x8 块整体替换：块内即使有未重建的像素也会随块重编码
+    ys, xs = np.nonzero(mask)
+    block = 8
+    y1 = int(math.floor(ys.min() / block)) * block
+    y2 = int(math.ceil((ys.max() + 1) / block)) * block
+    x1 = int(math.floor(xs.min() / block)) * block
+    x2 = int(math.ceil((xs.max() + 1) / block)) * block
+    outside = np.ones(arr.shape[:2], dtype=bool)
+    outside[y1:y2, x1:x2] = False
+    assert np.abs(decoded.astype(int) - first_decoded.astype(int))[outside].max() == 0
 
 
 def test_dct_patch_falls_back_for_progressive(tmp_path: Path) -> None:

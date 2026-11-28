@@ -192,7 +192,11 @@ confirms idle/free VRAM and `CUDA_VISIBLE_DEVICES=<idx>` selects the card.
   extender that changes the canvas rebuilds alpha from the old `(padding_l, padding_t)` geometry (new area opaque, never
   resized) and passes it through `commit(alpha=...)`, so later `/export` keeps the source alpha.
 - Interactive masks travel as `mask_strokes` (image-coordinate polylines, rasterized by
-  `helper.rasterize_mask_strokes` with `LINE_8` + round caps); `mask` stays as the fallback for extraMasks. `/inpaint`
+  `helper.rasterize_mask_strokes` with `LINE_8` + round caps); `InpaintRequest.mask_dilate`
+  (default 2) expands the mask in `_inpaint_blocking`/`batch_inpaint` before any strategy,
+  covering the anti-aliased rim of watermarks that would otherwise survive as dots, and
+  `_paste_mask_region` feathers outward only so the boundary does not blend the watermark
+  back in; `mask` stays as the fallback for extraMasks. `/inpaint`
   and `/export` are **multipart**: `image`/`mask` are file parts (`InpaintForm`/`ExportForm` in `iopaint/schema.py`),
   `mask_strokes` travels as a JSON form field and is parsed into `InpaintRequest`, and plugin/`/adjust_mask` endpoints
   keep their base64 JSON bodies. File parts are capped at `MAX_UPLOAD_BYTES` (48MB, the bytes a 64M-char base64 field

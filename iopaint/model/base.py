@@ -287,6 +287,9 @@ class InpaintModel:
         if feather > 0:
             k = 2 * feather + 1
             alpha = cv2.GaussianBlur(binary, (k, k), 0)
+            # 羽化只向 mask 外淡出：mask 内必须保持 1，否则边界一圈会把原图
+            # （待删除的水印/文字）按 50% 混回来，看起来像半透明残影。
+            alpha = np.maximum(alpha, binary)
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
             region = cv2.dilate(binary.astype(np.uint8), kernel) > 0
         else:
