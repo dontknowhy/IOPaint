@@ -145,6 +145,11 @@ confirms idle/free VRAM and `CUDA_VISIBLE_DEVICES=<idx>` selects the card.
   merges only *overlapping* crops (union no larger than the sum of the parts) into one forward pass,
   because merging strokes that are merely close computes extra pixels — measured 11% slower on 12MP;
   merged area is capped by `hd_strategy_crop_merge_max_pixels` (LaMa peaks around 1GB per megapixel).
+- `LaMa`/`AnimeLaMa` replace the traced module with `helper/lama_graph.py:build_lama_replay`, which calls the same 36
+  generator children in the same order as a plain `nn.Module` — the only way to change a traced step: the final 7x7 conv
+  runs as `conv2d(padding=3)` cropped back (16.6 → 10.2 ms at 512², interior pixels bit-identical) and the three
+  upsampling BatchNorms stay folded into the transposed-conv weights. It returns None unless a random 64² input
+  reproduces the traced output within 1e-3, so an unknown weight file keeps the plain module.
 - Image size limits are per-source, not global: `iopaint/__init__.py` disables Pillow's `MAX_IMAGE_PIXELS`, and every
   decode takes `max_pixels` from `_max_pixels_for_request` (`api.py`) — 100MP for external clients, unlimited for
   loopback/RFC1918 (a request carrying `Forwarded`/`X-Forwarded-For`/`X-Real-IP` counts as external, since a same-host

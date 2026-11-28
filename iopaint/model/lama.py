@@ -7,6 +7,7 @@ from iopaint.helper import (
 )
 from iopaint.schema import InpaintRequest
 from .base import InpaintModel
+from .helper.lama_graph import build_lama_replay
 from .helper.tensors import binary_mask, to_bgr_uint8, upload_uint8
 
 LAMA_MODEL_URL = os.environ.get(
@@ -34,7 +35,9 @@ class LaMa(InpaintModel):
         download_model(LAMA_MODEL_URL, LAMA_MODEL_MD5)
 
     def init_model(self, device, **kwargs):
-        self.model = load_jit_model(LAMA_MODEL_URL, device, LAMA_MODEL_MD5).eval()
+        model = load_jit_model(LAMA_MODEL_URL, device, LAMA_MODEL_MD5).eval()
+        replay = build_lama_replay(model)
+        self.model = replay if replay is not None else model
 
     @staticmethod
     def is_downloaded() -> bool:
@@ -61,9 +64,11 @@ class AnimeLaMa(LaMa):
         download_model(ANIME_LAMA_MODEL_URL, ANIME_LAMA_MODEL_MD5)
 
     def init_model(self, device, **kwargs):
-        self.model = load_jit_model(
+        model = load_jit_model(
             ANIME_LAMA_MODEL_URL, device, ANIME_LAMA_MODEL_MD5
         ).eval()
+        replay = build_lama_replay(model)
+        self.model = replay if replay is not None else model
 
     @staticmethod
     def is_downloaded() -> bool:
